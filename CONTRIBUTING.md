@@ -68,7 +68,7 @@ shellcheck .github/scripts/*.sh                # lint the scripts
 .github/scripts/check-tool-pins.sh             # check the tool version pins
 .github/scripts/notify-failure-test.sh         # test the failure issue job (needs jq)
 .github/scripts/release-guard-test.sh          # test the release guard step (needs git)
-.github/scripts/verify-and-publish-test.sh     # test the publish script (needs bash only)
+.github/scripts/verify-and-publish-test.sh     # test the publish script (standard tools only)
 ```
 
 If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
@@ -92,33 +92,39 @@ CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS i
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
 `go mod tidy` check and govulncheck.
 
-The `ci-scripts` job also runs on every pull request. It lints the scripts with
-`shellcheck .github/scripts/*.sh`. Then it runs the test of the pin check,
-`.github/scripts/check-tool-pins-test.sh`, and the pin check, `.github/scripts/check-tool-pins.sh`.
-Then it runs `.github/scripts/notify-failure-test.sh`. That test uses a fake `gh`. It runs the real
-`run:` block of the `notify-failure` job of `govulncheck.yml` and checks the job keys by text. It
-needs `bash`, `awk` and `jq`, and no network and no token. The job details are in
-[docs/releasing.md](docs/releasing.md#weekly-vulnerability-check). Then it runs
-`.github/scripts/release-guard-test.sh`. That test takes the real `run:` block of the guard step of
-`release.yml` ("Check that the build left the scripts unchanged") and runs it in scratch git repos.
-It needs `bash`, `awk` and `git`, and no network and no token. Last, it runs
-`.github/scripts/verify-and-publish-test.sh`. That test runs the script of the "Verify and publish
-the release" step of `release.yml` with a fake `gh`. It needs `bash`, and no network and no token.
+The `ci-scripts` job also runs on every pull request. It runs these scripts:
+
+- `shellcheck .github/scripts/*.sh` lints the scripts.
+- `.github/scripts/check-tool-pins-test.sh` tests the pin check.
+- `.github/scripts/check-tool-pins.sh` is the pin check.
+- `.github/scripts/notify-failure-test.sh` uses a fake `gh`. It runs the real `run:` block of the
+  `notify-failure` job of `govulncheck.yml` and checks the job keys by text. The job details are in
+  [docs/releasing.md](docs/releasing.md#weekly-vulnerability-check).
+- `.github/scripts/release-guard-test.sh` runs the real `run:` block of the guard step of
+  `release.yml` ("Check that the build left the scripts unchanged") in scratch git repos.
+- `.github/scripts/verify-and-publish-test.sh` runs the script of the "Verify and publish the
+  release" step of `release.yml` with a fake `gh`.
+
+None of them needs a network or a token.
 
 The pin check (`.github/scripts/check-tool-pins.sh`) only reads the files. It changes nothing. It
 fails when the GoReleaser pins do not follow these rules:
 
+- Each `goreleaser/goreleaser-action` step must have `version: ${{ env.GORELEASER_VERSION }}` in its
+  `with:` block.
 - In every `.github/workflows/*.yml` and `*.yaml` file, each line that has `goreleaser_version`
   (in any case) must be one of two lines. One is the pin line, `GORELEASER_VERSION: <full version>`,
   in the `env:` of a job. The other is the step input `version: ${{ env.GORELEASER_VERSION }}`.
 - A job with a `goreleaser/goreleaser-action` step needs the pin in its own `env:`.
 - A file under `.github/actions` that names the action fails, so that a new local action cannot
   skip the rule.
-- A YAML anchor, alias or merge key in a workflow file fails. A `uses:` value in double quotes with
-  a backslash, or without a closing quote on the line, fails too, and so does a quoted key with a
-  backslash. An escape can spell the action name without the plain text that the check looks for.
+- A workflow line that uses a YAML form the check cannot read fails: an anchor, alias or merge key,
+  a tag (`!!str`), a tab, a backslash inside a double-quoted text, or a quote that does not close on
+  its line. These forms can hide a step. If a plain value has `, *` or `{*` in it, put the value in
+  quotes.
 - The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a
-  style it cannot read, so write each step in block style.
+  style it cannot read, so write each step in block style. It also reads workflow files whose
+  names start with a dot.
 - It does not cover other ways to install GoReleaser, such as `docker://`, a remote reusable
   workflow, `brew install` or `go install`. Review is the control for those.
 

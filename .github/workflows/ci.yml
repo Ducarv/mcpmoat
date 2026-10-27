@@ -131,8 +131,8 @@ jobs:
   # .github/scripts/, tests the failure issue job of the weekly vulnerability
   # check, tests the guard step of the release job and tests the publish
   # script. notify-failure-test.sh needs jq and release-guard-test.sh needs git.
-  # verify-and-publish-test.sh needs only bash and a fake gh. This runner has
-  # all of them. It is a separate small job, with no Go setup and no
+  # verify-and-publish-test.sh needs only standard tools and a fake gh. This
+  # runner has all of them. It is a separate small job, with no Go setup and no
   # GoReleaser, so that it can be a required check on every branch.
   ci-scripts:
     runs-on: ubuntu-latest
@@ -165,9 +165,9 @@ jobs:
         run: .github/scripts/verify-and-publish-test.sh
 
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
-  # fails here and not at tag time. It then tests the release scripts against
-  # the snapshot and checks the snapshot artifacts. It uses no secrets: a
-  # snapshot does not publish, so the tap token is not needed.
+  # fails here and not at tag time. It then tests the snapshot check script and
+  # checks the snapshot artifacts. It uses no secrets: a snapshot does
+  # not publish, so the tap token is not needed.
   release-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15

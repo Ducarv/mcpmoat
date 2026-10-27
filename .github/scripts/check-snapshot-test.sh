@@ -35,7 +35,7 @@ if [ "$host_os" = linux ] && [ "$host_arch" = amd64 ]; then
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "${tmp:?}"' EXIT
 
 failed=0
 total=0

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests verify-and-publish.sh with a fake gh. The ci-scripts job in ci.yml
 # runs it. Maintainers can also run it on their machine, from any directory:
-# see CONTRIBUTING.md, Checks. It needs no network and no token.
+# see CONTRIBUTING.md, Checks. It needs no network and no token. It needs bash
+# and the standard tools mktemp, mkdir, cp, cat, ls, head, tail, find, sed,
+# sort, diff, cmp, grep, cut, tr, wc, printf, chmod and rm.
 #
 # Each case builds a temp tree with a copy of the script, a small dist/ and a
 # fake gh at the front of PATH. The fake keeps a draft or published release in
@@ -18,7 +20,7 @@ CDPATH='' cd -- "$(dirname -- "$0")/../.."
 src=$PWD
 script=${VERIFY_SCRIPT:-$src/.github/scripts/verify-and-publish.sh}
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "${tmp:?}"' EXIT
 
 S=$tmp/state # the state of the fake gh
 sha=0123456789abcdef0123456789abcdef01234567

@@ -22,10 +22,10 @@ set -euo pipefail
 # CDPATH is empty, so that cd neither prints a path nor goes to another place.
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 
-# check_assets downloads the release assets to $1 and checks that
-# they are exactly the files in dist/, no more and no less. Each
-# command has its own "|| return 1", because set -e is off inside
-# a function that runs as an if condition.
+# check_assets downloads the release assets to $1 and checks that they are
+# exactly the files in dist/, no more and no less. Each command has its own
+# "|| return 1", because set -e is off inside a function that runs as an if
+# condition.
 check_assets() {
   local want got f
   want=$(cd dist && find . -maxdepth 1 -type f \
@@ -55,9 +55,8 @@ check_immutable() {
   fi
 }
 
-# check_tag fails unless the tag still points at the commit that
-# this run built. The commits API resolves an annotated tag to its
-# commit.
+# check_tag fails unless the tag still points at the commit that this run
+# built. The commits API resolves an annotated tag to its commit.
 check_tag() {
   local tag_sha
   tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha) || return 1
@@ -68,8 +67,8 @@ check_tag() {
 }
 
 check_assets draft
-# --cert-identity is an exact match on the signing workflow and its
-# ref. Some gh versions match --signer-workflow as a prefix only.
+# --cert-identity is an exact match on the signing workflow and its ref. Some
+# gh versions match --signer-workflow as a prefix only.
 for f in draft/*; do
   gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
     --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
@@ -83,8 +82,8 @@ check_tag
 
 gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
 
-# An immutable release locks its tag and assets at publish, so these
-# checks are final.
+# An immutable release locks its tag and assets at publish, so these checks
+# are final.
 if ! check_immutable || ! check_tag || ! check_assets published; then
   echo "::error::The release is public, but it is not locked, or its tag or assets changed after the checks. Check it, and delete it if it is wrong."
   exit 1
