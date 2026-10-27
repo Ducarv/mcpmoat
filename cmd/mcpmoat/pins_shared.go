@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -90,19 +91,22 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 // reader of stdout or stderr never holds the lock.
 //
 // ok is false, after a message on stderr for the command cmd ("scan" or
-// "pin"), when the path is not known or the file cannot be read; the caller
-// then exits with 2. When another process held the lock for the whole wait, a
-// second line says so (pinsLockedText). When the error is context.Canceled or
-// context.DeadlineExceeded, the message is interruptedText. LoadLocked returns
-// such an error when ctx has ended before it takes the lock, or ends during
-// the wait (the process got a signal). The lock step checks ctx first, so
-// LoadLocked then never reads the file. Thus a corrupt file also gives
-// interruptedText in this case. Any other error (unsafe permissions, a corrupt
-// file, a newer version, the lock) gets the normal "cannot read the pins file"
-// message. An ended ctx does not change this in two cases. LoadLocked checks
-// the pins directory and its parents before the lock step, so their errors
-// come before the ctx check. And LoadLocked does not check ctx after it takes
-// the lock, so a read error after that point stays a read error.
+// "pin"), when the path is not known or the file cannot be read. The caller
+// then exits with 2. The message depends on the error of LoadLocked:
+//   - A context error (context.Canceled or context.DeadlineExceeded) gives
+//     interruptedText. LoadLocked returns it when ctx ended before or during
+//     the wait for the lock (the process got a signal). It then never reads
+//     the file, so a corrupt file also gives interruptedText here.
+//   - pins.ErrLocked (another process held the lock for the whole wait) gives
+//     the "cannot read the pins file" line and then pinsLockedText.
+//   - Any other error (unsafe permissions, a corrupt file, a newer version, a
+//     lock error) gives the "cannot read the pins file" line only.
+//
+// An error of the pins directory or its parents is a read error also when ctx
+// has ended: the lock is on an open handle of the pins directory, so
+// LoadLocked checks and opens the directory before the lock step, and only the
+// lock step checks ctx. LoadLocked does not check ctx after it takes the lock,
+// so a read error after that point also stays a read error.
 //
 // When the file system cannot lock the pins directory, LoadLocked goes on
 // without the lock. readPinsLocked then prints one warning: a parallel run can
@@ -127,7 +131,7 @@ func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store
 		}
 		return nil, release, false
 	}
-	if store.Unlocked() {
+	if store.RanWithoutLock() {
 		c.warnf(cmd, "the file system of the pins directory %s does not support file locks, so a parallel run can overwrite these pins",
 			termsafe.QuoteCut(filepath.Dir(store.Path()), maxWarnPathRunes))
 	}
@@ -153,10 +157,16 @@ func (c *cli) pinsRemovedWhileRunning(cmd string, firstExisted bool, later *pins
 	return true
 }
 
-// pinsFileLimit is the size limit of pins.json, as the messages show it. It
-// must match the limit in internal/pins (maxFileSize), which Set enforces with
-// pins.ErrStoreFull.
-const pinsFileLimit = "32 MiB"
+// pinsFullText is the shared part of the three messages for a server that
+// does not fit in pins.json (pins.ErrStoreFull): "the pins file is full
+// (32 MiB)". scan uses it at report time (reasonStoreFull) and at save time
+// (savePinned), and pin uses it in saveAccepted. The size comes from
+// pins.MaxFileSize, the limit that Set enforces, so the number is written in
+// one place. MaxFileSize>>20 is the limit in MiB (1 MiB is 1<<20 bytes).
+//
+// It is a var and not a const: Go cannot turn a number into text at compile
+// time, so fmt.Sprintf builds the text once, when the program starts.
+var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSize>>20)
 
 // pinsLockedText is the line that readPinsLocked prints after the read error
 // when another process held the lock on the pins directory for the whole wait.

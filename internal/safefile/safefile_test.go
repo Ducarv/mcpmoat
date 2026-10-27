@@ -828,18 +828,18 @@ func openRootT(t *testing.T, dir string) *os.Root {
 	return root
 }
 
-// openFileInRootT calls OpenFileInRoot and closes a returned file when the
-// test ends.
-func openFileInRootT(t *testing.T, root *os.Root, name string) (*os.File, bool, error) {
+// openIfExistsInRootT calls OpenIfExistsInRoot and closes a returned file when
+// the test ends.
+func openIfExistsInRootT(t *testing.T, root *os.Root, name string) (*os.File, bool, error) {
 	t.Helper()
-	f, found, err := OpenFileInRoot(root, name)
+	f, found, err := OpenIfExistsInRoot(root, name)
 	if f != nil {
 		t.Cleanup(func() { _ = f.Close() })
 	}
 	return f, found, err
 }
 
-func TestOpenFileInRoot(t *testing.T) {
+func TestOpenIfExistsInRoot(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -969,7 +969,7 @@ func TestOpenFileInRoot(t *testing.T) {
 			name := tt.setup(t, dir)
 			root := openRootT(t, dir)
 
-			f, found, err := openFileInRootT(t, root, name)
+			f, found, err := openIfExistsInRootT(t, root, name)
 
 			if tt.wantErr == nil {
 				if err != nil {
@@ -1002,10 +1002,11 @@ func TestOpenFileInRoot(t *testing.T) {
 	}
 }
 
-// TestOpenFileInRootFollowsSymlinkInsideRoot records that OpenFileInRoot
-// follows a symlink that stays inside the root. A caller that must refuse a
-// symlink has to check it itself, for example with root.Lstat and os.SameFile.
-func TestOpenFileInRootFollowsSymlinkInsideRoot(t *testing.T) {
+// TestOpenIfExistsInRootFollowsSymlinkInsideRoot records that
+// OpenIfExistsInRoot follows a symlink that stays inside the root. A caller
+// that must refuse a symlink has to check it itself, for example with
+// root.Lstat and os.SameFile.
+func TestOpenIfExistsInRootFollowsSymlinkInsideRoot(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1013,9 +1014,9 @@ func TestOpenFileInRootFollowsSymlinkInsideRoot(t *testing.T) {
 	symlinkTo(t, "real.json", dir, "pins.json")
 	root := openRootT(t, dir)
 
-	f, found, err := openFileInRootT(t, root, "pins.json")
+	f, found, err := openIfExistsInRootT(t, root, "pins.json")
 	if err != nil || !found {
-		t.Fatalf("OpenFileInRoot() = (found %v, error %v), want (true, nil)", found, err)
+		t.Fatalf("OpenIfExistsInRoot() = (found %v, error %v), want (true, nil)", found, err)
 	}
 
 	opened, err := f.Stat()
@@ -1045,10 +1046,10 @@ func TestOpenFileInRootFollowsSymlinkInsideRoot(t *testing.T) {
 	}
 }
 
-// TestOpenFileInRootFIFO checks that a FIFO with no writer opens at once
+// TestOpenIfExistsInRootFIFO checks that a FIFO with no writer opens at once
 // (O_NONBLOCK) and that the handle shows it is not a regular file. The caller
 // must refuse it after Stat.
-func TestOpenFileInRootFIFO(t *testing.T) {
+func TestOpenIfExistsInRootFIFO(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1062,7 +1063,7 @@ func TestOpenFileInRootFIFO(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		f, found, err := OpenFileInRoot(root, "pins.json")
+		f, found, err := OpenIfExistsInRoot(root, "pins.json")
 		done <- result{f, found, err}
 	}()
 
@@ -1070,13 +1071,13 @@ func TestOpenFileInRootFIFO(t *testing.T) {
 	select {
 	case got = <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("OpenFileInRoot blocked on a FIFO")
+		t.Fatal("OpenIfExistsInRoot blocked on a FIFO")
 	}
 	if got.f != nil {
 		t.Cleanup(func() { _ = got.f.Close() })
 	}
 	if got.err != nil || !got.found || got.f == nil {
-		t.Fatalf("OpenFileInRoot() = (%v, %v, %v), want an open file, true, nil", got.f, got.found, got.err)
+		t.Fatalf("OpenIfExistsInRoot() = (%v, %v, %v), want an open file, true, nil", got.f, got.found, got.err)
 	}
 	fi, err := got.f.Stat()
 	if err != nil {

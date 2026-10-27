@@ -201,8 +201,8 @@ func TestLoadLockedReadOnlyDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: the cleanup restores the private mode so t.TempDir can delete the directory
 
 	s, release := lockTestMustLoad(t, path)
-	if s.Unlocked() {
-		t.Error("Unlocked() = true, want false: a read-only handle can be locked")
+	if s.RanWithoutLock() {
+		t.Error("RanWithoutLock() = true, want false: a read-only handle can be locked")
 	}
 	if !s.Existed() {
 		t.Error("Existed() = false, want true")
@@ -250,8 +250,8 @@ func TestLoadLockedFirstRunCreatesDir(t *testing.T) {
 	if s.Existed() {
 		t.Error("Existed() = true on a first run, want false")
 	}
-	if s.Unlocked() {
-		t.Error("Unlocked() = true, want false")
+	if s.RanWithoutLock() {
+		t.Error("RanWithoutLock() = true, want false")
 	}
 	for _, dir := range []string{filepath.Dir(path), filepath.Dir(filepath.Dir(path))} {
 		fi, err := os.Stat(dir)
@@ -343,10 +343,10 @@ func TestLoadLockedParentsCheckedAfterCreate(t *testing.T) {
 func TestLoadLockedTryLockResult(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		tryErr       error
-		wantErr      error // nil means success
-		wantUnlocked bool
+		name               string
+		tryErr             error
+		wantErr            error // nil means success
+		wantRanWithoutLock bool
 	}{
 		{"unsupported", pins.ErrLockUnsupported, nil, true},
 		{"unsupported, wrapped", errors.Join(errors.New("flock"), pins.ErrLockUnsupported), nil, true},
@@ -376,8 +376,8 @@ func TestLoadLockedTryLockResult(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadLocked() error = %v, want nil", err)
 			}
-			if s.Unlocked() != tt.wantUnlocked {
-				t.Errorf("Unlocked() = %v, want %v", s.Unlocked(), tt.wantUnlocked)
+			if s.RanWithoutLock() != tt.wantRanWithoutLock {
+				t.Errorf("RanWithoutLock() = %v, want %v", s.RanWithoutLock(), tt.wantRanWithoutLock)
 			}
 			if !s.Existed() {
 				t.Error("Existed() = false, want true")

@@ -94,7 +94,7 @@ func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 
 	// Compare as int: converting uid to uint32 can overflow (gosec G115).
 	owner := int(st.Uid)
-	rootOwner := owner == 0 && uid != 0
+	ownedByRootNotUs := owner == 0 && uid != 0
 	foreignOwner := owner != uid && owner != 0
 	mode := info.Mode()
 	sticky := mode&fs.ModeSticky != 0
@@ -117,7 +117,7 @@ func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 	case foreignOwner:
 		problem = problemForeignOwner
 		fix = "ask the owner or root to run chown, " + privateConfigHint
-	case writable && rootOwner:
+	case writable && ownedByRootNotUs:
 		problem = problemWritable
 		fix = "ask root to run " + chmod + ", " + privateConfigHint
 	case writable:
@@ -128,6 +128,45 @@ func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 	}
 	return fmt.Errorf("pins parent directory %s is not safe: mode %04o, %s (fix: %s): %w",
 		path, shown, problem, fix, ErrInsecurePermissions)
+}
+
+// problemForeignSymlink is the problem text of a symlink on the path to the
+// pins directory that another user owns (checkSymlinkOwner).
+const problemForeignSymlink = "a symlink " + problemForeignOwner
+
+// checkSymlinkOwner returns an error that wraps ErrInsecurePermissions when
+// info says that the symlink at path belongs to another user than uid or root.
+// info is the os.Lstat result of path: Lstat describes the symlink itself, not
+// its target. label is the start of the error text, "pins directory" or "pins
+// parent directory". info must not be nil, and the caller has checked that it
+// is a symlink.
+//
+// Why the owner of the symlink matters: in a directory with the sticky bit,
+// such as /tmp, every user can create an entry, and the mode rule of
+// checkParentOwnerAndMode passes. The sticky bit says only who can rename or
+// remove an entry: its owner, the owner of the directory, or root. So another
+// user can create /tmp/cfg as a symlink to an empty directory that we own, and
+// later point it to another directory. Then the next run looks like a first
+// run and pins the current tools without an alert (T2). A symlink that we or
+// root own passes: only we, root or the owner of the directory (checked to be
+// us or root) can replace it, and we can change the path anyway.
+//
+// uid is a parameter, so a test can fake a foreign owner without root. The
+// check reads the owner only: the mode of a symlink is not used on Linux and
+// macOS.
+func checkSymlinkOwner(path, label string, info fs.FileInfo, uid int) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Fail closed: without the owner we cannot tell that the path is safe.
+		return fmt.Errorf("%s %s is not safe: the owner of the symlink is unknown: %w", label, path, ErrInsecurePermissions)
+	}
+	// Compare as int: converting uid to uint32 can overflow (gosec G115).
+	owner := int(st.Uid)
+	if owner == uid || owner == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s %s is not safe: %s (fix: ask the owner or root to remove or replace the symlink, %s): %w",
+		label, path, problemForeignSymlink, privateConfigHint, ErrInsecurePermissions)
 }
 
 // shellQuote returns s as one word for a POSIX shell: it wraps s in single

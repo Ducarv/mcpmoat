@@ -39,6 +39,14 @@ func TestReadPinsLockedContextError(t *testing.T) {
 		t.Cleanup(cancel)
 		return ctx
 	}
+	// unsafeDir makes a pins directory that the group and others can write,
+	// so LoadLocked refuses it before it takes the lock.
+	unsafeDir := func(t *testing.T, e *pinEnv) {
+		if err := os.MkdirAll(filepath.Dir(e.pinsPath()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		setPinsMode(t, e, pinsKindDir, 0o777)
+	}
 
 	tests := []struct {
 		name string
@@ -74,26 +82,16 @@ func TestReadPinsLockedContextError(t *testing.T) {
 			wait:  time.Minute,
 		},
 		{
-			name: "cancelled, unsafe pins directory",
-			ctx:  cancelled,
-			setup: func(t *testing.T, e *pinEnv) {
-				if err := os.MkdirAll(filepath.Dir(e.pinsPath()), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				setPinsMode(t, e, pinsKindDir, 0o777)
-			},
+			name:    "cancelled, unsafe pins directory",
+			ctx:     cancelled,
+			setup:   unsafeDir,
 			wantErr: true,
 		},
 		{
 			// The control: the same file error with a live context.
-			name: "live context, unsafe pins directory",
-			ctx:  func(t *testing.T) context.Context { return t.Context() },
-			setup: func(t *testing.T, e *pinEnv) {
-				if err := os.MkdirAll(filepath.Dir(e.pinsPath()), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				setPinsMode(t, e, pinsKindDir, 0o777)
-			},
+			name:    "live context, unsafe pins directory",
+			ctx:     func(t *testing.T) context.Context { return t.Context() },
+			setup:   unsafeDir,
 			wantErr: true,
 		},
 	}

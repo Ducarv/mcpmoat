@@ -184,7 +184,7 @@ func readFilesec(f *os.File) ([]byte, error) {
 func fgetattrlist(f *os.File, al *attrList, buf []byte) error {
 	rc, err := f.SyscallConn()
 	if err != nil {
-		return err
+		return fmt.Errorf("fgetattrlist: %w", err)
 	}
 	var errno syscall.Errno
 	ctrlErr := rc.Control(func(fd uintptr) {
@@ -201,7 +201,7 @@ func fgetattrlist(f *os.File, al *attrList, buf []byte) error {
 		}
 	})
 	if ctrlErr != nil {
-		return ctrlErr
+		return fmt.Errorf("fgetattrlist: %w", ctrlErr)
 	}
 	if errno != 0 {
 		return fmt.Errorf("fgetattrlist: %w", errno)

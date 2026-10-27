@@ -30,18 +30,19 @@ import (
 //     server. This is the first read of the command. Whether the file existed
 //     here goes to acceptTools.
 //  4. inspectOne: inspect only that server.
-//  5. acceptTools: read pins.json again, show the diffs, check --expect, then
-//     read the file once more with the lock on the pins directory, set the
-//     pins of this server only and save the file.
+//  5. acceptTools: read pins.json again, show the diffs and check --expect.
+//     Then saveAccepted reads the file once more with the lock on the pins
+//     directory, sets the pins of this server only and saves the file.
 //
 // When the pins file existed at the first read of the command and a later read
-// does not find it, acceptTools saves nothing and gives exit code 2 (see
+// does not find it, pin saves nothing and gives exit code 2 (see
 // pinsRemovedWhileRunning). Nothing is written unless every step before the
-// save worked. The server runs
-// in its own session, so the terminal does not signal it. When the process gets
-// SIGINT, SIGTERM or SIGHUP (see main), the context ends and inspect.Run stops
-// the server. The usage text (pinUsage and usage in cli.go) lists the flags and
-// the exit codes (FR-16).
+// save worked.
+//
+// The server runs in its own session, so the terminal does not signal it. When
+// the process gets SIGINT, SIGTERM or SIGHUP (see main), the context ends and
+// inspect.Run stops the server. The usage text (pinUsage and usage in cli.go)
+// lists the flags and the exit codes (FR-16).
 func (c *cli) runPin(_ options, args []string) int {
 	a, code, ok := c.parsePinArgs(args)
 	if !ok {
@@ -154,38 +155,22 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 
 // acceptTools sets the pins of the server to its tools and saves the store. It
 // prints the diff of each changed or new tool first, so the user sees what the
-// accept changes. It returns the exit code.
+// accept changes. Then saveAccepted does the save with the lock. It returns
+// the exit code.
 //
 // The server can run for a long time, so acceptTools reads pins.json again
 // after the inspection, without the lock, and prints the diffs against that
 // store. A slow reader of stdout must not hold the lock, so the lock comes
-// only after the diffs: acceptTools then reads the file a third time with the
-// lock on the pins directory (see readPinsLocked), and holds the lock until the
-// save is done. It releases the lock right after the save, before it prints the
-// notice and the "accepted" line, so a blocked stdout or stderr never holds
-// the lock. No other run that locks can save between this read and this save,
-// so the save keeps every entry that another run wrote, and no update is lost.
-// An accept always overwrites the entry of this one server. The counts of the
-// "accepted" line come from the locked store, because they describe the entry
-// that the save replaces. If another run changed that entry after the
-// diffs printed, a warning says that the diffs are against the older pins.
+// only after the diffs, in saveAccepted.
 //
 // firstExisted tells whether pins.json existed at the first read of the
 // command (in runPin, before the server started). When the file existed at the
-// first read of the command, or at the read for the diffs, and a later read
-// does not find it, it was removed while pin ran. A save would drop every
-// older pin, so acceptTools saves nothing and gives exit code 2 (see
-// pinsRemovedWhileRunning). It checks this twice. The first check comes right
-// after the read for the diffs and covers the inspection: it stops pin before
-// it prints a diff in which every tool looks new. The second check comes at the
-// locked read and covers the time that pin showed the diffs. A file that is
-// missing at every read is a real first run: the save creates it.
-//
-// A Set that would make pins.json larger than its size limit
-// (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
-// tells the user to remove old servers. When the save created a new pins file,
-// acceptTools prints a notice before the "accepted" line (see
-// printNewPinsFile).
+// first read and a later read does not find it, it was removed while pin ran.
+// A save would drop every older pin, so pin saves nothing and gives exit code 2
+// (see pinsRemovedWhileRunning). pin checks this twice. The first check is
+// here, right after the read for the diffs, and covers the inspection: it
+// stops pin before it prints a diff in which every tool looks new. The second
+// check is in saveAccepted, at the locked read.
 //
 // With a non-empty expect, it compares that digest with pins.Digest of the
 // tools that it just inspected. This closes a time-of-check to time-of-use gap:
@@ -243,7 +228,38 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	if c.interrupted(ctx, "pin") {
 		return exitError
 	}
+	return c.saveAccepted(ctx, name, id, tools, snap, shown, firstExisted)
+}
 
+// saveAccepted is the locked part of acceptTools, like savePinned for scan. It
+// reads pins.json a third time, now with the lock on the pins directory (see
+// readPinsLocked), sets the pins of the server id to snap, saves the file and
+// returns the exit code. name is the server name, already escaped and cut for
+// the messages. tools are the tools that snap pins. shown is the store that
+// acceptTools read for the diffs. firstExisted is the same as in acceptTools.
+//
+// saveAccepted holds the lock until the save is done. It releases the lock
+// right after the save, before it prints the notice and the "accepted" line,
+// so a blocked stdout or stderr never holds the lock. No other run that locks
+// can save between this read and this save, so the save keeps every entry that
+// another run wrote, and no update is lost. An accept always overwrites the
+// entry of this one server. The counts of the "accepted" line come from the
+// locked store, because they describe the entry that the save replaces. If
+// another run changed that entry after the diffs printed, a warning says that
+// the diffs are against the older pins.
+//
+// This is the second check for a removed pins file (see acceptTools). When the
+// file existed at the first read of the command or at the read for the diffs,
+// and the locked read does not find it, it was removed while pin showed the
+// diffs: saveAccepted saves nothing and gives exit code 2. A file that is
+// missing at every read is a real first run: the save creates it.
+//
+// A Set that would make pins.json larger than its size limit
+// (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
+// tells the user to remove old servers. When the save created a new pins file,
+// saveAccepted prints a notice before the "accepted" line (see
+// printNewPinsFile).
+func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store, firstExisted bool) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
 	// release is never nil. The deferred call frees the lock on every early
 	// return, so the lock covers the read, the Set and the Save. On success,
@@ -262,9 +278,9 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	}
 	counts := changeCounts(store, id, tools)
 
-	err = store.Set(id, snap)
+	err := store.Set(id, snap)
 	if errors.Is(err, pins.ErrStoreFull) {
-		c.cmdPrintf("pin", "cannot pin %s: the pins file is full (%s limit); remove servers you no longer use from pins.json", name, pinsFileLimit)
+		c.cmdPrintf("pin", "cannot pin %s: %s; remove servers you no longer use from pins.json", name, pinsFullText)
 		return exitError
 	}
 	if err != nil {
@@ -472,7 +488,7 @@ func (p *pinCounts) add(k pins.ChangeKind) {
 }
 
 // changeCounts counts what accepting tools changes in the pins of the server
-// id. It makes no diff and prints nothing. acceptTools uses it on the locked
+// id. It makes no diff and prints nothing. saveAccepted uses it on the locked
 // store, after pinChanges gave the diffs, because the counts describe the
 // entry that the save replaces.
 func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pinCounts {

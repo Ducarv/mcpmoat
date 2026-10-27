@@ -19,3 +19,10 @@ func checkOwnerAndMode(string, string, fs.FileInfo, int) error {
 func checkParentOwnerAndMode(string, fs.FileInfo, int) error {
 	return nil
 }
+
+// checkSymlinkOwner does nothing on systems that are not Unix. Windows reports
+// no Unix owner for a symlink. Windows is a non-goal (PRD section 2.2). See
+// the Unix version for the rule.
+func checkSymlinkOwner(string, string, fs.FileInfo, int) error {
+	return nil
+}

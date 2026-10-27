@@ -698,7 +698,7 @@ func TestLoadUnsafeFileBeforeSize(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Create() error = %v", err)
 			}
-			if err := f.Truncate(maxFileSize + 1<<20); err != nil {
+			if err := f.Truncate(MaxFileSize + 1<<20); err != nil {
 				_ = f.Close()
 				t.Fatalf("Truncate() error = %v", err)
 			}
@@ -993,15 +993,168 @@ func TestCheckParentsAs(t *testing.T) {
 		})
 	}
 
-	// checkParentsAs does not check the pins directory itself: checkDirHandle
-	// does that.
-	t.Run("pins directory itself is not checked", func(t *testing.T) {
+	// checkParentsAs does not check the owner and the mode of the pins
+	// directory itself: checkDirHandle does that. It checks only the symlink
+	// rule there (TestCheckParentsAsSymlinks).
+	t.Run("mode of the pins directory itself is not checked", func(t *testing.T) {
 		t.Parallel()
 		dir := newPinsDir(t, 0o777)
 		if err := checkParentsAs(dir, me); err != nil {
 			t.Errorf("checkParentsAs() error = %v, want nil", err)
 		}
 	})
+}
+
+// TestCheckSymlinkOwner covers the owner rule for a symlink on the path to the
+// pins directory. The owner is faked with a Stat_t, so no test needs root.
+func TestCheckSymlinkOwner(t *testing.T) {
+	t.Parallel()
+	me := os.Geteuid()
+	const other = 4242 // a non-root owner that is not the current user
+	if me == other {
+		t.Skip("the current user has the uid of the fake owner")
+	}
+	meOwner := uint32(me) //nolint:gosec // G115: a uid from Geteuid fits in the uint32 of Stat_t.
+	base := t.TempDir()
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(base, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		sys  any    // what info.Sys returns
+		want string // the exact error text, {path} for link; "" means no error
+	}{
+		{"own", &syscall.Stat_t{Uid: meOwner}, ""},
+		{"root", &syscall.Stat_t{Uid: 0}, ""},
+		{"foreign", &syscall.Stat_t{Uid: other},
+			"pins parent directory {path} is not safe: a symlink owned by another user (fix: ask the owner or root to remove or replace the symlink, or use a private XDG_CONFIG_HOME): insecure permissions"},
+		{"unknown owner fails closed", nil,
+			"pins parent directory {path} is not safe: the owner of the symlink is unknown: insecure permissions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkSymlinkOwner(link, "pins parent directory", fakeInfo{info, tt.sys}, me)
+			if tt.want == "" {
+				if err != nil {
+					t.Errorf("checkSymlinkOwner() error = %v, want nil", err)
+				}
+				return
+			}
+			wantInsecure(t, err, link)
+			if want := strings.ReplaceAll(tt.want, "{path}", link); err.Error() != want {
+				t.Errorf("error = %q\nwant    %q", err, want)
+			}
+		})
+	}
+}
+
+// TestCheckParentsAsSymlinks covers the symlink rule of the parent walk: a
+// symlink on the path to the pins directory, or the pins directory itself as
+// a symlink, must belong to the current user or root. Each symlink is made
+// by the test, so the current user owns it. A foreign owner is faked with
+// another uid: checkParentsAs then sees the symlink as owned by someone else.
+func TestCheckParentsAsSymlinks(t *testing.T) {
+	t.Parallel()
+	me := os.Geteuid()
+	tests := []struct {
+		name    string
+		foreign bool // check as another user, so the symlink has a foreign owner
+		leaf    bool // the pins directory itself is the symlink, not a component above it
+		missing bool // the pins directory below the symlink does not exist (a first run)
+		want    string
+	}{
+		{name: "own symlink component"},
+		{name: "own symlink component, first run", missing: true},
+		{name: "own symlink as the pins directory", leaf: true},
+		{name: "foreign symlink component", foreign: true,
+			want: "pins parent directory {path} is not safe: a symlink owned by another user"},
+		{name: "foreign symlink component, first run", foreign: true, missing: true,
+			want: "pins parent directory {path} is not safe: a symlink owned by another user"},
+		{name: "foreign symlink as the pins directory", foreign: true, leaf: true,
+			want: "pins directory {path} is not safe: a symlink owned by another user"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			uid := me
+			if tt.foreign {
+				if me == 0 {
+					t.Skip("a symlink owned by root is trusted, so root cannot fake a foreign owner")
+				}
+				uid = me + 1
+			}
+			// base/real is the target, base/link the symlink to it, as when
+			// another user made /tmp/cfg a symlink to a directory we own.
+			base := newNamedPinsDir(t, "base", 0o700)
+			realDir := filepath.Join(base, "real")
+			if err := os.Mkdir(realDir, 0o700); err != nil {
+				t.Fatalf("Mkdir() error = %v", err)
+			}
+			link := filepath.Join(base, "link")
+			if err := os.Symlink(realDir, link); err != nil {
+				t.Fatalf("Symlink() error = %v", err)
+			}
+			dir := filepath.Join(link, "mcpmoat")
+			switch {
+			case tt.leaf:
+				dir = link
+			case !tt.missing:
+				if err := os.Mkdir(filepath.Join(realDir, "mcpmoat"), 0o700); err != nil {
+					t.Fatalf("Mkdir() error = %v", err)
+				}
+			}
+
+			err := checkParentsAs(dir, uid)
+			if tt.want == "" {
+				if err != nil {
+					t.Errorf("checkParentsAs(%q) error = %v, want nil", dir, err)
+				}
+				return
+			}
+			wantInsecure(t, err, link, tt.want, "ask the owner or root to remove or replace the symlink", privateConfigHint)
+		})
+	}
+}
+
+// TestLoadThroughOwnSymlink runs Load, LoadLocked and Save through a config
+// directory that is a symlink the current user owns. The symlink rule must
+// let it pass, and a missing pins directory below it is still a first run.
+func TestLoadThroughOwnSymlink(t *testing.T) {
+	t.Parallel()
+	base := newNamedPinsDir(t, "base", 0o700)
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	link := filepath.Join(base, "cfg")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	path := filepath.Join(link, "mcpmoat", "pins.json")
+
+	s, err := Load(path)
+	if err != nil || s.Existed() {
+		t.Fatalf("Load() = %v, %v, want an empty store for a first run", s, err)
+	}
+	ls, release, err := LoadLocked(t.Context(), path, 0)
+	if err != nil || ls.Existed() {
+		release()
+		t.Fatalf("LoadLocked() = %v, %v, want an empty store for a first run", ls, err)
+	}
+	if err := ls.Save(); err != nil {
+		t.Errorf("Save() error = %v", err)
+	}
+	release()
+	if s, err = Load(path); err != nil || !s.Existed() {
+		t.Fatalf("Load() after Save = %v, %v, want the saved store", s, err)
+	}
 }
 
 // newSymlinkedConfig builds base/real/cfg/mcpmoat/pins.json and a symlink

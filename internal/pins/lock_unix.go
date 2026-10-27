@@ -34,16 +34,33 @@ func tryLock(f *os.File) (acquired bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	return lockErrno(f.Name(), errno)
+}
+
+// lockErrno turns errno, the result of a non-blocking flock(2) on the file
+// called name, into the results of tryLock. It is a separate pure function,
+// so a test can check each errno without a file system that returns it.
+//
+// The errors.Is calls compare errno with each constant. A switch on the value
+// would not compile on Linux: there EWOULDBLOCK is EAGAIN and ENOTSUP is
+// EOPNOTSUPP, and a switch cannot list the same constant twice.
+func lockErrno(name string, errno syscall.Errno) (acquired bool, err error) {
 	switch {
 	case errno == 0:
 		return true, nil
 	case errors.Is(errno, syscall.EWOULDBLOCK), errors.Is(errno, syscall.EAGAIN):
 		return false, nil
+	// EBADF and EINVAL: on Linux, flock on NFS is emulated with byte-range
+	// locks, which need a descriptor open for writing, so our read-only
+	// directory handle gets EBADF. Some FUSE and network file systems answer
+	// EINVAL. flock runs while the descriptor is valid (see flock), so here
+	// these errnos can only mean that the file system cannot lock.
 	case errors.Is(errno, syscall.ENOTSUP), errors.Is(errno, syscall.EOPNOTSUPP),
-		errors.Is(errno, syscall.ENOLCK), errors.Is(errno, syscall.ENOSYS):
-		return false, fmt.Errorf("lock %s: %w: %w", f.Name(), errLockUnsupported, errno)
+		errors.Is(errno, syscall.ENOLCK), errors.Is(errno, syscall.ENOSYS),
+		errors.Is(errno, syscall.EBADF), errors.Is(errno, syscall.EINVAL):
+		return false, fmt.Errorf("lock %s: %w: %w", name, errLockUnsupported, errno)
 	default:
-		return false, fmt.Errorf("lock %s: %w", f.Name(), errno)
+		return false, fmt.Errorf("lock %s: %w", name, errno)
 	}
 }
 

@@ -282,6 +282,22 @@ func failingFake(server string) *inspecttest.Fake {
 	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
 }
 
+// pinAlphaOnly runs a first scan in e that pins the server "alpha" with
+// alphaTools only: the server "beta" fails with "boom", so it is not pinned
+// and is new on the next run. pins.json then exists. It fails the test when
+// the scan does not exit with 0, and returns the result, so that a test can
+// check the output of the first run.
+func pinAlphaOnly(t *testing.T, e *pinEnv, alphaTools []inspect.Tool) pinRunResult {
+	t.Helper()
+	fake := fakeServers(map[string][]inspect.Tool{"alpha": alphaTools})
+	fake.Errors = map[string]error{"beta": errors.New("boom")}
+	r := e.scan(fake)
+	if r.code != exitOK {
+		t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+	}
+	return r
+}
+
 // oneServer returns the server map of a config with one stdio server.
 func oneServer(name string) map[string]any {
 	return map[string]any{name: map[string]any{"command": "npx"}}
@@ -713,8 +729,8 @@ func withoutPinsFileNotice(t *testing.T, stderr, cmd, path string) string {
 // another mcpmoat run would, and returns the function that releases it. It
 // also registers the release with t.Cleanup; a second call does nothing. It
 // fails the test when pins.LoadLocked fails, and skips the test when the
-// system cannot lock the directory (pins.Store.Unlocked), because then no run
-// can be "locked by another run".
+// system cannot lock the directory (pins.Store.RanWithoutLock), because then no
+// run can be "locked by another run".
 func holdPinsLock(t *testing.T, path string) (release func()) {
 	t.Helper()
 	store, release, err := pins.LoadLocked(t.Context(), path, 0)
@@ -722,7 +738,7 @@ func holdPinsLock(t *testing.T, path string) (release func()) {
 	if err != nil {
 		t.Fatalf("pins.LoadLocked(%q) error = %v, want nil", path, err)
 	}
-	if store.Unlocked() {
+	if store.RanWithoutLock() {
 		release()
 		t.Skip("the system cannot lock the pins directory here")
 	}
@@ -735,9 +751,9 @@ type lockProbe struct {
 	line string
 	// err is the error of pins.LoadLocked: nil when the lock was free.
 	err error
-	// unlocked is pins.Store.Unlocked: the system could not lock at all, so
-	// the attempt proves nothing.
-	unlocked bool
+	// ranWithoutLock is pins.Store.RanWithoutLock: the system could not lock at
+	// all, so the attempt proves nothing.
+	ranWithoutLock bool
 }
 
 // lockProbeWriter is a stdout or stderr for scan or pin that checks, from
@@ -772,7 +788,7 @@ func (p *lockProbeWriter) Write(b []byte) (int, error) {
 		release()
 		probe := lockProbe{line: string(b), err: err}
 		if err == nil {
-			probe.unlocked = store.Unlocked()
+			probe.ranWithoutLock = store.RanWithoutLock()
 		}
 		p.mu.Lock()
 		p.probes = append(p.probes, probe)
@@ -795,7 +811,7 @@ func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
 		t.Errorf("lock attempts at %d writes, want %d (%q)\nprobes: %+v", len(probes), len(want), want, probes)
 	}
 	for i, probe := range probes {
-		if probe.unlocked {
+		if probe.ranWithoutLock {
 			t.Skip("the system cannot lock the pins directory here")
 		}
 		if i < len(want) && !strings.Contains(probe.line, want[i]) {

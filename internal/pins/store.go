@@ -29,12 +29,13 @@ import (
 // release needs a version bump.
 const CurrentVersion = 1
 
-// maxFileSize is the largest pins.json that Load reads and Save writes, in
-// bytes of indented JSON. It is a ceiling for the whole file. Set refuses a
-// server whose entry would make the file larger than this (ErrStoreFull), so
-// the servers that fit are still saved and only the refused server is not
-// pinned (see maxServerSize).
-const maxFileSize = 32 << 20
+// MaxFileSize is the largest pins.json that Load reads and Save writes, in
+// bytes of indented JSON: 32 MiB. It is a ceiling for the whole file. Set
+// refuses a server whose entry would make the file larger than this
+// (ErrStoreFull), so the servers that fit are still saved and only the refused
+// server is not pinned (see maxServerSize). It is exported so that the
+// messages of the CLI show the same limit.
+const MaxFileSize = 32 << 20
 
 // maxServerSize is the largest entry of one server that Load and Set accept,
 // in bytes of compact JSON. Each tool stores its canonical text next to its
@@ -42,7 +43,7 @@ const maxFileSize = 32 << 20
 // its own tool names and schemas, so this cap stops one server from filling
 // the file alone.
 //
-// The cap does not stop several servers together: maxFileSize divided by
+// The cap does not stop several servers together: MaxFileSize divided by
 // maxServerSize is 16, so about 16 servers at full size fill the file. Set
 // then refuses the next server that does not fit with ErrStoreFull, and the
 // servers that are already in the store are still saved. The caller must
@@ -59,7 +60,7 @@ const indent = "  "
 var ErrUnsupportedVersion = errors.New("unsupported pins.json version")
 
 // ErrStoreFull means that Set refused a server because its entry would make
-// the pins file larger than maxFileSize (32 MiB). The store did not change, so
+// the pins file larger than MaxFileSize (32 MiB). The store did not change, so
 // the other servers can still be saved. The refused server is not pinned, and
 // the caller must report it. Test for it with errors.Is.
 var ErrStoreFull = errors.New("the pins file would be too large")
@@ -115,15 +116,15 @@ type ServerPins map[string]Pin
 // cannot lose the update of another such run (see LoadLocked for the limits).
 //
 // The Store knows the size of the file that Save would write. Set uses it to
-// refuse a server that would make the file larger than maxFileSize
+// refuse a server that would make the file larger than MaxFileSize
 // (ErrStoreFull), so one large server cannot stop the others from being
 // saved: only the refused server is not pinned.
 type Store struct {
-	// path, existed and unlocked are set once, before Load or LoadLocked
+	// path, existed and ranWithoutLock are set once, before Load or LoadLocked
 	// returns the Store, and never change after that. So they need no mutex.
-	path     string // the pins file (see Path)
-	existed  bool   // the pins file was on disk (see Existed)
-	unlocked bool   // LoadLocked ran without the lock (see Unlocked)
+	path           string // the pins file (see Path)
+	existed        bool   // the pins file was on disk (see Existed)
+	ranWithoutLock bool   // LoadLocked ran without the lock (see RanWithoutLock)
 
 	mu      sync.Mutex // guards servers, sizes and entryBytes
 	servers map[Identity]ServerPins
@@ -154,12 +155,13 @@ func (s *Store) Existed() bool {
 	return s.existed
 }
 
-// Unlocked reports whether LoadLocked went on without the lock, because the
-// operating system or the file system cannot lock the pins directory. Then a
-// parallel run can still lose an update, and the CLI prints one warning. A
-// Store from Load returns false, because Load takes no lock at all.
-func (s *Store) Unlocked() bool {
-	return s.unlocked
+// RanWithoutLock reports whether LoadLocked went on without the lock. It is
+// true when the operating system or the file system could not take the lock on
+// the pins directory, and the run went on without it. Then a parallel run can
+// still lose an update, and the CLI prints one warning. A Store from Load
+// returns false, because Load takes no lock at all.
+func (s *Store) RanWithoutLock() bool {
+	return s.ranWithoutLock
 }
 
 // fileFormat is the shape of pins.json, version 1. Every key is required and
@@ -219,9 +221,11 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 //
 // Load refuses an unsafe path with an error that wraps ErrInsecurePermissions
 // (see Save). The checks run in this order:
-//   - The parent directories of the pins directory, for example ~/.config
+//   - The parent directories of the pins directory, for example ~/.config,
+//     and the owner of each symlink on the path to the pins directory
 //     (checkParents). This check is by path, by design: when no other user
-//     can write a parent, no other user can swap the path.
+//     can write a parent or owns a symlink on the path, no other user can
+//     swap the path.
 //   - The pins directory, on the handle of the directory that Load reads from
 //     (checkDirHandle): another owner, a mode that lets the group or others
 //     write, or (macOS only) an ACL that lets a user or group write.
@@ -247,7 +251,9 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // (safefile.ErrOutsideRoot). A symlink with a missing target (the file, its
 // directory or a parent of the directory) and a directory path that is not a
 // directory are errors, not a first run. A symlink to the pins directory, or a
-// symlink in a parent, is followed: the checks above see the target.
+// symlink in a parent, is followed: the checks above see the target. Such a
+// symlink must belong to the current user or root (checkParents), or Load
+// refuses it with an error that wraps ErrInsecurePermissions.
 func Load(path string) (*Store, error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
 
@@ -311,8 +317,8 @@ func Load(path string) (*Store, error) {
 //     waits for the first, until wait has passed, and then returns ErrLocked.
 //   - When the operating system or the file system cannot lock the directory
 //     (for example some network file systems, or Windows), LoadLocked goes on
-//     without the lock and Store.Unlocked returns true. The caller must warn
-//     the user once.
+//     without the lock and Store.RanWithoutLock returns true. The caller must
+//     warn the user once.
 //
 // The checks, the errors and the first run are the same as in Load, with two
 // differences:
@@ -406,7 +412,7 @@ func loadLocked(ctx context.Context, path string, l locker) (s *Store, release f
 	}
 	// locked is false with no error when the directory cannot be locked: the
 	// run goes on without the lock.
-	s.unlocked = !locked
+	s.ranWithoutLock = !locked
 	return s, releaseAll, nil
 }
 
@@ -481,8 +487,9 @@ func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, 
 	return root, d, false, nil
 }
 
-// newStore returns an empty Store that saves to path. existed and unlocked
-// are false: the caller sets them when it read a file or ran without a lock.
+// newStore returns an empty Store that saves to path. existed and
+// ranWithoutLock are false: the caller sets them when it read a file or ran
+// without a lock.
 func newStore(path string) *Store {
 	return &Store{
 		path:    path,
@@ -523,7 +530,7 @@ func loadFromRoot(path string, root *os.Root, name string) (*Store, error) {
 	s := newStore(path)
 
 	// The name file, not f: f is the decoded fileFormat below.
-	file, found, err := safefile.OpenFileInRoot(root, name)
+	file, found, err := safefile.OpenIfExistsInRoot(root, name)
 	if err != nil {
 		// A pins.json that another user owns, with mode 0600, cannot be opened.
 		// The owner problem has a fix hint, so report it before "permission denied".
@@ -631,27 +638,33 @@ func readChecked(path string, root *os.Root, name string, file *os.File) ([]byte
 	// a symlink (the link and its target are two files), or when another
 	// file replaced the entry after the open. An entry that is gone was
 	// swapped too.
-	swapped := fmt.Errorf("pins file %s is a symlink or was swapped while it was opened (fix: replace the symlink with the file): %w",
-		path, ErrInsecurePermissions)
 	entry, err := root.Lstat(name)
 	if safefile.IsMissing(err) {
-		return nil, swapped
+		return nil, swappedError(path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !os.SameFile(info, entry) {
-		return nil, swapped
+		return nil, swappedError(path)
 	}
 
 	if err := checkFileHandle(path, file, info); err != nil {
 		return nil, err
 	}
-	data, err := safefile.ReadOpened(file, maxFileSize)
+	data, err := safefile.ReadOpened(file, MaxFileSize)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, nil
+}
+
+// swappedError is the error of readChecked when the open pins file path is not
+// the directory entry itself: a symlink, or a file that changed after the
+// open. It wraps ErrInsecurePermissions.
+func swappedError(path string) error {
+	return fmt.Errorf("pins file %s is a symlink or was swapped while it was opened (fix: replace the symlink with the file): %w",
+		path, ErrInsecurePermissions)
 }
 
 // checkFirstRun is checkFirstRunWith with os.Lstat and os.Stat. Load calls it
@@ -767,7 +780,7 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 // UTF-8, or an entry larger than maxServerSize (2 MiB) as compact JSON.
 //
 // Then Set refuses a server whose entry would make the file that Save writes
-// larger than maxFileSize (32 MiB), with an error that wraps ErrStoreFull. A
+// larger than MaxFileSize (32 MiB), with an error that wraps ErrStoreFull. A
 // change that does not make the file larger is always accepted, for example a
 // smaller replacement of a server. So one large server cannot stop the others
 // from being saved: the servers that fit are saved, and the refused server is
@@ -787,7 +800,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	c := cloneOrEmpty(p)
 	// The entry is encoded twice, on purpose: ValidateServer measures compact
 	// JSON for the per-server limit (maxServerSize), and entrySize measures
-	// the indented form that Save writes, for the file limit (maxFileSize).
+	// the indented form that Save writes, for the file limit (MaxFileSize).
 	// One encode for both is a possible later optimisation.
 	if err := ValidateServer(id, c); err != nil {
 		return err
@@ -814,9 +827,9 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// Refuse only growth: a Store that Load read from a compact file near the
 	// limit can already be over it, and a change that makes it smaller must
 	// still be possible.
-	if after > maxFileSize && after > before {
+	if after > MaxFileSize && after > before {
 		return fmt.Errorf("%w: %d bytes with this server, more than the %d MiB limit",
-			ErrStoreFull, after, maxFileSize>>20)
+			ErrStoreFull, after, MaxFileSize>>20)
 	}
 
 	// A zero-value Store has nil maps, and writing to a nil map panics.
@@ -843,8 +856,9 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 // changes such a map in place: Set stores a new copy, Get returns a copy, and
 // Save only reads it.
 //
-// The copy has the same path, Existed and Unlocked as s, and a mutex of its
-// own. It does not hold a lock of LoadLocked: that lock belongs to the caller.
+// The copy has the same path, Existed and RanWithoutLock as s, and a mutex of
+// its own. It does not hold a lock of LoadLocked: that lock belongs to the
+// caller.
 // A Save of the copy writes the same file as a Save of s, so save only one of
 // them.
 func (s *Store) Clone() *Store {
@@ -854,12 +868,12 @@ func (s *Store) Clone() *Store {
 	// A struct literal, not *s: a copy of s would copy the mutex too, and go
 	// vet (copylocks) refuses that. The new mutex is the zero value, unlocked.
 	return &Store{
-		path:       s.path,
-		existed:    s.existed,
-		unlocked:   s.unlocked,
-		servers:    maps.Clone(s.servers),
-		sizes:      maps.Clone(s.sizes),
-		entryBytes: s.entryBytes,
+		path:           s.path,
+		existed:        s.existed,
+		ranWithoutLock: s.ranWithoutLock,
+		servers:        maps.Clone(s.servers),
+		sizes:          maps.Clone(s.sizes),
+		entryBytes:     s.entryBytes,
 	}
 }
 
@@ -957,12 +971,13 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // on an open handle as Load does, and it does not read the ACL, so a swap of
 // the path between the check and the write is not detected. Save does not
 // check the old pins.json, because the rename replaces it: callers read the
-// file with Load first, so the file check has run, and a pins.json symlink
-// has made Load fail. Save does not check the parent directories, for example
-// ~/.config, again: Load checked them by path (checkParents).
+// file with Load or LoadLocked first, so the file check has run, and a
+// pins.json symlink has made the read fail. Save does not check the parent
+// directories, for example ~/.config, again: Load or LoadLocked checked them
+// by path (checkParents).
 //
 // Load and Set check each server, so Save checks only the whole file: it
-// refuses data larger than maxFileSize (32 MiB), the limit of Load, and the old
+// refuses data larger than MaxFileSize (32 MiB), the limit of Load, and the old
 // file stays.
 //
 // The limit is a ceiling for all servers together. Set already refuses a
@@ -978,8 +993,8 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // Save takes no lock itself. It is safe against a parallel run only when the
 // Store came from LoadLocked and the caller still holds that lock: then no
 // other locking run can read or save between the load and this write. A Store
-// from Load, or from LoadLocked when Store.Unlocked is true, can still lose a
-// parallel update (the last writer wins).
+// from Load, or from LoadLocked when Store.RanWithoutLock is true, can still
+// lose a parallel update (the last writer wins).
 //
 // Save of a zero-value Store is an error, because it has no path: make a
 // Store with Load or LoadLocked.
@@ -990,7 +1005,7 @@ func (s *Store) Save() error {
 	defer s.mu.Unlock()
 
 	if s.path == "" {
-		return errors.New("save pins: the store has no path (make it with Load)")
+		return errors.New("save pins: the store has no path (make it with Load or LoadLocked)")
 	}
 	ids := slices.SortedFunc(maps.Keys(s.servers), compareIdentity)
 	servers := make([]fileServer, 0, len(ids))
@@ -1009,9 +1024,11 @@ func (s *Store) Save() error {
 	}
 	data = append(data, '\n')
 	// Check the size before the write, so the old file stays valid.
-	if len(data) > maxFileSize {
-		return fmt.Errorf("save %s: pins data is %d bytes, larger than the %d byte limit",
-			s.path, len(data), maxFileSize)
+	if len(data) > MaxFileSize {
+		// MaxFileSize>>20 is the limit in MiB (1 MiB is 1<<20 bytes), the
+		// unit that Set uses in its text too.
+		return fmt.Errorf("save %s: pins data is %d bytes, larger than the %d MiB limit",
+			s.path, len(data), MaxFileSize>>20)
 	}
 
 	if err := writeFileAtomic(s.path, data); err != nil {

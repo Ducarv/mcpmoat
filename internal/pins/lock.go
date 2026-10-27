@@ -129,12 +129,11 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 // d. The function unlocks d once; later calls do nothing. It does not close
 // d, because the caller owns the handle.
 func releaser(d *os.File) func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			// Ignore the error: the caller closes d later, and closing the
-			// handle releases the lock anyway.
-			_ = unlock(d)
-		})
-	}
+	// sync.OnceFunc returns a function that runs its argument on the first
+	// call only.
+	return sync.OnceFunc(func() {
+		// Ignore the error: the caller closes d later, and closing the handle
+		// releases the lock anyway.
+		_ = unlock(d)
+	})
 }

@@ -238,7 +238,7 @@ func TestPinAcceptStoreFull(t *testing.T) {
 
 	got := e.pin(fake, "--accept", big)
 
-	const full = `mcpmoat pin: cannot pin "big\x1b[31m": the pins file is full (32 MiB limit); remove servers you no longer use from pins.json` + "\n"
+	const full = `mcpmoat pin: cannot pin "big\x1b[31m": the pins file is full (32 MiB); remove servers you no longer use from pins.json` + "\n"
 	assertPinRun(t, got, scanWant{code: exitError, stderr: []string{full}})
 	if !strings.HasSuffix(got.stderr, full) {
 		t.Errorf("stderr = %q, want it to end with %q", got.stderr, full)

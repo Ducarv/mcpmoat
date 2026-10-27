@@ -734,7 +734,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		if errors.Is(err, pins.ErrStoreFull) {
 			// The store did not change, so the other servers can still be
 			// saved. This one is not pinned: say so, and exit with 2.
-			c.scanWarnf("server %s not pinned: the pins file is full (%s)", cutName(ps.name), pinsFileLimit)
+			c.scanWarnf("server %s not pinned: %s", cutName(ps.name), pinsFullText)
 			full = true
 			continue
 		}

@@ -141,10 +141,10 @@ func (c *cli) warnFileCannotIgnore(ruleID string) {
 // writes nothing. The servers to pin for the first time are in the result:
 // savePinned writes them after the report is printed.
 //
-// pins.json has a size limit (pinsFileLimit), and Store.Set refuses a server that
-// would make the file larger (pins.ErrStoreFull). The report is printed before
-// savePinned runs, so the refusal must be known now, or the report could not
-// show it. So pinOutcomes adds the first-run servers to a copy of the store
+// pins.json has a size limit (pins.MaxFileSize), and Store.Set refuses a server
+// that would make the file larger (pins.ErrStoreFull). The report is printed
+// before savePinned runs, so the refusal must be known now, or the report could
+// not show it. So pinOutcomes adds the first-run servers to a copy of the store
 // (see pinner.budget), in the order that savePinned uses. A server that does
 // not fit gets a finding and is not saved.
 //
@@ -457,14 +457,15 @@ const (
 	// reasonRelativeSource is the reason for a server whose config path is not
 	// absolute.
 	reasonRelativeSource = "the config path is not absolute"
-	// reasonStoreFull is the reason for a first-run server whose pins would
-	// make pins.json larger than its size limit (pins.ErrStoreFull, see
-	// firstPin). The terminal report cuts a reason at 80 runes
-	// (report.MaxShortCellRunes), so it must stay shorter. The limit comes
-	// from pinsFileLimit, so the size is written in one place.
-	// riskServerUnverified tells what the missing pins mean.
-	reasonStoreFull = "the pins file is full (" + pinsFileLimit + "), so this server is not pinned"
 )
+
+// reasonStoreFull is the reason for a first-run server whose pins would make
+// pins.json larger than its size limit (pins.ErrStoreFull, see firstPin).
+// riskServerUnverified tells what the missing pins mean. The terminal report
+// cuts a reason at 80 runes (report.MaxShortCellRunes), so it must stay
+// shorter. It starts with pinsFullText, so the size is written in one place.
+// pinsFullText is a var, so this is a var too.
+var reasonStoreFull = pinsFullText + ", so this server is not pinned"
 
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
 // addUnverified). They hold no server text.

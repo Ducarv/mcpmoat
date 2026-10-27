@@ -1197,7 +1197,7 @@ func TestSaveSizeLimit(t *testing.T) {
 		wantSaveErr := func(t *testing.T, size int) {
 			t.Helper()
 			err := s.Save()
-			want := fmt.Sprintf("save %s: pins data is %d bytes, larger than the %d byte limit", path, size, limit)
+			want := fmt.Sprintf("save %s: pins data is %d bytes, larger than the 32 MiB limit", path, size)
 			if err == nil || err.Error() != want {
 				t.Errorf("Save() error = %v, want %q", err, want)
 			}
@@ -1352,7 +1352,7 @@ func TestClone(t *testing.T) {
 		}
 	})
 
-	t.Run("copies Existed and Unlocked", func(t *testing.T) {
+	t.Run("copies Existed and RanWithoutLock", func(t *testing.T) {
 		t.Parallel()
 		existing := storeTestPath(t)
 		storeTestMustSave(t, storeTestMustLoad(t, existing))
@@ -1365,9 +1365,9 @@ func TestClone(t *testing.T) {
 		defer release()
 
 		tests := []struct {
-			name                    string
-			s                       *pins.Store
-			wantExisted, wantUnlock bool
+			name                            string
+			s                               *pins.Store
+			wantExisted, wantRanWithoutLock bool
 		}{
 			{"first run", storeTestMustLoad(t, storeTestPath(t)), false, false},
 			{"existing file", storeTestMustLoad(t, existing), true, false},
@@ -1375,9 +1375,9 @@ func TestClone(t *testing.T) {
 		}
 		for _, tt := range tests {
 			c := tt.s.Clone()
-			if c.Existed() != tt.wantExisted || c.Unlocked() != tt.wantUnlock {
-				t.Errorf("%s: clone Existed() = %v, Unlocked() = %v; want %v, %v",
-					tt.name, c.Existed(), c.Unlocked(), tt.wantExisted, tt.wantUnlock)
+			if c.Existed() != tt.wantExisted || c.RanWithoutLock() != tt.wantRanWithoutLock {
+				t.Errorf("%s: clone Existed() = %v, RanWithoutLock() = %v; want %v, %v",
+					tt.name, c.Existed(), c.RanWithoutLock(), tt.wantExisted, tt.wantRanWithoutLock)
 			}
 		}
 	})
@@ -1390,8 +1390,8 @@ func TestClone(t *testing.T) {
 		if _, ok := s.Get(idA); ok {
 			t.Error("zero-value Get(idA) ok = true after Set on the clone, want false")
 		}
-		if c.Existed() || c.Unlocked() {
-			t.Error("clone of a zero-value Store has Existed or Unlocked set")
+		if c.Existed() || c.RanWithoutLock() {
+			t.Error("clone of a zero-value Store has Existed or RanWithoutLock set")
 		}
 		if err := c.Save(); err == nil || !strings.Contains(err.Error(), "no path") {
 			t.Errorf("Save() of the clone error = %v, want the no-path error", err)
@@ -1449,16 +1449,16 @@ func TestExisted(t *testing.T) {
 				if got := s.Existed(); got != tt.want {
 					t.Errorf("Existed() = %v, want %v", got, tt.want)
 				}
-				if l.name == "Load" && s.Unlocked() {
-					t.Error("Unlocked() = true for Load, want false")
+				if l.name == "Load" && s.RanWithoutLock() {
+					t.Error("RanWithoutLock() = true for Load, want false")
 				}
 			})
 		}
 	}
 
 	var zero pins.Store
-	if zero.Existed() || zero.Unlocked() {
-		t.Error("zero-value Store has Existed or Unlocked set")
+	if zero.Existed() || zero.RanWithoutLock() {
+		t.Error("zero-value Store has Existed or RanWithoutLock set")
 	}
 }
 

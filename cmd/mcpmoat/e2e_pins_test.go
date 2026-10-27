@@ -15,13 +15,13 @@ func e2eNewPinsFileNotice(cmd, home string) string {
 	return newPinsNoticeLine(cmd, pinsPath(home))
 }
 
-// TestE2EScanNewPinsFileNotice checks the new pins file notice on the real
+// TestE2ENewPinsFileNotice checks the new pins file notice on the real
 // binary, for scan and for pin --accept. The first run has no pins.json: it
 // creates the file and prints the notice once, after the save and before the
 // pinned lines. A second run reads the file and prints no notice. When the
 // user then removes pins.json, the next run prints the notice again, because
 // that is the case the notice warns about.
-func TestE2EScanNewPinsFileNotice(t *testing.T) {
+func TestE2ENewPinsFileNotice(t *testing.T) {
 	t.Parallel()
 	const name = "benign-srv"
 	noExpect := exactLine("mcpmoat pin: " + strings.TrimSuffix(pinNoExpectNote, "\n"))

@@ -11,7 +11,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -26,7 +25,6 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
@@ -85,9 +83,7 @@ func TestScanPinsNewFileNotice(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, servers)
 		// The first run pins alpha only: beta fails, so it is not pinned.
-		fake := fakeServers(map[string][]inspect.Tool{"alpha": tools["alpha"]})
-		fake.Errors = map[string]error{"beta": errors.New("boom")}
-		first := e.scan(fake)
+		first := pinAlphaOnly(t, e, tools["alpha"])
 		if rest := withoutPinsFileNotice(t, first.stderr, "scan", e.pinsPath()); rest != pinnedLine("alpha", 1)+"\n" {
 			t.Fatalf("first run stderr without the notice = %q, want only the pinned line of alpha", rest)
 		}
@@ -164,11 +160,7 @@ func TestScanPinsLockHeld(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, servers)
 			if tt.pinAlpha {
-				fake := fakeServers(map[string][]inspect.Tool{"alpha": tools["alpha"]})
-				fake.Errors = map[string]error{"beta": errors.New("boom")}
-				if r := e.scan(fake); r.code != exitOK {
-					t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
-				}
+				pinAlphaOnly(t, e, tools["alpha"])
 			}
 			before, existed := readIfExists(t, e.pinsPath())
 			release := holdPinsLock(t, e.pinsPath())
@@ -218,23 +210,16 @@ func readIfExists(t *testing.T, path string) ([]byte, bool) {
 	return data, true
 }
 
-// pinsFileLimitBytes is the size limit of pins.json in bytes: maxFileSize in
-// internal/pins, which the messages show as pinsFileLimit ("32 MiB"). This is
-// the one copy of the number in the cmd tests. internal/pins exports it as
-// pins.MaxFileSize only to its own tests (export_test.go), so this package
-// cannot read it. If the limit changes, the store-full tests fail: with a lower
-// limit Set refuses a filler in writeNearFullPins, and with a higher one the
-// big server fits.
-const pinsFileLimitBytes = 32 << 20
-
 // nearFullGap is the free space that writeNearFullPins leaves below
-// pinsFileLimitBytes. The entry of a server with bigStoreTool is larger than
+// pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
 // it, and the entry of a server with one mkTool is far smaller.
 const nearFullGap = 16 << 10
 
 // nearFullServers is the number of filler servers in the file of
-// writeNearFullPins. With 17, each entry is about 1.9 MiB, well below the
-// limit of one server (2 MiB).
+// writeNearFullPins. With 17 and the 32 MiB of pins.MaxFileSize, each entry is
+// about 1.9 MiB, well below the limit of one server (2 MiB). If the file limit
+// grows, an entry can get larger than 2 MiB: Set then refuses a filler, and
+// writeNearFullPins fails. Then raise this number.
 const nearFullServers = 17
 
 // bigStoreTool returns a tool whose pins entry is larger than nearFullGap:
@@ -299,9 +284,9 @@ func saveFillers(t *testing.T, path string, canonicals ...string) int {
 }
 
 // writeNearFullPins writes a valid pins.json at path with nearFullServers
-// filler servers, so that the file has exactly pinsFileLimitBytes -
-// nearFullGap bytes. A server entry larger than nearFullGap then does not
-// fit (pins.ErrStoreFull), and a small one does.
+// filler servers, so that the file has exactly pins.MaxFileSize - nearFullGap
+// bytes. A server entry larger than nearFullGap then does not fit
+// (pins.ErrStoreFull), and a small one does.
 //
 // The size of the file depends on the format of Save, so the helper measures
 // it: it saves one and two fillers with a one-byte text in scratch folders.
@@ -315,7 +300,7 @@ func writeNearFullPins(t *testing.T, path string) {
 	entry := two - one // one entry with a one-byte text
 	fixed := one - entry
 
-	want := pinsFileLimitBytes - nearFullGap
+	want := pins.MaxFileSize - nearFullGap
 	textBytes := want - fixed - nearFullServers*(entry-1)
 	n := textBytes / nearFullServers
 	long := strings.Repeat("a", n+textBytes%nearFullServers)
@@ -445,22 +430,6 @@ func TestScanPinsStoreFullAtReport(t *testing.T) {
 	}
 }
 
-// growPinsInspector is a fake inspector that runs grow once, at its first
-// Inspect call, and then answers like inner. It simulates another run that
-// makes pins.json larger while this scan inspects its servers: after scan
-// read the store for the pin step, and before savePinned reads it again.
-// sync.Once makes the other Inspect calls wait until grow is done.
-type growPinsInspector struct {
-	inner *inspecttest.Fake
-	once  *sync.Once
-	grow  func()
-}
-
-func (g growPinsInspector) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
-	g.once.Do(g.grow)
-	return g.inner.Inspect(ctx, s)
-}
-
 // TestScanPinsStoreFullAtSave checks the refusal at save time: pins.json was
 // small when the pin step checked the budget, so the report has no
 // MOAT-T2-004 row, but another run made it nearly full before savePinned. Set
@@ -469,10 +438,12 @@ func (g growPinsInspector) Inspect(ctx context.Context, s discover.Server) (insp
 // refusal is never silent. pins.json existed at the save, so there is no new
 // pins file notice.
 //
-// The near-full file is built before the scan in a scratch folder, and the
-// inspector moves it into place with os.Rename, so the hook does no slow work
-// inside inspect.Run. No t.Parallel, for the reason of
-// TestScanPinsStoreFullAtReport.
+// The inspector (hookInspector) simulates another run that makes pins.json
+// larger while this scan inspects its servers: after scan read the store for
+// the pin step, and before savePinned reads it again. The near-full file is
+// built before the scan in a scratch folder, and the hook moves it into place
+// with os.Rename, so the hook does no slow work inside inspect.Run. No
+// t.Parallel, for the reason of TestScanPinsStoreFullAtReport.
 func TestScanPinsStoreFullAtSave(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a near-32 MiB pins file; slow under -race")
@@ -483,19 +454,23 @@ func TestScanPinsStoreFullAtSave(t *testing.T) {
 	})
 	scratch := filepath.Join(t.TempDir(), "mcpmoat", "pins.json")
 	writeNearFullPins(t, scratch)
-	insp := growPinsInspector{
+	grow := func() {
+		// t.Errorf, not t.Fatalf: this runs in a goroutine of inspect.Run.
+		if err := os.MkdirAll(filepath.Dir(e.pinsPath()), 0o700); err != nil {
+			t.Errorf("create the pins directory: %v", err)
+			return
+		}
+		if err := os.Rename(scratch, e.pinsPath()); err != nil {
+			t.Errorf("move the near-full pins.json into place: %v", err)
+		}
+	}
+	// once runs grow at the first Inspect call, for any server. once.Do
+	// makes the other calls wait until grow is done, so no server is
+	// inspected before the file is in place.
+	var once sync.Once
+	insp := hookInspector{
 		inner: fakeServers(map[string][]inspect.Tool{"big": {bigStoreTool()}, "tiny": {mkTool("add_numbers", "Add.")}}),
-		once:  &sync.Once{},
-		grow: func() {
-			// t.Errorf, not t.Fatalf: this runs in a goroutine of inspect.Run.
-			if err := os.MkdirAll(filepath.Dir(e.pinsPath()), 0o700); err != nil {
-				t.Errorf("create the pins directory: %v", err)
-				return
-			}
-			if err := os.Rename(scratch, e.pinsPath()); err != nil {
-				t.Errorf("move the near-full pins.json into place: %v", err)
-			}
-		},
+		hook:  func(discover.Server) { once.Do(grow) },
 	}
 
 	got := e.scan(insp)
@@ -552,11 +527,7 @@ func TestScanPinsReleasesLockBeforeOutput(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, servers)
 			if tt.pinAlpha {
-				fake := fakeServers(map[string][]inspect.Tool{"alpha": tools["alpha"]})
-				fake.Errors = map[string]error{"beta": errors.New("boom")}
-				if r := e.scan(fake); r.code != exitOK {
-					t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
-				}
+				pinAlphaOnly(t, e, tools["alpha"])
 			}
 			c, stdout, stderr := e.cli(fakeServers(tools))
 			probe := newLockProbeWriter(t, stderr, e.pinsPath(), "no pins file was found", "pinned ")
@@ -584,7 +555,7 @@ func TestScanPinsReleasesLockBeforeOutput(t *testing.T) {
 // already out on stdout.
 //
 // The removal runs in the inspector (hookInspector), so it comes after the
-// first read and before savePinned, like growPinsInspector in
+// first read and before savePinned, like the growth of pins.json in
 // TestScanPinsStoreFullAtSave. The control, a real first run with no file at
 // both reads, is TestScanPinsNewFileNotice: it saves and prints the notice.
 func TestScanPinsFileRemovedDuringScan(t *testing.T) {
@@ -595,11 +566,7 @@ func TestScanPinsFileRemovedDuringScan(t *testing.T) {
 		"beta":  map[string]any{"command": "npx"},
 	})
 	// The first run pins alpha only: beta fails, so it is new on the next run.
-	fake := fakeServers(map[string][]inspect.Tool{"alpha": {mkTool("a", "A.")}})
-	fake.Errors = map[string]error{"beta": errors.New("boom")}
-	if r := e.scan(fake); r.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
-	}
+	pinAlphaOnly(t, e, []inspect.Tool{mkTool("a", "A.")})
 	insp := hookInspector{
 		inner: fakeServers(map[string][]inspect.Tool{"alpha": {mkTool("a", "A.")}, "beta": {mkTool("b", "B.")}}),
 		hook: onceFor("beta", func(discover.Server) {

@@ -14,7 +14,7 @@
 //
 // ReadBoundedRegularFile does all four steps from a directory path. A caller
 // that must check the directory on its open handle opens it with OpenRoot,
-// checks it, and then opens the file with OpenFileInRoot in the same root.
+// checks it, and then opens the file with OpenIfExistsInRoot in the same root.
 //
 // The helpers return OS errors and the sentinel errors below, and no error
 // holds file content. The OS errors are *fs.PathError values that hold the path
@@ -84,7 +84,7 @@ func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, i
 		_ = root.Close()
 	}()
 
-	f, found, err := OpenFileInRoot(root, name)
+	f, found, err := OpenIfExistsInRoot(root, name)
 	if err != nil || !found {
 		return nil, nil, false, err
 	}
@@ -171,15 +171,17 @@ func OpenRoot(dir string) (*os.Root, error) {
 // OpenFlags, so opening a FIFO returns at once and does not wait for a writer;
 // ReadOpened then refuses the FIFO. The file is nil when the error is not nil.
 // A path that leaves root gives the os.Root error as it is, not ErrOutsideRoot.
-// OpenFileInRoot gives ErrOutsideRoot and the found result.
+// OpenIfExistsInRoot gives ErrOutsideRoot and the found result.
 func OpenInRoot(root *os.Root, name string) (*os.File, error) {
 	return root.OpenFile(name, OpenFlags, 0)
 }
 
-// OpenFileInRoot opens the file called name, below root, with OpenInRoot and
-// sorts the error the same way as ReadBoundedRegularFile. Use it when the
+// OpenIfExistsInRoot opens the file called name, below root, with OpenInRoot
+// and sorts the error the same way as ReadBoundedRegularFile. Use it when the
 // caller already holds root, so the directory checks and the file open use the
-// same directory handle and no path race is possible between them.
+// same directory handle and no path race is possible between them. Unlike
+// OpenInRoot, it returns found, and it turns a path that leaves root into
+// ErrOutsideRoot.
 //
 // found is false, with a nil file and a nil error, when no file can exist at
 // the path (see IsMissing). A path that leaves root gives ErrOutsideRoot. Other
@@ -187,10 +189,10 @@ func OpenInRoot(root *os.Root, name string) (*os.File, error) {
 // *fs.PathError and errors.Is with fs.ErrPermission. f is nil when found is
 // false or err is not nil.
 //
-// OpenFileInRoot does not check the file type or the size. The caller must
+// OpenIfExistsInRoot does not check the file type or the size. The caller must
 // Stat the returned file (ReadOpened does this) before it trusts the file, and
 // the caller must close it.
-func OpenFileInRoot(root *os.Root, name string) (f *os.File, found bool, err error) {
+func OpenIfExistsInRoot(root *os.Root, name string) (f *os.File, found bool, err error) {
 	f, err = OpenInRoot(root, name)
 	switch {
 	case err == nil:
