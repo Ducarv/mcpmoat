@@ -57,7 +57,10 @@ to the tap. Only the GoReleaser step gets the tap token. Then it attests the bui
 because the next step runs a script from the checkout with write permission. The step compares the
 folder with the tagged commit, not with the index. It fails on any new file there, on a changed
 `verify-and-publish.sh` (by its hash), and on a file that is marked assume-unchanged or
-skip-worktree. This is hardening, not a boundary. It checks that the draft release holds exactly
+skip-worktree. This is hardening, not a boundary. The script `.github/scripts/release-guard-test.sh`
+tests this step in the `tool-pins` job. The step does not catch a build that writes `$GITHUB_PATH`
+or `$GITHUB_ENV`, or that leaves a background process. A separate publish job with a fresh checkout
+is the real fix, and issue #174 tracks it. The next step checks that the draft release holds exactly
 those files. It downloads them and checks that they match `dist/`. It verifies each attestation
 with `gh attestation verify`. It checks that the tag still points at the commit that it built.
 Then it publishes the release. Last, it checks that the release is immutable, and checks the tag
@@ -127,7 +130,10 @@ schedule only from the file on `dev`.
   issue, the next failure opens a new issue. If the `security` label is deleted from the repo, the
   job fails and opens no issue: the red run is then the only signal. The job has the permission
   `issues: write` only, and it uses the `gh` CLI. The scan job keeps `contents: read`. The script
-  `.github/scripts/notify-failure-test.sh` tests this job in the `tool-pins` job of `ci.yml`.
+  `.github/scripts/notify-failure-test.sh` tests this job in the `tool-pins` job of `ci.yml`. It
+  runs the real `run:` block with a fake `gh`. It also checks the job keys by text: `needs`,
+  `if: failure()`, `issues: write` only with no `contents` permission, no checkout step and the
+  `GH_TOKEN` env.
 - GitHub sends the notice of a failed scheduled run only to the maintainer who last edited the cron
   line, or who enabled the workflow again. Keep GitHub Actions notifications on for that account.
   The issue makes the failure visible to everyone.
