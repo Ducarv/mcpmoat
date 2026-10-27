@@ -66,6 +66,7 @@ the root themselves, so you can run them from any directory.
 
 ```sh
 shellcheck .github/scripts/*.sh                # lint the scripts
+.github/scripts/test-harness-test.sh           # test the shared test harness
 .github/scripts/check-tool-pins-test.sh        # test the pin check
 .github/scripts/check-tool-pins.sh             # check the tool version pins
 .github/scripts/notify-failure-test.sh         # test the failure issue job (needs jq)
@@ -97,6 +98,8 @@ tests, golangci-lint and the version smoke test. On Linux only it also runs the 
 The `ci-scripts` job also runs on every pull request. It runs these scripts:
 
 - `shellcheck .github/scripts/*.sh` lints the scripts.
+- `.github/scripts/test-harness-test.sh` tests the shared test harness. It runs first, because the
+  other test scripts use the harness.
 - `.github/scripts/check-tool-pins-test.sh` tests the pin check.
 - `.github/scripts/check-tool-pins.sh` runs the pin check.
 - `.github/scripts/notify-failure-test.sh` uses a fake `gh`. It runs the real `run:` block of the
@@ -109,6 +112,18 @@ The `ci-scripts` job also runs on every pull request. It runs these scripts:
 
 None of them needs a token. Only the pin check needs Go, and on its first run it can need the
 network (see above).
+
+Every `*-test.sh` script sources `.github/scripts/test-harness.sh`. To add a script test, source it
+and use its case runner (`check_case`). Do not write a new harness. The header of
+`test-harness.sh` has a usage example. The script tests must pass with bash 5 and with bash 3.2
+(`/bin/bash` on macOS). So do not use:
+
+- `mapfile` or `readarray`
+- associative arrays (`declare -A`)
+- `((x++))` under `set -e` (it fails when `x` is 0)
+- an empty array expansion such as `"${list[@]}"` under `set -u` (bash 3.2 stops there)
+
+A new guard needs a test case that fails when you remove the guard.
 
 The pin check is the Go program in `internal/pincheck` (package `main`). It is a CI tool only.
 GoReleaser builds only `./cmd/mcpmoat`, so the pin check is not part of the mcpmoat binary.

@@ -9,12 +9,15 @@
 # fake gh at the front of PATH. The fake keeps a draft or published release in
 # files, answers every gh call that the script makes, and exits 99 on any other
 # call. A case changes the state of the fake, runs the script, and wants an
-# exit code, a release state (draft or published) and a text in the output.
+# exit code, a text in the output and a release state (draft or published).
+# The cases use the pattern and the helpers of test-harness.sh.
 #
 # VERIFY_SCRIPT is a test hook, not a setting for normal use. Set it to an
 # absolute path to test another copy of the script, for example a copy with a
 # bug on purpose, to see that the cases fail.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=test-harness.sh
+. "$(dirname -- "$0")/test-harness.sh"
 
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 src=$PWD
@@ -25,19 +28,6 @@ trap 'rm -rf "${tmp:?}"' EXIT
 S=$tmp/state # the state of the fake gh
 sha=0123456789abcdef0123456789abcdef01234567
 other_sha=fedcba9876543210fedcba9876543210fedcba98
-failed=0
-total=0
-
-# record_failure reports a failed case and goes on with the next case. It uses
-# the GitHub error syntax in Actions.
-record_failure() {
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::error::$*" >&2
-  else
-    echo "FAIL: $*" >&2
-  fi
-  failed=$((failed + 1))
-}
 
 # The fake gh. The quoted delimiter keeps every $ for the fake to expand.
 mkdir -p "$tmp/bin"
@@ -127,7 +117,8 @@ new_tree() {
   : >"$S/after"
 }
 
-# Changes to the fake release. A case runs one of them.
+# Changes to the fake release. A case runs one of them. run_setup runs it in a
+# subshell, so it only writes files in $S.
 good() { true; }
 extra_on_draft() { echo extra >"$S/assets/extra.zip"; }
 missing_on_draft() { rm "$S/assets/checksums.txt"; }
@@ -139,69 +130,70 @@ asset_added_after() { echo add_asset >"$S/after"; }
 not_immutable() { echo false >"$S/immutable"; }
 attest_fails_last() { echo mcpmoat_9.9.9_linux_amd64.tar.gz >"$S/attest_fail"; }
 
-# check_calls reads the call log that the good release leaves in $S. It wants
-# one "attestation verify" call for each file that the script downloads (the
+# run_script runs the copy of the script in the tree, with only the variables
+# that it needs.
+run_script() {
+  env -i PATH="$tmp/bin:$PATH" HOME="$tmp/home" FAKE_GH_STATE="$S" \
+    GH_TOKEN=fake FAKE_OTHER_SHA="$other_sha" GITHUB_REF_NAME=v9.9.9 GITHUB_REPOSITORY=owner/repo \
+    GITHUB_SHA="$sha" GITHUB_REF=refs/tags/v9.9.9 GITHUB_SERVER_URL=https://github.com \
+    "$tmp/w/.github/scripts/verify-and-publish.sh"
+}
+
+# state_is STATE fails unless the release of the last run is STATE (draft or
+# published). The state shows whether the script stopped before or after the
+# publish.
+state_is() {
+  local state
+  state=$(cat "$S/state") || return 1
+  [ "$state" = "$1" ] && return 0
+  echo "the release is $state, want $1: $(harness_clip "$case_out")" >&2
+  return 1
+}
+
+# check_calls reads the call log of the last run in $S. It wants one
+# "attestation verify" call for each file that the script downloads (the
 # archives and checksums.txt, not the files that it ignores), and all of them
 # before "release edit", the publish.
 check_calls() {
   local want n last_verify edit
-  total=$((total + 1))
-  want=$(find "$tmp/w/dist" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | wc -l | tr -d ' ')
+  want=$(find "$tmp/w/dist" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | wc -l | tr -d ' ') || return 1
   n=$(grep -c '^attestation verify ' "$S/calls" || true)
   last_verify=$(grep -n '^attestation verify ' "$S/calls" | tail -n 1 | cut -d: -f1 || true)
   edit=$(grep -n '^release edit ' "$S/calls" | head -n 1 | cut -d: -f1 || true)
   if [ "$n" != "$want" ]; then
-    record_failure "attestation calls: $n, want $want: $(cat "$S/calls")"
+    echo "attestation calls: $n, want $want: $(cat "$S/calls")" >&2
+    return 1
   elif [ -z "$edit" ] || [ "$last_verify" -ge "$edit" ]; then
-    record_failure "an attestation verify call comes after the publish: $(cat "$S/calls")"
+    echo "an attestation verify call comes after the publish: $(cat "$S/calls")" >&2
+    return 1
   fi
 }
 
-# check_case builds a tree, runs the change $5 (with its arguments), runs the
-# script and checks three things: the exit code, the state of the release
-# (draft or published) and that the output contains the text $4. The state
-# shows whether the script stopped before or after the publish.
-check_case() {
-  local name=$1 want=$2 want_state=$3 msg=$4 got=0 out state
+# publish_case NAME WANT_CODE WANT_TEXT WANT_STATE SETUP [ARGS...] builds a
+# tree, runs the change SETUP, runs the script and checks the exit code, the
+# text in the output and the state of the release.
+publish_case() {
+  local name=$1 want_code=$2 want_text=$3 want_state=$4
   shift 4
-  total=$((total + 1))
   new_tree
-  "$@"
-  out=$(env -i PATH="$tmp/bin:$PATH" HOME="$tmp/home" FAKE_GH_STATE="$S" \
-    GH_TOKEN=fake FAKE_OTHER_SHA="$other_sha" GITHUB_REF_NAME=v9.9.9 GITHUB_REPOSITORY=owner/repo \
-    GITHUB_SHA="$sha" GITHUB_REF=refs/tags/v9.9.9 GITHUB_SERVER_URL=https://github.com \
-    "$tmp/w/.github/scripts/verify-and-publish.sh" 2>&1) || got=$?
-  state=$(cat "$S/state")
-  if [ "$got" != "$want" ]; then
-    record_failure "$name: exit $got, want $want: $out"
-  elif [ "$state" != "$want_state" ]; then
-    record_failure "$name: the release is $state, want $want_state: $out"
-  elif [[ $out != *"$msg"* ]]; then
-    record_failure "$name: the output lacks '$msg': $out"
-  fi
+  run_setup "$name" "$@"
+  check_case "$name" "$want_code" "$want_text" run_script
+  check_cmd "$name: the release is $want_state" state_is "$want_state"
 }
 
-check_case "good release" 0 published "" good
+publish_case "good release" 0 "" published good
+check_cmd "good release: one attestation verify call per file, all before the publish" check_calls
 
-# check_calls reads the call log of the good release, so it must run right
-# after that case.
-check_calls
+publish_case "extra asset on the draft" 1 "::error::The release assets do not match dist/" draft extra_on_draft
+publish_case "missing asset on the draft" 1 "::error::The release assets do not match dist/" draft missing_on_draft
+publish_case "draft differs from dist/" 1 "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz draft/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" draft changed_draft
+publish_case "tag moved before the publish" 1 "::error::The tag v9.9.9 points at $other_sha" draft tag_moved
+publish_case "attestation verify fails" 1 "attestation verify failed" draft attest_fails_last
 
-check_case "extra asset on the draft" 1 draft "::error::The release assets do not match dist/" extra_on_draft
-check_case "missing asset on the draft" 1 draft "::error::The release assets do not match dist/" missing_on_draft
-check_case "draft differs from dist/" 1 draft "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz draft/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" changed_draft
-check_case "tag moved before the publish" 1 draft "::error::The tag v9.9.9 points at $other_sha" tag_moved
-check_case "attestation verify fails" 1 draft "attestation verify failed" attest_fails_last
+publish_case "tag moved after the publish" 1 "::error::The tag v9.9.9 points at $other_sha" published tag_moves_after
+check_output "tag moved after the publish: closing message says the release is public" "::error::The release is public, but it is not locked"
+publish_case "asset swapped after the publish" 1 "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz published/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" published asset_swapped_after
+publish_case "asset added after the publish" 1 "::error::The release assets do not match dist/" published asset_added_after
+publish_case "release is not immutable" 1 "::error::The release is not immutable" published not_immutable
 
-check_case "tag moved after the publish" 1 published "::error::The tag v9.9.9 points at $other_sha" tag_moves_after
-check_case "asset swapped after the publish" 1 published "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz published/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" asset_swapped_after
-check_case "asset added after the publish" 1 published "::error::The release assets do not match dist/" asset_added_after
-check_case "release is not immutable" 1 published "::error::The release is not immutable" not_immutable
-# Same setup as the case above. It checks the closing message, not the first error.
-check_case "tag moved after the publish: closing message says the release is public" 1 published "::error::The release is public, but it is not locked" tag_moves_after
-
-if [ "$failed" -ne 0 ]; then
-  echo "verify-and-publish-test: $failed of $total cases failed" >&2
-  exit 1
-fi
-echo "verify-and-publish-test: all $total cases pass"
+harness_footer verify-and-publish-test
