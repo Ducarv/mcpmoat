@@ -1528,8 +1528,8 @@ func TestMatchSeamsCapBeforeContext(t *testing.T) {
 	t.Parallel()
 
 	// 400 different strings of 300 bytes (schemaStrings keeps each string
-	// once). They fit in maxSchemaMatchBytes, and their seams (about 515
-	// bytes each) go over maxSeamBytes before the last one.
+	// once). They fit in maxSchemaMatchBytes, and their seams (544 bytes
+	// each) go over maxSeamBytes before the last one.
 	parts := make([]string, 400)
 	for i := range parts {
 		parts[i] = fmt.Sprintf(`"%03d%s"`, i, strings.Repeat("a", 297))

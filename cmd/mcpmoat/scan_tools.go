@@ -90,8 +90,8 @@ const (
 // pattern text. The ignore list ignore drops rows like the rows of the config
 // rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
 // row, which only --ignore drops (see fileCannotIgnore). It compares the real
-// tool name, not the Key. The step prints one warning for each rule ID that .mcpmoat-ignore
-// cannot ignore.
+// tool name, not the Key. The step prints one warning for each rule ID that
+// .mcpmoat-ignore cannot ignore.
 //
 // counts holds the finding counts of each server by the index of the server
 // (see serverStatuses). The step adds the rows that it keeps for a server to
