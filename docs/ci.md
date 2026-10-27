@@ -139,7 +139,8 @@ test the hook now, run `pre-commit run --all-files`.
 `language: system` runs the `mcpmoat` command from your `PATH`, so install mcpmoat first. The hook
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
 `args: [--fail-on, medium]` to the hook. The `"$@"` and the trailing `--` in `entry` pass the
-`args` to `mcpmoat scan`. Keep them, or the `args` are ignored.
+`args` to `mcpmoat scan`. Keep both. Without the trailing `--`, the first arg becomes `$0` of the
+shell and is lost, so `args: [--fail-on, medium]` would run `mcpmoat scan ... medium`.
 
 pre-commit shows the output of a hook only when the hook fails. To see the findings each time, add
 `verbose: true` to the hook.

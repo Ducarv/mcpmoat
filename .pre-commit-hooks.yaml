@@ -3,7 +3,9 @@
   description: Scan the MCP config (.mcp.json) with mcpmoat before a commit.
   # mcpmoat scan has no built-in skip when .mcp.json is missing, so sh -c does the check.
   # pre-commit appends args: to the entry. The trailing -- is $0 of the shell, so the
-  # appended args become "$@" and reach mcpmoat. Without it, args: would be ignored.
+  # appended args become "$@" and reach mcpmoat. Keep "$@" and the trailing --. Without
+  # the --, the first arg becomes $0 and is lost, so args: [--fail-on, medium] would
+  # run mcpmoat scan ... medium.
   entry: sh -c '[ ! -f .mcp.json ] || exec mcpmoat scan --no-connect --config .mcp.json "$@"' --
   language: golang
   pass_filenames: false
