@@ -19,7 +19,7 @@
 #   it), a tag, a tab, a line with only a dash, a backslash inside double
 #   quotes (an escape can spell goreleaser-action without its plain text), a
 #   line that continues the plain value before it, and a quote that does not
-#   close on its line. See yaml_refs for the exact rules.
+#   close on its line. See unreadable_yaml for the exact rules.
 # Not covered: other ways to install GoReleaser or govulncheck, such as
 # docker://goreleaser/goreleaser, a remote reusable workflow, brew install, go
 # install, a composite action outside .github/actions, or a $GITHUB_ENV write
@@ -86,13 +86,14 @@ done
 [ -f CONTRIBUTING.md ] || fail "CONTRIBUTING.md is missing."
 
 # wf_files is the list of the workflow files. GitHub runs .yaml files too. The
-# dot patterns find a name that starts with a dot, which a plain * skips.
+# dot patterns find a name that starts with a dot, which a plain * skips. The
+# last two find the names .yml and .yaml, which the .* patterns miss.
 wf_files=()
-for file in "$wf"/*.yml "$wf"/*.yaml "$wf"/.*.yml "$wf"/.*.yaml; do
+for file in "$wf"/*.yml "$wf"/*.yaml "$wf"/.*.yml "$wf"/.*.yaml "$wf"/.yml "$wf"/.yaml; do
   if [ -e "$file" ]; then wf_files+=("$file"); fi
 done
 
-# yaml_refs prints the lines of a file that use a YAML form that the checks
+# unreadable_yaml prints the lines of a file that use a YAML form that the checks
 # below cannot read. These forms can hide a goreleaser-action step, because the
 # checks read one line at a time and look for the plain text of the action:
 # - an anchor (&name), an alias (*name) or a merge key (<<:). A name is any text
@@ -101,7 +102,9 @@ done
 #   comma. The line "<<:" matches too, with spaces before the colon.
 # - a tag (! or !!str) at the start of a value.
 # - a tab, which YAML reads as a space in some places and not in others.
-# - a backslash inside a double-quoted text, because "\x6e" can spell a letter.
+# - a backslash anywhere outside a block scalar, because "\x6e" in a double-
+#   quoted text can spell a letter. The rule does not look at quotes, so a
+#   stray quote cannot move it.
 # - a quote at the start of a value that does not close on the line (a text
 #   that goes on in the next line can hold a line that looks like a pin). A
 #   doubled single quote inside single quotes is an escape and does not close.
@@ -110,11 +113,14 @@ done
 # - a line that is indented deeper than the key of the line before it, when
 #   that line has a plain value. YAML joins the two lines into one text, so a
 #   line that looks like a version input or a pin can be part of another value.
+# - an env: key with a value on the same line, such as an expression. It can
+#   build the name GORELEASER_VERSION from pieces.
 # Quoted texts and comments are not searched, and the body of a block scalar (a
 # key with | or >, such as run: |) is skipped. A plain value that has ", *" or
 # "{*" in it matches the first rule, so put such a value in quotes.
-# Known limit: an unquoted apostrophe in a plain value can hide text after it.
-yaml_refs() {
+# Known limit: an unquoted apostrophe or double quote in a plain value can move
+# the pairing of the quotes after it and hide a quote that does not close.
+unreadable_yaml() {
   code_of "$1" | awk '
     BEGIN {
       q = "\047"
@@ -134,26 +140,22 @@ yaml_refs() {
       }
       line = $0; sub(/^ */, "", line)
       shown = line
-      # A double-quoted text without a backslash is fine. A backslash in one
-      # that is left after that is an escape.
-      esc = shown
-      gsub(/"[^"\\]*"/, "Q", esc)
-      escaped = esc ~ /"[^"]*\\/
+      escaped = shown ~ /\\/
       gsub(/"[^"]*"/, "Q", line)
       gsub(q q, "", line)
       gsub(q "[^" q "]*" q, "Q", line)
       sub(/ +#.*$/, "", line)
-      rest = line; dashes = 0
-      while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; sub(/^- +/, "", rest) }
+      rest = line; dashes = 0; last = 0
+      while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; last = RLENGTH; sub(/^- +/, "", rest) }
       bare = line ~ /^(- *)+$/
       joined = prev_value && indent > prev_col
-      if (escaped || bare || joined || rest ~ /^<< *:/ || line ~ ref_re || line ~ tag_re || line ~ open_re || line ~ /\t/) print shown
+      if (escaped || bare || joined || rest ~ /^<< *:/ || rest ~ /^env: *[^ #|>]/ || line ~ ref_re || line ~ tag_re || line ~ open_re || line ~ /\t/) print shown
       # A block scalar starts when the line ends with : | or - | and so on.
       # Its body is indented deeper than the key (or the dash, for - |).
       val = rest; sub(/^.*: +/, "", val)
       if (val ~ block_re || rest ~ block_re) {
         inblock = 1
-        blockind = (rest ~ block_re) ? indent : indent + dashes
+        blockind = (rest ~ block_re) ? indent + dashes - last : indent + dashes
       }
       # A key with a plain value, or a plain list item. A key without a value
       # (key:) has children, so a deeper line is normal after it.
@@ -165,9 +167,9 @@ yaml_refs() {
 
 # These forms can hide a step from the checks below.
 for file in "${wf_files[@]}"; do
-  refs=$(yaml_refs "$file")
+  refs=$(unreadable_yaml "$file")
   [ -z "$refs" ] ||
-    fail "$(basename "$file"): line uses a YAML form this check cannot read: \"${refs%%$'\n'*}\". Write the workflows without anchors, aliases, merge keys, tags, tabs, a backslash in double quotes, and a quote that does not close on its line. Put a plain value that has a comma and a star, or a brace and a star, in quotes."
+    fail "$(basename "$file"): line uses a YAML form this check cannot read: \"${refs%%$'\n'*}\". Write the workflows without anchors, aliases, merge keys, tags, tabs, a backslash outside a block scalar, a line with only a dash, a line that is indented deeper than the plain value before it, an env: key with a value on its line, and a quote that does not close on its line. Put a plain value that has a comma and a star, or a brace and a star, in quotes."
 done
 
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
@@ -233,6 +235,9 @@ fi
 #   njobs     how many jobs are in order.
 #   body      the line without its indent and the "- " of a step.
 #   lc        body in lower case.
+#   inblock   1 after the line that starts a block scalar, until its body ends.
+#   blockind  the body lines are indented deeper than this column.
+#   inbody    1 when the line is in such a body.
 # end_step prints the errors of a step and clears the state of that step.
 goreleaser_steps() {
   code_of "$1" | PIN_RE=$(pin_re GORELEASER_VERSION) awk '
@@ -262,13 +267,21 @@ goreleaser_steps() {
     {
       match($0, /^ */)
       indent = RLENGTH
+      # A line in the body of a block scalar is text, not YAML. It cannot be
+      # the pin line, but it still counts as a mention of GORELEASER_VERSION:
+      # a run body can write that name to $GITHUB_ENV.
+      if (inblock && indent <= blockind) inblock = 0
+      inbody = inblock
       trimmed = $0; sub(/^ */, "", trimmed)
+      rest = trimmed; blockcol = indent
+      while (rest ~ /^- +/) { match(rest, /^- +/); blockcol += RLENGTH; sub(/^- +/, "", rest) }
+      if (!inbody && rest ~ /(^|: +)[|>][-+0-9]* *$/) { inblock = 1; blockind = blockcol }
       key = trimmed; sub(/:.*/, "", key)
       if (indent == 0) { top = key; job = ""; jobkey = "" }
       else if (top == "jobs" && indent == 2) { job = key; jobkey = "" }
       else if (top == "jobs" && indent == 4) jobkey = key
       if (tolower($0) ~ /goreleaser_version/) {
-        if (top == "jobs" && job != "" && indent == 6 && jobkey == "env" && trimmed ~ pin_re) has_pin[job] = 1
+        if (!inbody && top == "jobs" && job != "" && indent == 6 && jobkey == "env" && trimmed ~ pin_re) has_pin[job] = 1
         else if (!is_version_line(trimmed)) print "the line \"" trimmed "\" mentions GORELEASER_VERSION in a form this check does not allow. Allowed: the pin line in the env: of a job and the version input of a goreleaser-action step."
       }
       if (instep && indent <= start) { end_step(); instep = 0 }
@@ -372,9 +385,6 @@ for f in "${workflows[@]}"; do
     grep -vE "$(pin_re GOVULNCHECK_VERSION)" |
     grep -vE "$names" || true)
   [ -z "$other" ] || fail "$f.yml has a govulncheck line that is not the pin, the call line or a name: $(one_line <<<"$other")"
-
-  # A line that is indented deeper than the call line would continue its value,
-  # for example with "|| true". yaml_refs fails on such a line.
 
   if grep -qE '^ *(- )?continue-on-error:' <<<"$code"; then
     fail "$f.yml uses continue-on-error. A step that cannot fail would hide a vulnerability."
