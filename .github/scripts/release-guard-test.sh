@@ -125,16 +125,17 @@ next_step_name() {
   ' "$workflow"
 }
 
-# The body can pass while a step key turns the step off, a different shell
-# runs it, or it runs after the publish. Check these keys by text.
+# The body can pass while a step key turns the step off, changes what it
+# compares, a different shell runs it, or it runs after the publish. Check
+# these keys by text.
 check_step() {
   total=$((total + 1))
   "$@" || record_failure "the guard step: ${check_msg:?}"
 }
-no_switch() { ! step_text | grep -Eq '^ {8}(if|continue-on-error):'; }
+only_known_keys() { ! step_text | grep -E '^ {8}[A-Za-z_-]+:' | grep -Evq '^ {8}(shell|run):'; }
 uses_bash() { step_text | grep -Eq '^ {8}shell: bash *$'; }
 runs_before_publish() { [ "$(next_step_name)" = "Verify and publish the release" ]; }
-check_msg="it has an if: or continue-on-error: key"; check_step no_switch
+check_msg="it has a key other than name, shell and run (for example if:, env: or working-directory:)"; check_step only_known_keys
 check_msg="it does not have 'shell: bash'"; check_step uses_bash
 check_msg="the next step is not 'Verify and publish the release'"; check_step runs_before_publish
 

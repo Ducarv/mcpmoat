@@ -130,10 +130,9 @@ jobs:
   # Guards the tool version pins, checks the shell scripts in
   # .github/scripts/, tests the failure issue job of the weekly vulnerability
   # check, tests the guard step of the release job and tests the publish
-  # script. notify-failure-test.sh needs jq and release-guard-test.sh needs git.
-  # verify-and-publish-test.sh needs only standard tools and a fake gh. This
-  # runner has all of them. It is a separate small job, with no Go setup and no
-  # GoReleaser, so that it can be a required check on every branch.
+  # script. The header of each test script lists the tools that it needs, and
+  # this runner has all of them. It is a separate small job, with no Go setup
+  # and no GoReleaser, so that it can be a required check on every branch.
   ci-scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 5

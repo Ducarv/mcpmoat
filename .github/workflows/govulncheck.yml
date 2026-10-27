@@ -65,12 +65,13 @@ jobs:
         run: |
           set -euo pipefail
           title="Weekly vulnerability check failed"
+          label=security
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # A list call, not a search, so a new issue shows at once.
-          number=$(gh issue list -R "$GITHUB_REPOSITORY" --label security --state open --limit 200 --json number,title |
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --label "$label" --state open --limit 200 --json number,title |
             jq -r --arg t "$title" 'first(.[] | select(.title == $t) | .number) // empty')
           if [ -z "$number" ]; then
-            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label security \
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$label" \
               --body "The weekly vulnerability check failed or was cancelled. Open the run to read the failure: $run_url. This job does not report a disabled schedule."
           else
             gh issue comment "$number" -R "$GITHUB_REPOSITORY" \
