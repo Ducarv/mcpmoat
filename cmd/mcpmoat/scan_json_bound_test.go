@@ -10,7 +10,6 @@ package main
 import (
 	"fmt"
 	"runtime"
-	"runtime/debug"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -30,27 +29,34 @@ const (
 	hostileNameBytes = 1 << 20
 	hostileTools     = 3000
 	hostileRuleCount = 25
+
+	// hostileToolsRace is the tool count under -race. The race detector makes
+	// the rule step slow, so the test uses fewer tools. 300 tools x 25 rules
+	// give 7500 findings, far over the cap of maxToolRowsPerServer, so the cap
+	// path (the MOAT-T1-024 row) is still tested.
+	hostileToolsRace = 300
 )
 
 // The documented bounds of TestScanJSONBound. They come from a measurement of
-// this hostile config on an Apple M1 Pro, and each has about 2x headroom. They
-// are a regression guard: if the output or the allocations grow with the
-// length of the name or with the number of findings again, the test fails.
+// this hostile config, and each has about 2x headroom. They are a regression
+// guard: if the output or the allocations grow with the length of the name or
+// with the number of findings again, the test fails.
 //
 // Output size. A server keeps at most maxToolRowsPerServer (1000) tool rows,
 // and scan adds one MOAT-T1-024 row for the rest. A row holds the server name
 // (cut to 515 characters), the tool name and fixed text, so one row is about
 // 0.7 KiB and the document is about 1000 x 0.7 KiB = 0.7 MiB (measured:
 // 711,753 bytes, with the same bytes with and without -race). The old v2
-// output had no cut: its rows held the 1 MiB name three times (server, key and
-// related), so the same 1002 rows would be about 3 GB. Without the row cap, it
-// would be 3000 tools x 25 rules x 3 MiB, about 225 GB.
+// output had no cut: each row held the 1 MiB name once (in "server"; the key is
+// the tool name and "related" is "description"), so the same 1002 rows would be
+// about 1.05 GB, about 1,500 times the bounded output. Without the row cap, it
+// would be 3000 tools x 25 rules x 1 MiB, about 75 GB.
 //
 // Row count. At most maxToolRowsPerServer tool rows, plus one MOAT-T1-024 row,
 // plus the pin and other rows of the server: toolRowSlack is the room for those
 // rows (measured: 1002 rows).
 //
-// Memory. The scan itself holds the 1 MiB config name several times (the file
+// Memory (checked only without -race). The scan itself holds the 1 MiB config name several times (the file
 // text, the decoded config, the server, the pin store, the report), the 3000
 // tools, and it runs 25 rules and the built-in rules on each tool. Those costs
 // do not depend on the output, so they get a fixed budget. On top of that,
@@ -58,12 +64,14 @@ const (
 // byte of output (WriteJSON streams the document; the same idea as
 // TestWriteJSONBoundsOutputAndMemory in internal/report).
 //
-// The fixed budget has two values, because the Go regexp package allocates a
-// matcher state for each match when it is built with -race. Under -race, the
-// sync.Pool of the matchers drops values on purpose, so each of the 3000 tools
-// x (25 + built-in) rules allocates about 0.8 MiB of short-lived state. This is
-// a cost of the race detector in the rule step, not of the output: the output
-// is the same size. Measured: 66 MiB without -race, 2.4 GiB with -race.
+// Under -race the test skips the allocation check. The Go regexp package
+// allocates a matcher state for each match when it is built with -race (the
+// sync.Pool of the matchers drops values on purpose), so the allocations of the
+// rule step are dominated by the race detector and not by the output. A budget
+// that fits that cost (several GiB) could not catch a regression, so it would
+// only give a false sense of a guard. Under -race the test still checks the
+// output size, the row count and the structure. Measured without -race: about
+// 65 MiB.
 const (
 	// maxJSONOutputBytes is the most bytes that stdout may hold (1.5 MiB). The
 	// measured output is 0.7 MiB.
@@ -78,12 +86,8 @@ const (
 	maxJSONAllocFactor = 8
 
 	// maxScanAllocBytes is the fixed allocation budget of the scan itself
-	// (128 MiB, measured 66 MiB).
+	// (128 MiB, measured about 65 MiB), for a binary built without -race.
 	maxScanAllocBytes = 128 << 20
-
-	// maxScanAllocBytesRace is the same budget for a test binary built with
-	// -race (5 GiB, measured 2.4 GiB).
-	maxScanAllocBytesRace = 5 << 30
 )
 
 // hostileRulesDirMatchAll writes hostileRuleCount description rules that match
@@ -116,7 +120,11 @@ func TestScanJSONBound(t *testing.T) {
 	name := strings.Repeat("N", hostileNameBytes)
 	writeServers(t, work, ".mcp.json", map[string]any{name: map[string]any{"command": "npx"}})
 
-	tools := make([]inspect.Tool, hostileTools)
+	toolCount := hostileTools
+	if raceEnabled {
+		toolCount = hostileToolsRace
+	}
+	tools := make([]inspect.Tool, toolCount)
 	for i := range tools {
 		tools[i] = mkTool(fmt.Sprintf("tool_%05d", i), "Reads a file.")
 	}
@@ -150,8 +158,8 @@ func TestScanJSONBound(t *testing.T) {
 		t.Errorf("output = %d bytes, want at most %d: the cut and the row cap do not bound the output",
 			len(stdout), maxJSONOutputBytes)
 	}
-	// Each row of the old, unbounded output held the name in "server", and the
-	// bound must be far under that.
+	// Each row of the old, unbounded output held the name once, in "server", and
+	// the bound must be far under that.
 	if unbounded := hostileNameBytes * maxToolRowsPerServer; len(stdout) >= unbounded/100 {
 		t.Errorf("output = %d bytes, too close to the unbounded size %d", len(stdout), unbounded)
 	}
@@ -195,31 +203,17 @@ func TestScanJSONBound(t *testing.T) {
 	}
 
 	// The memory: a fixed budget for the scan, and a factor of the output.
-	scanBudget := uint64(maxScanAllocBytes)
-	if raceEnabled() {
-		scanBudget = maxScanAllocBytesRace
-	}
-	if limit := scanBudget + uint64(maxJSONAllocFactor)*uint64(len(stdout)); alloc > limit {
+	// Under -race the allocations are dominated by the race detector (see the
+	// constants), so the check would not catch a regression.
+	if raceEnabled {
+		t.Logf("-race: allocation check skipped (alloc delta = %.1f MiB is dominated by the race detector)",
+			float64(alloc)/(1<<20))
+	} else if limit := uint64(maxScanAllocBytes) + uint64(maxJSONAllocFactor)*uint64(len(stdout)); alloc > limit {
 		t.Errorf("scan allocated %d bytes, want at most %d (%d bytes for the scan and %dx the %d bytes of output)",
-			alloc, limit, scanBudget, maxJSONAllocFactor, len(stdout))
+			alloc, limit, uint64(maxScanAllocBytes), maxJSONAllocFactor, len(stdout))
 	}
 
-	// What the old output would have held: the name three times in each row
-	// (server, key and related), for the same number of rows.
-	t.Logf("rows = %d, v2 output without the cut = about %d bytes", len(doc.Findings), 3*hostileNameBytes*len(doc.Findings))
-}
-
-// raceEnabled reports whether the test binary was built with -race. The Go
-// tool records that in the build info of the binary.
-func raceEnabled() bool {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return false
-	}
-	for _, s := range info.Settings {
-		if s.Key == "-race" {
-			return s.Value == "true"
-		}
-	}
-	return false
+	// What the old output would have held: the name once in each row, for the
+	// same number of rows.
+	t.Logf("rows = %d, v2 output without the cut = about %d bytes", len(doc.Findings), hostileNameBytes*len(doc.Findings))
 }

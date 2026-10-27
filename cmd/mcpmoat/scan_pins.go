@@ -83,12 +83,11 @@ type pinnedServer struct {
 // the classifier for every server of a user who runs "scan --llm" there. If it
 // could ignore the budget finding (MOAT-T1-023), it could hide that a server
 // used up its rule time budget, so that the tools after the cut look clean.
-// If it could ignore the tool findings cap (MOAT-T1-024), it could hide that
-// findings were left out of the report. So the file never ignores these rules
-// (see fileCannotIgnore). Only --ignore on the command line does, because the
-// user typed it. For the same reason, only --ignore can drop the summary row
-// of the tool findings cap: a cloned repository cannot hide that findings
-// were omitted.
+// If it could ignore the tool findings cap (MOAT-T1-024), it could silence the
+// summary row of the findings that scan did not list. So the file never
+// ignores these rules (see fileCannotIgnore). Only --ignore on the command
+// line does, because the user typed it. A cloned repository cannot hide that
+// findings were left out.
 type scanIgnores struct {
 	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
 	// the findings of the config rules and of the tool rules. It does not drop
@@ -110,9 +109,7 @@ func (s scanIgnores) fileEntries() int {
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
 // cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid,
 // rules.RuleAnalysisBudget or rules.RuleToolFindingCap. Only --ignore drops
-// the findings of these rules (see scanIgnores). In particular, only --ignore
-// can drop the summary row of the tool findings cap, so a cloned repository
-// cannot hide that findings were omitted.
+// the findings of these rules (see scanIgnores).
 func fileCannotIgnore(id string) bool {
 	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid ||
 		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap

@@ -102,9 +102,8 @@ const (
 // pattern text. The ignore list ignore drops rows like the rows of the config
 // rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
 // row and the rules.RuleToolFindingCap row, which only --ignore drops (see
-// fileCannotIgnore). It compares the real
-// tool name, not the Key. The step prints one warning for each rule ID that
-// .mcpmoat-ignore cannot ignore.
+// fileCannotIgnore). It compares the real tool name, not the Key. The step
+// prints one warning for each rule ID that .mcpmoat-ignore cannot ignore.
 //
 // A server keeps at most toolRulesRun.maxRows tool rows (maxToolRowsPerServer
 // by default), counted after the ignore list: a row that the list drops does
@@ -167,8 +166,9 @@ type toolRulesRun struct {
 	ignore *scanIgnores
 	budget time.Duration
 	// maxRows is the largest number of tool rows that the step keeps for one
-	// server. Zero or less means maxToolRowsPerServer (see rowLimit). The
-	// budget row and the cap row do not count toward it.
+	// server. The caller sets it to more than zero: toolRulesStep uses
+	// cli.maxToolRowsOrDefault. The budget row and the cap row do not count
+	// toward it.
 	maxRows int
 	// budgetSeverity is the severity of a rules.RuleAnalysisBudget row (see
 	// budgetSeverity). It is the same for each server, so the step computes
@@ -237,15 +237,6 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 	return nil
 }
 
-// rowLimit returns the largest number of tool rows that the step keeps for one
-// server: r.maxRows, or maxToolRowsPerServer when r.maxRows is zero or less.
-func (r *toolRulesRun) rowLimit() int {
-	if r.maxRows > 0 {
-		return r.maxRows
-	}
-	return maxToolRowsPerServer
-}
-
 // addCapRow adds the rules.RuleToolFindingCap row of the server o, with the
 // severity r.budgetSeverity (the same fail-closed severity as the budget row),
 // and prints one warning on stderr. It does nothing when the step kept all the
@@ -257,9 +248,8 @@ func (r *toolRulesRun) addCapRow(o inspect.Outcome, ref report.ServerRef) {
 	if r.omitted == 0 {
 		return
 	}
-	limit := r.rowLimit()
-	r.add(o.Index, "", capRow(ref, r.budgetSeverity, r.omitted, limit))
-	r.c.scanWarnf("server %s: %s", cutName(o.Server.Name), capText(r.omitted, limit))
+	r.add(o.Index, "", capRow(ref, r.budgetSeverity, r.omitted, r.maxRows))
+	r.c.scanWarnf("server %s: %s", cutName(o.Server.Name), capText(r.omitted, r.maxRows))
 }
 
 // add keeps row, a row of the server at index, or counts it when the ignore
@@ -274,14 +264,14 @@ func (r *toolRulesRun) add(index int, toolName string, row report.FindingRow) {
 }
 
 // addTool keeps the tool row row of the server at index, with the limit
-// r.rowLimit. A row that the ignore list drops is counted as ignored and does
+// r.maxRows. A row that the ignore list drops is counted as ignored and does
 // not count toward the limit. A row over the limit is not kept: it is counted
 // in r.omitted, and addCapRow reports the count at the end of the server.
 func (r *toolRulesRun) addTool(index int, toolName string, row report.FindingRow) {
 	if !r.passIgnore(toolName, row) {
 		return
 	}
-	if r.kept >= r.rowLimit() {
+	if r.kept >= r.maxRows {
 		r.omitted++
 		return
 	}

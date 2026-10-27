@@ -9,3 +9,7 @@ const FieldTool = fieldTool
 
 // SeverityOrder exports severityOrder to the external test package report_test.
 var SeverityOrder = severityOrder
+
+// HostileReport exports hostileReport to the external test package
+// report_test.
+var HostileReport = hostileReport

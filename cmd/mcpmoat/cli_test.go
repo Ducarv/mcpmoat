@@ -407,6 +407,9 @@ func TestUsageContent(t *testing.T) {
 		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
 		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a finding (MOAT-T1-023):\n",
 		"  high, or critical when a description or schema rule from --rules is critical.\n",
+		// The tool findings cap (MOAT-T1-024) has its own two lines.
+		fmt.Sprintf("  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer),
+		"  at least high.\n",
 		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
@@ -442,6 +445,9 @@ func TestUsageContent(t *testing.T) {
 		// The ignore file line also names MOAT-T1-023, so the scan note is
 		// matched by its full phrase.
 		"is a finding (MOAT-T1-023)",
+		// The ignore file line also names MOAT-T1-024, so the scan note is
+		// matched by its full phrase.
+		"gets one finding (MOAT-T1-024)",
 		"time budget",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once

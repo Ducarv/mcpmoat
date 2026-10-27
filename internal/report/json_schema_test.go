@@ -217,7 +217,7 @@ func richReport() report.ScanReport {
 		Complete:      true,
 		Servers: []report.JSONServer{
 			withAccept(stdio("a", discover.ScopeGlobal, discover.StateEnabled, report.InspectionOK),
-				report.JSONAccept{Digest: testDigest, Command: "mcpmoat pins accept --expect " + testDigest}),
+				report.JSONAccept{Digest: testDigest, Command: "mcpmoat pin --accept a --expect " + testDigest}),
 			withAccept(stdio("b", discover.ScopeProject, discover.StateUnapproved, report.InspectionRefused),
 				report.JSONAccept{Digest: testDigest}),
 			stdio("c", discover.ScopeProject, discover.StateProjectApproved, report.InspectionTimeout),
@@ -412,5 +412,23 @@ func TestSchemaRejectsBadDocuments(t *testing.T) {
 	// their own reason.
 	if err := rs.Validate(decodeAny(t, valid)); err != nil {
 		t.Fatalf("control document is invalid: %v", err)
+	}
+}
+
+// A smaller hostile report must still produce a document that the schema
+// accepts, with fields_truncated true.
+func TestWriteJSONHostileReportValidatesAgainstSchema(t *testing.T) {
+	t.Parallel()
+	rs := reporttest.Schema(t)
+
+	var doc map[string]any
+	if err := json.Unmarshal(writeJSON(t, report.HostileReport(64<<10, 50)), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if doc["fields_truncated"] != true {
+		t.Errorf("fields_truncated = %v, want true", doc["fields_truncated"])
+	}
+	if err := rs.Validate(doc); err != nil {
+		t.Errorf("output does not match the schema: %v", err)
 	}
 }

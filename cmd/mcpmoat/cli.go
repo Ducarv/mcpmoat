@@ -321,6 +321,8 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n")
 	fprintf(w, "  The rule analysis of each server has a time budget of %s. A server that uses it up is a finding (MOAT-T1-023):\n", toolRulesBudget)
 	fprintf(w, "  high, or critical when a description or schema rule from --rules is critical.\n")
+	fprintf(w, "  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer)
+	fprintf(w, "  at least high.\n")
 	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")

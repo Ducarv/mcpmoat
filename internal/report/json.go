@@ -83,11 +83,12 @@ type ScanReport struct {
 	Ignored JSONIgnored `json:"ignored"`
 }
 
-// JSONIgnored counts the findings that an ignore entry dropped from the report
-// (.mcpmoat-ignore). Rules maps a rule ID to the number of findings dropped for
-// that rule. Its keys are rule IDs only, never text from the ignore file.
-// Total is the sum of Rules: it is the number in the "N findings ignored" line
-// on stderr. FileEntries is the number of entries used from .mcpmoat-ignore.
+// JSONIgnored counts the findings that an ignore entry dropped from the report:
+// an entry of .mcpmoat-ignore or an --ignore flag. Rules maps a rule ID to the
+// number of findings dropped for that rule. Its keys are rule IDs only, never
+// text from the ignore file. Total is the sum of Rules: it is the number in the
+// "N findings ignored" line on stderr. FileEntries is the number of entries
+// used from .mcpmoat-ignore.
 type JSONIgnored struct {
 	Total       int            `json:"total"`
 	Rules       map[string]int `json:"rules"`
@@ -265,8 +266,9 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // tricks.
 //
 // WriteJSON streams the document: it encodes and escapes one list element at a
-// time, so its memory follows the largest element and not the whole output
-// (NFR-07). The bytes are the same as when the whole document is encoded in
+// time, so its memory follows the largest element and not the whole output.
+// The size bound of the output is part of FR-15; no NFR sets a memory limit
+// (NFR-07 is about usability). The bytes are the same as when the whole document is encoded in
 // one call with json.Encoder and SetIndent. If a write fails, w may already
 // hold the first part of the document. WriteJSON wraps the error of the
 // encoder or of the write. Callers must check it: a failed write has to become
@@ -301,7 +303,9 @@ func WriteJSON(w io.Writer, r ScanReport) error {
 	r = bounded
 
 	// The object is written by hand, key by key, in the field order of
-	// ScanReport. Each value is encoded on its own with the indent prefix that
+	// ScanReport. A new field of ScanReport needs a line here:
+	// TestWriteJSONMatchesReference and the schema guard test catch a
+	// forgotten one. Each value is encoded on its own with the indent prefix that
 	// it has inside the whole document, so the bytes are the same as one
 	// Encode call for the whole struct.
 	s := newJSONStream(w)

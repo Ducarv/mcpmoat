@@ -2,23 +2,18 @@ package report
 
 // This file is in package report, not report_test, because boundReport is not
 // exported. A test in package report cannot import reporttest (reporttest
-// imports report, which would be an import cycle), so the schema check at the
-// end of this file loads the schema file directly.
+// imports report, which would be an import cycle), so the schema check of the
+// hostile report is in json_schema_test.go (package report_test).
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -275,8 +270,9 @@ func TestWriteJSONLongNamesThatDifferAfterTheCutBecomeEqual(t *testing.T) {
 }
 
 // The caller can set FieldsTruncated; WriteJSON never sets it back to false,
-// and does not set it when nothing was cut.
-func TestWriteJSONFieldsTruncated(t *testing.T) {
+// and does not set it when nothing was cut. (The same name in json_test.go,
+// package report_test, is a different test: it checks the never-cut fields.)
+func TestWriteJSONFieldsTruncatedFlag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -399,46 +395,4 @@ func TestWriteJSONBoundsOutputAndMemory(t *testing.T) {
 	if unbounded := uint64(3 * hostileNameBytes * hostileFindings); cw.n >= unbounded/100 {
 		t.Errorf("output = %d bytes, too close to the unbounded size", cw.n)
 	}
-}
-
-// A smaller hostile report must still produce a document that the v3 schema
-// accepts, with fields_truncated true.
-func TestWriteJSONHostileReportValidatesAgainstSchema(t *testing.T) {
-	t.Parallel()
-	rs := loadSchema(t)
-
-	var buf bytes.Buffer
-	if err := WriteJSON(&buf, hostileReport(64<<10, 50)); err != nil {
-		t.Fatalf("WriteJSON() error = %v, want nil", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
-		t.Fatalf("output is not valid JSON: %v", err)
-	}
-	if doc["fields_truncated"] != true {
-		t.Errorf("fields_truncated = %v, want true", doc["fields_truncated"])
-	}
-	if err := rs.Validate(doc); err != nil {
-		t.Errorf("output does not match the schema: %v", err)
-	}
-}
-
-// loadSchema loads docs/schema/scan-output.v<SchemaVersion>.json. A test runs
-// in the directory of its package, so the repo root is two levels up.
-func loadSchema(t *testing.T) *jsonschema.Resolved {
-	t.Helper()
-	path := filepath.Join("..", "..", "docs", "schema", fmt.Sprintf("scan-output.v%d.json", SchemaVersion))
-	b, err := os.ReadFile(path) //nolint:gosec // G304: a fixed schema file in the repo
-	if err != nil {
-		t.Fatalf("read schema: %v", err)
-	}
-	var s jsonschema.Schema
-	if err := json.Unmarshal(b, &s); err != nil {
-		t.Fatalf("parse schema: %v", err)
-	}
-	rs, err := s.Resolve(nil)
-	if err != nil {
-		t.Fatalf("resolve schema: %v", err)
-	}
-	return rs
 }
