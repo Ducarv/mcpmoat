@@ -37,11 +37,11 @@ const (
 // error. It is fixed text.
 const noLLMClientText = "internal error: no LLM client"
 
-// noToolNameKey is the Key of an LLM finding row for a tool with an empty
-// name. A hostile server can list such a tool. The report writers treat a
-// row with an empty Key as a row about the whole server, so the row gets
-// this fixed text instead. The request to the provider still has the real
-// (empty) name.
+// noToolNameKey is the Key of an LLM finding row or a tool rule row (see
+// toolKey) for a tool with an empty name. A hostile server can list such a
+// tool. The report writers treat a row with an empty Key as a row about the
+// whole server, so the row gets this fixed text instead. The request to the
+// provider still has the real (empty) name.
 const noToolNameKey = "(no name)"
 
 // toolClassifier rates one tool. *llm.Client implements it. Tests use a fake,

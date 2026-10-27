@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -34,6 +35,11 @@ const (
 	hostileKey  = "X-Key\x1b[31m\nSUMMARY"
 	hostileFail = "boom \x1b]0;title\x07 \u202e\r\nnext\xff"
 )
+
+// hostileTextRules are the description rules that hostileText fires:
+// MOAT-T1-006 (medium, invisible or bidi rune) and MOAT-T1-019 (high, bidi
+// override). Do not change it in place.
+var hostileTextRules = []string{"MOAT-T1-006", "MOAT-T1-019"}
 
 // scanRunTTY runs "scan --config" in e with insp. tty is the answer of the
 // terminal check: colour is possible only when it is true.
@@ -112,14 +118,20 @@ func TestScanReportHostileTools(t *testing.T) {
 		// server offers in the scan that is checked.
 		pinned, now []inspect.Tool
 		// wantCode is the exit code: a changed tool is a high finding, a new
-		// tool a medium one, and --fail-on is high by default.
-		wantCode    int
+		// tool a medium one, and --fail-on is high by default. hostileText
+		// also fires the description rules in wantRules, and MOAT-T1-019 is
+		// high, so every case with hostileText gives exit code 1.
+		wantCode int
+		// wantRules are rule IDs that the FINDINGS block must hold, among
+		// others.
+		wantRules   []string
 		wantHeader  string
 		wantEscaped []string
 	}{
 		{
 			name:        "changed tool, hostile description",
 			wantCode:    exitFindings,
+			wantRules:   hostileTextRules,
 			pinned:      []inspect.Tool{mkTool("read", "Read files.")},
 			now:         []inspect.Tool{mkTool("read", hostileText)},
 			wantHeader:  "Changed tool read on server srv:",
@@ -127,7 +139,8 @@ func TestScanReportHostileTools(t *testing.T) {
 		},
 		{
 			name:        "new tool, hostile description",
-			wantCode:    exitOK,
+			wantCode:    exitFindings,
+			wantRules:   hostileTextRules,
 			pinned:      []inspect.Tool{mkTool("read", "Read files.")},
 			now:         []inspect.Tool{mkTool("read", "Read files."), mkTool("write", hostileText)},
 			wantHeader:  "New tool write on server srv:",
@@ -135,7 +148,8 @@ func TestScanReportHostileTools(t *testing.T) {
 		},
 		{
 			name:        "new tool, hostile name",
-			wantCode:    exitOK,
+			wantCode:    exitFindings,
+			wantRules:   hostileTextRules,
 			pinned:      []inspect.Tool{mkTool("read", "Read files.")},
 			now:         []inspect.Tool{mkTool("read", "Read files."), mkTool(hostileName, hostileText)},
 			wantEscaped: []string{`\x1b[2J`, `\u202e`},
@@ -151,6 +165,7 @@ func TestScanReportHostileTools(t *testing.T) {
 		{
 			name:        "changed tool, hostile name and description",
 			wantCode:    exitFindings,
+			wantRules:   hostileTextRules,
 			pinned:      []inspect.Tool{mkTool(hostileName, "Old.")},
 			now:         []inspect.Tool{mkTool(hostileName, hostileText)},
 			wantEscaped: []string{`\x1b[2J`, `\u202e`},
@@ -172,6 +187,12 @@ func TestScanReportHostileTools(t *testing.T) {
 			for _, want := range tt.wantEscaped {
 				if !strings.Contains(plain.stdout, want) {
 					t.Errorf("stdout does not show the escape %s\n%q", want, plain.stdout)
+				}
+			}
+			ids := findingIDs(findingRows(t, plain.stdout))
+			for _, want := range tt.wantRules {
+				if !slices.Contains(ids, want) {
+					t.Errorf("finding IDs = %v, want them to hold %s\n%s", ids, want, plain.stdout)
 				}
 			}
 			// The report keeps its shape: one server in the summary.

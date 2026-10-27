@@ -39,6 +39,19 @@ func (s Severity) Rank() int {
 	}
 }
 
+// higherSeverity returns the more serious of cur and s. A severity s that is
+// not valid counts as SeverityCritical, so the result fails closed (see
+// Analyzer.MaxSeverity).
+func higherSeverity(cur, s Severity) Severity {
+	if !s.Valid() {
+		s = SeverityCritical
+	}
+	if s.Rank() > cur.Rank() {
+		return s
+	}
+	return cur
+}
+
 // Target is the part of an MCP server that a rule inspects.
 type Target string
 
@@ -58,6 +71,14 @@ func (t Target) Valid() bool {
 		return false
 	}
 }
+
+// RuleAnalysisBudget is a native rule ID with no YAML file in rules/. mcpmoat
+// scan reports it as a finding for a server when the per-server rule analysis
+// time budget runs out. The finding has the highest severity of the
+// description and schema rules (Analyzer.MaxSeverity), but never lower than
+// high. The ID passes ValidRuleID. It is reserved: NewSet refuses an external
+// rule with this ID (see ReservedRuleID).
+const RuleAnalysisBudget = "MOAT-T1-023"
 
 // Match is the `match:` block of a rule. Parse checks only its shape, and
 // Compile checks the rest: exactly one kind is set (AnyRegex, AllRegex,

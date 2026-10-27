@@ -56,14 +56,14 @@ func runBuiltinCases(t *testing.T, rs []Rule, c Compiler) {
 }
 
 // mustBuiltin loads the built-in rules and fails the test on any error.
-func mustBuiltin(t *testing.T, opts ...Option) []Rule {
-	t.Helper()
+func mustBuiltin(tb testing.TB, opts ...Option) []Rule {
+	tb.Helper()
 	rs, errs := Builtin(opts...)
 	for _, e := range errs {
-		t.Errorf("Builtin() error: %v", e)
+		tb.Errorf("Builtin() error: %v", e)
 	}
 	if len(errs) > 0 {
-		t.FailNow()
+		tb.FailNow()
 	}
 	return rs
 }

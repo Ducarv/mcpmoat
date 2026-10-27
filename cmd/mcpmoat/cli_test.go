@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/llm"
 )
@@ -40,13 +41,20 @@ func fakeGetenv(env map[string]string) func(string) string {
 // homeDir and getwd return an error by default. A test that needs them must
 // set them to a fixture path. This way a test that forgets cannot read the
 // real home directory or the real working directory.
+//
+// toolBudget is one hour. The default budget is 5 s of wall-clock time, so a
+// test that reads a big tool text could reach it on a busy machine (for
+// example with -race and the whole suite in parallel) and get an extra
+// MOAT-T1-023 row. A test of the budget sets c.toolBudget itself (see
+// scanWithBudget).
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
-		stdout: &stdout,
-		stderr: &stderr,
-		getenv: getenv,
-		build:  build,
+		stdout:     &stdout,
+		stderr:     &stderr,
+		getenv:     getenv,
+		build:      build,
+		toolBudget: time.Hour,
 		homeDir: func() (string, error) {
 			return "", errors.New("test: home not set")
 		},
@@ -371,7 +379,7 @@ func TestUsageContent(t *testing.T) {
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
 		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
 		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
-		"The file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
@@ -386,7 +394,16 @@ func TestUsageContent(t *testing.T) {
 		"Scan output:\n",
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
-		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
+		// The description and schema rules (T1 and T3) run when scan
+		// connects, with a time budget for each server. Config rules from
+		// --rules never run. The --rules continuation line is checked
+		// without the tabwriter padding.
+		"Rules with target description or schema apply to the tools. Rules with target config are not applied\n",
+		"  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n",
+		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
+		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a finding (MOAT-T1-023):\n",
+		"  high, or critical when a description or schema rule from --rules is critical.\n",
+		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
 		// exception to "offline". The flag lines and their continuation lines
@@ -412,11 +429,14 @@ func TestUsageContent(t *testing.T) {
 	// The scan help says once which rules scan runs, and says that the
 	// --no-connect line lists and checks the configs. The old text said that
 	// scan applies no rules: it must be gone. The failing-server note is only
-	// in the scan notes, not in the exit code block too.
+	// in the scan notes, not in the exit code block too. The time budget and
+	// its rule ID are named once, in the scan notes.
 	for _, once := range []string{
 		"built-in config rules (T4 and T5)",
 		"List the servers in the configs and check the configs.",
-		"not applied yet",
+		"description and schema rules (T1 and T3",
+		"MOAT-T1-023",
+		"time budget",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once
 		// in the flag list; the scan notes do not repeat it.
@@ -442,6 +462,10 @@ func TestUsageContent(t *testing.T) {
 		// schema had version 1.
 		"It runs offline.\n",
 		"scan-output.v1.json",
+		// Before issue #143 scan did not apply the tool rules (YAML) or the
+		// rules from --rules.
+		"not applied yet",
+		"are not applied to tools",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

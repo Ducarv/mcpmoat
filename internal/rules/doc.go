@@ -11,7 +11,11 @@
 // and returns a [Matcher] for the target of the rule. The target decides how
 // the Matcher reads its text (see Schema text below). [Match.Compile] is
 // CompileFor with the description target. The loader compiles at load time
-// through a [Compiler] given with [WithCompiler].
+// only through a [Compiler] given with [WithCompiler], and only to check the
+// block. [NewAnalyzer] compiles every rule of a set once, and keeps the
+// description and schema rules that mcpmoat scan applies. It also compiles
+// the config rules, so a match block that does not compile is an error for
+// every target.
 // Every error from CompileFor is a *[FieldError] that names the field, for
 // example "any_regex[2]". An error never holds text from the rule file (a
 // pattern, a keyword or a parameter key) or input text, so it is safe to
@@ -31,11 +35,13 @@
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
 // it fires on a text longer than 128 KiB, and when the window cuts one of
-// the forms (see matchForms), also when only one of them is cut. The OSC
+// the forms (see baseFormsCut), also when only one of them is cut. The OSC
 // text of a form does not count: the OSC text, such as an OSC 8 link URL,
 // makes a benign text long in the forms that keep sequence text only (see
-// matchWindowCut). The max_length heuristic also flags a long text. Both
-// read the full raw text, as the other text heuristics do.
+// baseFormsCut). The max_length heuristic also flags a long text. It reads
+// the full raw text, as the other text heuristics do. The match_window
+// heuristic reads the window cut flag that the build of the base forms sets,
+// so it shares that build with the regex and keyword rules.
 //
 // A schema has its own budget (see Schema text). The regex and keyword rules
 // read one schema in three passes:
@@ -60,8 +66,28 @@
 // instruction caps. A text has up to 21 forms for a regex (see
 // Normalization below). For the worst case of one match block and its cost,
 // see the cost comment on these caps in match.go. A hostile --rules
-// directory multiplies this cost by the number of rules and texts. A cap at
-// the loader level is future work (#33).
+// directory multiplies this cost by the number of rules and texts. The
+// loader caps a --rules directory at 1000 rule files of at most 64 KiB each,
+// and a rule set at 5000 rules, built-in and external together.
+//
+// In a scan, [Analyzer.CheckTool] checks one tool at a time. The forms of a
+// text are built once and shared by all the rules that read the text: the
+// regex and keyword rules and the match_window heuristic. The schema rules
+// of a tool also share the decoded schema strings, the seams, the forms of
+// each string and seam, and the forms of the raw text pass. Nothing stays
+// after CheckTool returns. So the memory for one tool is at most 21 regex
+// forms of at most 32 KiB for the description (the keyword forms are among
+// them), plus the schema strings and seams with their forms.
+//
+// mcpmoat scan also gives the rule analysis of each server a per-server
+// deadline set by the caller (see cmd/mcpmoat). The analyzer checks the context
+// before each regex or keyword reads each form, and before each schema
+// string, seam and raw text pass. So the analysis stops at most about one
+// regex on one form (or one heuristic call) after the deadline, which is
+// under about 1 s in the measured worst case, plus the build of the forms of
+// one text, which cannot be stopped (see the cost comment in match.go). A
+// server that uses up the deadline gets a finding of rule
+// [RuleAnalysisBudget].
 //
 // # Normalization
 //
@@ -80,7 +106,7 @@
 // The regex and keyword matchers read a few base forms of the text, and
 // each form handles the invisible runes and the escape sequences in another
 // way, so that an invisible rune or a sequence cannot hide a word in all of
-// them. The doc comment of matchForms in normalize.go lists the forms, when
+// them. The doc comment of baseFormsCut in normalize.go lists the forms, when
 // each one is built and the texts that still defeat all of them, and
 // docs/writing-rules.md has the same list for rule authors. A text without
 // invisible runes and escape sequences has one form, so it costs no more.
@@ -122,10 +148,12 @@
 // rune of skeletonTable. So a text with no such rune has at most 14 regex
 // forms, the base forms and their plain folds. The worst case for one match
 // block is 21 x 32 KiB x 2500, about 1.7G instruction-bytes (see the cost
-// comment in match.go for the timings). The forms are built only when a regex or
-// keyword matcher reads the text, and only once for each match. A heuristic
-// gets only the raw text. The match_window heuristic builds the forms
-// itself, to check their length.
+// comment in match.go for the timings). The forms are built only when a
+// regex, keyword or match_window rule reads the text. In a scan, they are
+// built once for each text and shared by all its rules (see Cost bounds).
+// [Matcher.Match] builds them once for each call. The match_window heuristic
+// builds only the base forms, to check their length, and the regex and
+// keyword rules reuse them. The other heuristics get only the raw text.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter
@@ -153,12 +181,14 @@
 //
 // # Heuristics and hits
 //
-// The text heuristics (invisible_unicode, tag_or_bidi_override, max_length,
-// base64_blob, mixed_script and match_window) read the raw text, not the normalized text. A
-// [Hit] from a text heuristic gives a byte offset in the raw text, except a
-// match_window hit, which is about the whole text and has the offset -1
-// ([NoOffset]). A hit from a regex or a keyword has the offset -1, because it
-// comes from the normalized text. Every hit of a schema rule has the offset
+// The text heuristics invisible_unicode, tag_or_bidi_override, max_length,
+// base64_blob and mixed_script read only the raw text, not the normalized
+// text. The match_window heuristic reads the window cut flag of the shared
+// base forms (see Normalization), not the raw text alone. A [Hit] from a
+// text heuristic gives a byte offset in the raw text, except a match_window
+// hit, which is about the whole text and has the offset -1 ([NoOffset]). A
+// hit from a regex or a keyword has the offset -1, because it comes from the
+// normalized text. Every hit of a schema rule has the offset
 // -1, also a hit of a text heuristic. Its Detail starts with one of these
 // texts (see Schema text), where N is the 1-based place of a string in the
 // list of distinct schema strings:
@@ -295,13 +325,14 @@
 //
 // The parameter json_escapes (default 0) says whether the text is raw JSON.
 // A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
-// the default 0 too. With json_escapes: 1 the heuristic decodes JSON escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus
-// exactly 4 hex digits. A surrogate pair is one rune, and a lone surrogate
-// is U+FFFD. The decoded rune acts like a raw rune: a letter, a mark or an
-// invisible rune joins the word, and any other rune ends it. So the escape
-// of U+0406 is a Cyrillic letter in the word. A description is decoded text,
-// so rule MOAT-T1-010 keeps the default 0: a backslash is a normal rune that
-// ends a word, as the model reads it. A schema string is decoded before the
+// the default 0 too. With json_escapes: 1 the heuristic decodes JSON
+// escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus exactly 4 hex
+// digits. A surrogate pair is one rune, and a lone surrogate is U+FFFD. The
+// decoded rune acts like a raw rune: a letter, a mark or an invisible rune
+// joins the word, and any other rune ends it. So the escape of U+0406 is a
+// Cyrillic letter in the word. A description is decoded text, so rule
+// MOAT-T1-010 keeps the default 0: a backslash is a normal rune that ends a
+// word, as the model reads it. A schema string is decoded before the
 // heuristic reads it, so a second decode would turn a literal "\b" into a
 // backspace.
 //

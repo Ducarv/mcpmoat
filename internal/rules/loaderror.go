@@ -49,6 +49,9 @@ const (
 	// ReasonBuiltinIDClash is for an external rule whose ID is the ID of a
 	// built-in rule.
 	ReasonBuiltinIDClash Reason = "rule ID clashes with a built-in rule"
+	// ReasonReservedID is for an external rule whose ID is reserved for a
+	// native mcpmoat rule (see ReservedRuleID).
+	ReasonReservedID Reason = "rule ID is reserved for a native mcpmoat rule"
 	// ReasonDirUnreadable is for a rules directory that cannot be read.
 	ReasonDirUnreadable Reason = "cannot read directory"
 	// ReasonTooManyFiles is for a rules directory with more files than the cap

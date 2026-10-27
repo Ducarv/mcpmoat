@@ -740,7 +740,7 @@ func skeleton(s string) string {
 	return b.String()
 }
 
-// foldSkeleton returns the regex fold of s, a base form of matchForms: the
+// foldSkeleton returns the regex fold of s, a base form of baseFormsCut: the
 // fold of foldMarks with the skeleton applied before it and after it. So
 // "~/." + U+0455 U+0455 U+04BB becomes "~/.ssh".
 //

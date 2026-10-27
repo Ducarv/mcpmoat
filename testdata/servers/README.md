@@ -17,15 +17,17 @@ block is repeated in each folder.
 | `benign/` | none (negative baseline) | none; see its [README](benign/README.md) for the test-only flags |
 | `poisoned/` | T1 tool poisoning | MOAT-T1-002, MOAT-T1-003, MOAT-T1-004, MOAT-T1-005, MOAT-T1-006, MOAT-T1-007, MOAT-T1-008, MOAT-T1-009, MOAT-T1-012, MOAT-T1-017, MOAT-T1-019, MOAT-T1-020 (MOAT-T1-007 and MOAT-T1-017 on the `padded_notes` tool); see its README for the marker of each ID |
 | `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (two sources, see the note below) |
-| `rugpull/` | T2 rug pull | MOAT-T2-001 on `get_time` with `-variant injected` (high); no YAML rule; see its [README](rugpull/README.md) |
+| `rugpull/` | T2 rug pull | MOAT-T2-001 on `get_time` with `-variant injected` (high); the injected description also gives MOAT-T1-002, MOAT-T1-003 and MOAT-T1-004; see its [README](rugpull/README.md) |
 
-MOAT-T3-001 comes from two checks. Only tests run them. For what `scan` runs today, see
+MOAT-T3-001 comes from two checks. For what `scan` runs today, see
 [Data flow](../../docs/ARCHITECTURE.md#data-flow).
 
 - The YAML rule `rules/MOAT-T3-001.yaml` fires on the description of `shadowing/add_numbers` alone.
   `TestFixtureBuiltinT3` checks this on each fixture alone. It expects a hit only on that tool.
+  `scan` applies this rule when it connects to the servers.
 - `rules.CheckShadowing` finds `shadowing/add_numbers` against `mailer/send_email` when it gets
-  both servers. `TestFixtureShadowing` checks this.
+  both servers. `TestFixtureShadowing` checks this. Only tests run this check today: `scan` does
+  not run it yet (issue #200).
 
 `TestFixtureBuiltinT1` also checks MOAT-T1-003 and MOAT-T1-005 on `shadowing/add_numbers`. All three
 tests are in `internal/rules/fixtures_test.go`.
@@ -59,14 +61,16 @@ The test checks the exact rule IDs and severities of each server:
 | Server | Threat | Rule IDs the test asserts |
 |---|---|---|
 | `benign` | none | none |
-| `rugpull` | T2 | `MOAT-T2-001` (high) on `get_time`, in scan 2 only; none in scan 1 |
+| `poisoned` | T1 | `MOAT-T1-002` (high), `MOAT-T1-003` (high), `MOAT-T1-004` (medium), `MOAT-T1-005` (high), `MOAT-T1-006` (medium), `MOAT-T1-007` (low), `MOAT-T1-008` (medium), `MOAT-T1-009` (high), `MOAT-T1-012` (medium), `MOAT-T1-017` (high), `MOAT-T1-019` (high), `MOAT-T1-020` (high) |
+| `shadowing` | T1, T3 | `MOAT-T1-003` (high), `MOAT-T1-005` (high), `MOAT-T3-001` (high) |
+| `mailer` | T3 | none (see below) |
+| `rugpull` | T1, T2 | in scan 2 only: `MOAT-T1-002` (high), `MOAT-T1-003` (high) and `MOAT-T1-004` (medium) on the description of `get_time`, and `MOAT-T2-001` (high) on `get_time`; none in scan 1 |
 | `dangerous` config servers | T4 | the IDs of each server in [its README](../configs/dangerous/README.md): MOAT-T4-001, MOAT-T4-002, MOAT-T4-003, MOAT-T4-004; none on `remote-local` |
 | `typosquat` config servers | T5 | the IDs of each server in [its README](../configs/typosquat/README.md): MOAT-T4-004, MOAT-T5-001 |
-| `poisoned`, `shadowing`, `mailer` | T1, T3 | none, for now (see below) |
 
-`scan` does not apply the T1 and T3 description and schema rules yet (issue #143). So the test
-asserts an empty set for `poisoned`, `shadowing` and `mailer`, and only `MOAT-T2-001` for the
-injected `rugpull`. When #143 lands, the expected sets for `poisoned`, `shadowing` and `mailer`
-get the IDs that `scan` then reports (the first table of this file lists the IDs that the rule
-tests expect today), and the injected `rugpull` gets the T1 IDs of its `get_time`. The
-[rugpull README](rugpull/README.md) names the T1 markers of that text, but not their rule IDs.
+`scan` applies the T1 and T3 description and schema rules to the tools of every server that it
+inspects. These are the sets of `acceptanceToolFindings` and `acceptanceRugPullFindings` in the
+test. They match the IDs that the rule tests expect (the first table of this file). `mailer` is
+the target of the shadowing, not the attacker. Its MOAT-T3-001 comes only from
+`rules.CheckShadowing`, which `scan` does not run yet (issue #200). So the test asserts an empty
+set for `mailer`.

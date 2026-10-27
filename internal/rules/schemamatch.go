@@ -1,14 +1,16 @@
 package rules
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
-// Cost caps for one tool schema in matchSchema. A description is one text, and
-// the regex and keyword matchers read at most MaxMatchInputBytes of it. A
-// schema is many short texts, so it gets its own caps.
+// Cost caps for one tool schema in matchSchemaPrepared. A description is one
+// text, and the regex and keyword matchers read at most MaxMatchInputBytes of
+// it. A schema is many short texts, so it gets its own caps.
 //
 // In the schemaBudget mode, the matchers read one schema in three passes:
 //
@@ -68,8 +70,8 @@ const (
 // jsonSpace holds the four white-space characters of JSON.
 const jsonSpace = " \t\r\n"
 
-// schemaMode tells matchSchema how to read the strings of a schema. The zero
-// value is schemaBudget, the mode of the regex and keyword kinds.
+// schemaMode tells matchSchemaPrepared how to read the strings of a schema.
+// The zero value is schemaBudget, the mode of the regex and keyword kinds.
 type schemaMode int
 
 const (
@@ -80,7 +82,8 @@ const (
 	// cost is linear in the input, so they need no cap.
 	schemaAll
 	// schemaWindow is for the match_window heuristic. It reports the schemas
-	// that the schemaBudget mode cannot read in full (see matchSchema).
+	// that the schemaBudget mode cannot read in full (see
+	// matchSchemaPrepared).
 	schemaWindow
 )
 
@@ -97,10 +100,109 @@ func (m schemaMode) String() string {
 	return fmt.Sprintf("schemaMode(%d)", int(m))
 }
 
-// matchSchema runs match on a tool schema, raw, and returns the hits.
+// preparedSchema is one tool schema, decoded once, with the preparedText of
+// each text that the schema rules read in it. prepareSchemaFrom decodes the
+// schema with schemaStrings and applies the caps of schemaFit once. The
+// preparedText of each string that fits in the caps, and of each seam, is
+// made on its first use and then kept. So when the rules of one tool share
+// one preparedSchema, each of these strings and seams is normalized at most
+// once, whatever the number of rules that read it. The raw text has one
+// preparedText too, for the raw text pass (see matchSchemaPrepared). For a
+// schema that preparedText.schema decodes, it is that preparedText itself.
 //
-// The schema is decoded with schemaStrings. match runs on each key and string
-// value alone. Each hit gets the offset NoOffset and the detail
+// The strings after the first fit strings are not kept (see text). Only the
+// heuristics read them, and the heuristics read only the raw text of a
+// string, so a kept preparedText would only hold memory: a schema can have up
+// to maxSchemaValues strings.
+//
+// A preparedSchema is safe for concurrent use. The fields above mu do not
+// change after prepareSchemaFrom. mu guards texts and seams. The forms of each
+// preparedText are built outside mu, under the sync.Once of that
+// preparedText. Do not copy a preparedSchema (it holds a sync.Mutex); pass
+// the pointer.
+type preparedSchema struct {
+	raw      *preparedText // the whole schema text, for the raw text pass
+	empty    bool          // raw is empty or holds only JSON white space
+	strs     []string      // the keys and string values (schemaStrings)
+	complete bool          // the decode read the whole schema (schemaStrings)
+	fit      int           // how many strings fit in the caps (schemaFit)
+	cut      bool          // the caps cut the strings (schemaFit)
+
+	mu    sync.Mutex      // guards texts and seams
+	texts []*preparedText // texts[i] is for strs[i], i < fit; nil until its first use
+	seams []*preparedText // seams[i-1] joins strs[i-1] and strs[i]; nil until its first use
+}
+
+// prepareSchemaFrom decodes p.raw and returns its preparedSchema. The raw
+// text pass reads p itself, so it shares the forms of p with the other
+// rules that read p, and the raw text is not prepared twice.
+// preparedText.schema calls it.
+//
+// It does not make the preparedText of the strings and seams yet, and it
+// builds no forms (see preparedSchema). An empty or whitespace-only raw is
+// not decoded: it has no strings, and matchSchemaPrepared gives no hits for
+// it. p must not be nil.
+func prepareSchemaFrom(p *preparedText) *preparedSchema {
+	raw := p.raw
+	ps := &preparedSchema{raw: p}
+	if strings.Trim(raw, jsonSpace) == "" {
+		ps.empty = true
+		return ps
+	}
+	ps.strs, ps.complete = schemaStrings([]byte(raw))
+	ps.fit, ps.cut = schemaFit(ps.strs)
+	ps.texts = make([]*preparedText, ps.fit)
+	return ps
+}
+
+// text returns the preparedText of strs[i]. For i < fit, the first call for
+// i makes it, and the next calls return the same one. For i >= fit, each call
+// makes a new preparedText that ps does not keep. Only the schemaAll mode
+// reads these strings, and its heuristics read only p.raw, so they do not
+// share forms (see preparedSchema).
+func (ps *preparedSchema) text(i int) *preparedText {
+	if i >= ps.fit {
+		// strs and fit do not change after prepareSchemaFrom, so this needs
+		// no lock.
+		return prepareText(ps.strs[i])
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.texts[i] == nil {
+		ps.texts[i] = prepareText(ps.strs[i])
+	}
+	return ps.texts[i]
+}
+
+// seam returns the preparedText of the seam of strs[i-1] and strs[i], for i
+// from 1 to fit-1: the last seamSideBytes of strs[i-1], then seamSep, then
+// the first seamSideBytes of strs[i]. So a seam is at most
+// 2*seamSideBytes+len(seamSep) bytes long. The first call for i makes it,
+// and the next calls return the same one. Only the strings that fit in the
+// caps have seams, so there are at most maxSchemaMatchStrings-1 of them.
+func (ps *preparedSchema) seam(i int) *preparedText {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.seams == nil {
+		ps.seams = make([]*preparedText, max(ps.fit-1, 0))
+	}
+	if ps.seams[i-1] == nil {
+		ps.seams[i-1] = prepareText(lastAtRune(ps.strs[i-1], seamSideBytes) + seamSep + cutAtRune(ps.strs[i], seamSideBytes))
+	}
+	return ps.seams[i-1]
+}
+
+// schemaMatchFunc is the inner matcher of matchSchemaPrepared. It returns the
+// hits of one rule in p.raw, read as one text. It must not change p.
+type schemaMatchFunc func(ctx context.Context, p *preparedText) ([]Hit, error)
+
+// matchSchemaPrepared runs match on a tool schema, ps, and returns the hits.
+//
+// The schema is decoded with schemaStrings (see prepareSchemaFrom). match
+// runs on each key and string value alone, with the preparedText that
+// preparedSchema.text gives for it. So the rules that share ps also share the
+// forms of each string that fits in the caps, of each seam and of the raw
+// text. Each hit gets the offset NoOffset and the detail
 // "schema string N: <inner detail>", where N is the 1-based place of the
 // string in the list of schemaStrings.
 //
@@ -150,9 +252,9 @@ func (m schemaMode) String() string {
 // seams, plus one description for the raw text. In the schemaAll mode, match
 // reads every string and no seam.
 //
-// The window rule: in the schemaWindow mode, matchSchema does not return the
-// hits of match. It returns one hit when the regex and keyword rules can miss
-// a part of the schema:
+// The window rule: in the schemaWindow mode, matchSchemaPrepared does not
+// return the hits of match. It returns one hit when the regex and keyword
+// rules can miss a part of the schema:
 //
 //   - the decode is not complete, so the rules read only a part of the
 //     strings, and the raw text in a window;
@@ -161,43 +263,64 @@ func (m schemaMode) String() string {
 //     string is longer than the window of the matcher.
 //
 // Otherwise it returns nil. This mode reads every string.
-func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
-	if strings.Trim(raw, jsonSpace) == "" {
-		return nil
+//
+// The context: matchSchemaPrepared checks ctx before each string, before each
+// seam and before the raw text. When ctx is done, it stops and returns the
+// hits that it found so far, and an error that wraps ctx.Err(). In the
+// schemaWindow mode it then returns no hit. When match returns an error,
+// matchSchemaPrepared stops in the same way, drops the hits of that call, and
+// wraps the error with the label of the text. The error holds no input text,
+// unless the error of match does. With a context that is never done and a
+// match that never fails, the error is nil.
+//
+// ps and match must not be nil.
+func matchSchemaPrepared(ctx context.Context, ps *preparedSchema, mode schemaMode, match schemaMatchFunc) ([]Hit, error) {
+	if ps.empty {
+		return nil, nil
 	}
-	strs, complete := schemaStrings([]byte(raw))
-	var n int
-	var cut bool
-	if mode != schemaAll { // the all mode has no caps
-		n, cut = schemaFit(strs)
-	}
-
 	if mode == schemaWindow {
-		return schemaWindowHit(strs, complete, cut, match)
+		return schemaWindowHit(ctx, ps, match)
 	}
+	n := len(ps.strs) // the all mode has no caps
 	if mode == schemaBudget {
-		strs = strs[:n]
+		n = ps.fit
 	}
 
 	var l hitList
-	for i, s := range strs {
-		if hits := match(s); len(hits) > 0 {
+	for i := range n {
+		if err := ctx.Err(); err != nil {
+			return l.result("schema hits"), fmt.Errorf("match schema strings: %w", err)
+		}
+		hits, err := match(ctx, ps.text(i))
+		if err != nil {
+			return l.result("schema hits"), fmt.Errorf("schema string %d: %w", i+1, err)
+		}
+		if len(hits) > 0 {
 			keepSchemaHits(&l, fmt.Sprintf("schema string %d", i+1), hits)
 		}
 	}
-	// In the schemaBudget mode, strs holds only the strings that fit the
-	// budget, so the seams never read past it.
+	// The seams use only the strings that fit the budget (see matchSeams).
 	if mode == schemaBudget && len(l.hits) == 0 {
-		label, hits := matchSeams(strs, match)
+		label, hits, err := matchSeams(ctx, ps, match)
+		if err != nil {
+			return l.result("schema hits"), err
+		}
 		keepSchemaHits(&l, label, hits)
 	}
-	if !complete {
+	if !ps.complete {
+		if err := ctx.Err(); err != nil {
+			return l.result("schema hits"), fmt.Errorf("match schema raw text: %w", err)
+		}
 		// The raw text is JSON text: an escape such as \u001b is not decoded
 		// here. MOAT-T1-018 flags every schema that cannot be read in full,
 		// so this pass is the second line, not the only one.
-		keepSchemaHits(&l, "schema raw text", match(raw))
+		hits, err := match(ctx, ps.raw)
+		if err != nil {
+			return l.result("schema hits"), fmt.Errorf("schema raw text: %w", err)
+		}
+		keepSchemaHits(&l, "schema raw text", hits)
 	}
-	return l.result("schema hits")
+	return l.result("schema hits"), nil
 }
 
 // schemaFit returns how many strings of strs, from the start, fit in the
@@ -220,22 +343,31 @@ func schemaFit(strs []string) (n int, cut bool) {
 }
 
 // schemaWindowHit returns the one hit of the schemaWindow mode of
-// matchSchema, or nil. It stops at the first reason it finds.
-func schemaWindowHit(strs []string, complete, cut bool, match func(string) []Hit) []Hit {
+// matchSchemaPrepared, or nil. It stops at the first reason it finds. It
+// checks ctx before each string. When ctx is done or match fails, it returns
+// no hit and an error (see matchSchemaPrepared).
+func schemaWindowHit(ctx context.Context, ps *preparedSchema, match schemaMatchFunc) ([]Hit, error) {
 	switch {
-	case !complete:
-		return []Hit{{Offset: NoOffset, Detail: "schema JSON cannot be read in full"}}
-	case cut:
+	case !ps.complete:
+		return []Hit{{Offset: NoOffset, Detail: "schema JSON cannot be read in full"}}, nil
+	case ps.cut:
 		return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf(
 			"schema is longer than the match window: over %d strings or %d bytes",
-			maxSchemaMatchStrings, maxSchemaMatchBytes)}}
+			maxSchemaMatchStrings, maxSchemaMatchBytes)}}, nil
 	}
-	for i, s := range strs {
-		if hits := match(s); len(hits) > 0 {
-			return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("schema string %d: %s", i+1, hits[0].Detail)}}
+	for i := range ps.strs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("match schema strings: %w", err)
+		}
+		hits, err := match(ctx, ps.text(i))
+		if err != nil {
+			return nil, fmt.Errorf("schema string %d: %w", i+1, err)
+		}
+		if len(hits) > 0 {
+			return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("schema string %d: %s", i+1, hits[0].Detail)}}, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // keepSchemaHits adds hits to l, with the offset NoOffset and the detail
@@ -248,36 +380,52 @@ func keepSchemaHits(l *hitList, label string, hits []Hit) {
 	}
 }
 
-// matchSeams runs match on the seam of each pair of neighbour strings in strs,
-// in document order. A seam is one text: the last seamSideBytes of the first
-// string, then seamSep, then the first seamSideBytes of the second string. So
-// a seam is at most 2*seamSideBytes+len(seamSep) bytes long.
+// matchSeams runs match on the seam of each pair of neighbour strings of ps,
+// in document order. It reads only the strings that fit in the caps of
+// schemaFit (the first ps.fit strings), so the seams never read past the
+// budget of the strings. A seam is one text: the last seamSideBytes of the
+// first string, then seamSep, then the first seamSideBytes of the second
+// string (see preparedSchema.seam).
 //
 // It stops at the first seam that matches. It returns the hits of that seam
 // and the label "schema strings N and N+1", where N is the 1-based place of
-// the first string in strs. This is the same numbering as
-// "schema string N" in matchSchema. The label holds no input text. When no
-// seam matches, it returns "" and nil.
+// the first string in ps.strs. This is the same numbering as
+// "schema string N" in matchSchemaPrepared. The label holds no input text.
+// When no seam matches, it returns "" and nil.
 //
 // The sum of the lengths of the seam texts is at most maxSeamBytes. When the
 // next seam does not fit, matchSeams stops silently and reports nothing. That
 // is on purpose: one benign string between the two halves of a split already
 // defeats any join in document order. So a report here would be a false
 // positive on large benign schemas, with no gain in security.
-func matchSeams(strs []string, match func(string) []Hit) (label string, hits []Hit) {
+//
+// It checks ctx before it matches each seam, after the byte cap. When ctx is
+// done or match fails, it returns no hit and an error (see
+// matchSchemaPrepared).
+func matchSeams(ctx context.Context, ps *preparedSchema, match schemaMatchFunc) (string, []Hit, error) {
 	total := 0
-	for i := 1; i < len(strs); i++ {
-		seam := lastAtRune(strs[i-1], seamSideBytes) + seamSep + cutAtRune(strs[i], seamSideBytes)
-		total += len(seam)
+	for i := 1; i < ps.fit; i++ {
+		// The byte cap comes before the ctx check: when no work is left, a
+		// deadline that passes now must not make the tool count as not fully
+		// checked.
+		seam := ps.seam(i)
+		total += len(seam.raw)
 		if total > maxSeamBytes {
-			return "", nil
+			return "", nil, nil
 		}
-		if hits := match(seam); len(hits) > 0 {
-			// strs[i-1] is string i and strs[i] is string i+1, 1-based.
-			return fmt.Sprintf("schema strings %d and %d", i, i+1), hits
+		if err := ctx.Err(); err != nil {
+			return "", nil, fmt.Errorf("match schema seams: %w", err)
+		}
+		// strs[i-1] is string i and strs[i] is string i+1, 1-based.
+		hits, err := match(ctx, seam)
+		if err != nil {
+			return "", nil, fmt.Errorf("schema strings %d and %d: %w", i, i+1, err)
+		}
+		if len(hits) > 0 {
+			return fmt.Sprintf("schema strings %d and %d", i, i+1), hits, nil
 		}
 	}
-	return "", nil
+	return "", nil, nil
 }
 
 // lastAtRune returns at most the last n bytes of s. It is the mirror of

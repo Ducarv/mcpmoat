@@ -4,9 +4,10 @@
 > `mcpmoat scan --no-connect` reads configs, loads rules, lists servers and applies the config rules
 > (T4 and T5) and the ignore list. `mcpmoat scan` without `--no-connect` also connects to the
 > servers, pins their tools on the first run, and reports new, removed and changed tools on later
-> runs (T2). It prints a diff for each new and each changed tool. `mcpmoat pin --accept <server>
-> --expect <digest>` accepts the changes. The YAML rules are not
-> applied to tools yet (#143). `mcpmoat scan --json` writes the same report as one JSON document
+> runs (T2). It prints a diff for each new and each changed tool. It also applies the description
+> and schema rules (T1 and T3, built-in and from `--rules`) to the tools, with a time budget for
+> each server. `mcpmoat pin --accept <server> --expect <digest>` accepts the changes. The shadowing
+> check is not applied yet (#200). `mcpmoat scan --json` writes the same report as one JSON document
 > (FR-15, see [JSON output](#json-output)). `mcpmoat scan --llm` also asks a language model to rate
 > the name and description of each inspected tool, and adds advisory findings (FR-17, see
 > [The `--llm` classifier](#the---llm-classifier)).
@@ -42,8 +43,10 @@ docs/                   PRD and other documentation
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
   apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step
   that both commands use (`serverIdentity`, `readPins`, `pinnable`, `appendDiff`). `scan_pins.go`
-  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line. `scan_llm.go`
-  holds the `--llm` step: it maps each `inspect.Tool` to an `llm.Input` and calls a
+  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
+  `scan_rules.go` loads the rules and builds the `rules.Analyzer` (`loadRules`), and
+  `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds the `--llm`
+  step: it maps each `inspect.Tool` to an `llm.Input` and calls a
   `toolClassifier`, a small interface that `*llm.Client` implements. The `cli.newClassifier`
   factory builds it, and tests replace the factory with a fake.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
@@ -54,8 +57,9 @@ docs/                   PRD and other documentation
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
-- `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
-  check, and reads `.mcpmoat-ignore`.
+- `internal/rules`: loads and checks the YAML rules, applies the description and schema rules to
+  one tool at a time (`Analyzer`), runs the config heuristics, and reads `.mcpmoat-ignore`. It also
+  holds the shadowing check (`CheckShadowing`), which `scan` does not call yet (#200).
 - `internal/pins`: computes the canonical hash of each tool (`Canonical`, `Hash`), makes the pins of
   a server (`Snapshot`), keeps the versioned `pins.json` store (`Load`, `Get`, `Set`, `Save` and
   `DefaultPath`), compares the pins with the current tools (`Compare`), and makes the digest of a
@@ -104,6 +108,8 @@ only in `_test.go` files, so none of them reaches the binary.
 | `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
+`internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.
+This direction is allowed: `inspect` does not import `rules`, so there is no cycle.
 `internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name and description.
 
 You can check this table with:
@@ -143,15 +149,25 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    classifier. This all happens before the rules load (see
    [The `--llm` classifier](#the---llm-classifier)).
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
-   `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. This only loads
-   and checks the rules. A bad rule file or an ID problem gives exit code 2.
+   `rules.NewSet` checks for duplicate rule IDs, for clashes with built-in IDs and for reserved
+   native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023` or an ID
+   that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last, `rules.NewAnalyzer` compiles the
+   match block of each rule once. It compiles a config rule only to check it and drops its matcher,
+   and it keeps the description and schema rules. A rule whose regex does not compile gives a load
+   error with the file, the field `match` and the reason. A bad rule file, an ID problem or a bad
+   regex gives exit code 2, also with `--no-connect` (`loadRules` in `cmd/mcpmoat/scan_rules.go`).
+   Then `scan` prints a fixed notice on stderr for the rules from `--rules` that it does not apply:
+   `configRulesNotice` when a rule has the target `config` (`scan` runs only its built-in config
+   checks), and `toolRulesNoConnectNotice` when a rule has the target `description` or `schema` and
+   `--no-connect` is set.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
-   two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules, with the file
-   and the flags, and one for the pin rules and the LLM rules, with the flags only. The file can come
-   from a cloned repository, so it cannot ignore a pin rule or an LLM rule. The guard is
-   `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with
-   `MOAT-T2-`, the unexported `ruleIDPrefix`) and for `llm.RuleID` and `llm.RuleIDInvalid`
-   (`MOAT-LLM-001` and `MOAT-LLM-002`). When a file entry for such a rule matches a finding, `scan`
+   two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool
+   rules, with the file and the flags, and one for the pin rules, the LLM rules and `MOAT-T1-023`, with
+   the flags only. The file can come
+   from a cloned repository, so it cannot ignore a pin rule, an LLM rule or the budget rule. The
+   guard is `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts
+   with `MOAT-T2-`, the unexported `ruleIDPrefix`), for `llm.RuleID` and `llm.RuleIDInvalid`
+   (`MOAT-LLM-001` and `MOAT-LLM-002`) and for `rules.RuleAnalysisBudget` (`MOAT-T1-023`). When a file entry for such a rule matches a finding, `scan`
    keeps the finding, prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells
    the user to use `--ignore`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
@@ -171,7 +187,7 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    on stdout instead of the terminal report. See [JSON output](#json-output).
 
 Steps 1 and 2 always run. Steps 3 to 6 run in both modes. Without `--no-connect`, `scan` adds
-the connect and pin steps between step 5 and step 6:
+the connect, pin, tool rule and LLM steps between step 5 and step 6:
 
 - 5a. `scan` first reads `pins.json` (`pins.Load`). A bad file exits with code 2 before any server
   starts. Then `inspect.Run` inspects the servers with the `--timeout` and `--concurrency` values.
@@ -187,7 +203,8 @@ the connect and pin steps between step 5 and step 6:
 - Signals: `main` passes a context that ends on Ctrl-C, `SIGTERM` or `SIGHUP`. The stdio servers run
   in their own session, so the terminal does not signal them. When the context ends, `inspect.Run`
   stops them. `scan` then prints `mcpmoat scan: interrupted; no pins were saved`, saves nothing,
-  prints no report and exits with code 2. A second signal ends mcpmoat at once.
+  prints no report and exits with code 2. A signal during the tool rule step (5d) or the LLM step
+  (5e) gives the same result. A second signal ends mcpmoat at once.
 - 5b. For each server, `cmd/mcpmoat` checks the tools against the store that it read in 5a.
   - A server that is not in the store is pinned on its first run. If the tools cannot be pinned (see
     `pinnable`), the server gets a high MOAT-T2-004 finding: it is never pinned, so its tools are
@@ -233,23 +250,61 @@ the connect and pin steps between step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it.
-- 5d. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the pin
-  step. It sends the name and description of each tool of each server with status `StatusOK` to the
-  classifier, and adds one advisory row for each tool that the model rates as risky, for each tool
-  with an unusable answer, and for each cut tool (see the verdict rules in
+- 5d. The tool rule step (`toolRulesStep` in `cmd/mcpmoat/scan_tools.go`) runs after the pin step
+  and before the LLM step, on each server with status `StatusOK`, in config order. It does not run
+  when the pin step failed as a whole. For each tool, `rules.Analyzer.CheckTool` runs the
+  description rules on `Tool.Description` and the schema rules on the text of `Tool.InputSchema`.
+  It reads no other field: not the output schema, the title or the annotations, and not the
+  prompts or the resources. It checks one tool at a time and keeps nothing after the call, so the
+  memory stays low.
+  - Shared forms: the rules of one text share one prepared text, so the match forms of the text
+    (at most 21 for a regex, `maxRegexForms`) are built once for all the rules. The schema rules of
+    a tool also share the decoded schema strings, the seams and the raw text pass. The
+    `match_window` heuristic reads the shared result of the window cut. The findings come in a fixed
+    order: the description rules, then the schema rules, each in rule ID order.
+  - Rows: one row for each rule with a hit. The row has the field `tool`, the tool name as the key
+    and `description` or `schema` as the related name. It never holds tool text or pattern text.
+    The key is cut to 512 runes and then ends with `...` (`toolKey`, `maxToolKeyRunes`), so a long
+    tool name cannot fill the report.
+    The rule set gives the severity, the title, the risk and the remediation. The ignore list drops
+    rows like the config rows (see step 3), but the `MOAT-T1-023` row only with `--ignore`.
+  - Budget: each server gets its own wall-clock budget of 5 seconds (`toolRulesBudget`), as a
+    context deadline. The analyzer checks the context before each regex on each form, and between
+    the schema strings and the seams. So it stops at most about one regex on one form after the
+    deadline (under about 1 s in the measured worst case), plus one build of the forms of one text,
+    which cannot be stopped (#146). A server that uses up its budget keeps the rows found so far and
+    gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
+    Its severity is the highest severity of the description and schema rules that `scan` applies,
+    but never lower than high (`budgetSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
+    the built-in rules, and critical when a description or schema rule from `--rules` is critical.
+    This severity counts every applied description or schema rule, also one that `--ignore` drops,
+    on purpose: the rules that did not run could have given a finding (fail closed). Its related
+    text is `rule analysis time budget used up; N of M tools not fully checked`. `scan` also prints
+    one fixed warning on stderr for that server. This is a finding, not an
+    execution error: the exit code follows `--fail-on` (1 with the default), and the JSON
+    `complete` stays `true`. The other servers still run, each with its own budget.
+  - Errors: a signal during the step prints the interrupted line, prints no report and gives exit
+    code 2 (see Signals above). An internal error of the step (a guard: `CheckTool` fails only when
+    its context ends) prints `mcpmoat scan: server <name>: the rule analysis failed (internal
+    error)`, prints no report and gives exit code 2.
+- 5e. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the tool
+  rule step. It sends the name and description of each tool of each server with status `StatusOK`
+  to the classifier, and adds one advisory row for each tool that the model rates as risky, for
+  each tool with an unusable answer, and for each cut tool (see the verdict rules in
   [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
   rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
-  the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
-  The ignored count includes the dropped LLM rows.
-- The pin findings join the config findings in one report. A changed tool and a new tool also get a
-  diff, so the user can review the content of a new tool before they accept it. A new tool has the
-  header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
-  (see 5b) has the header `Not verified tool <tool> on server <server> (current text):` and only
-  added lines. A finding that the user ignored gets no diff. `report.WriteDiffs` prints the diffs
-  after the findings. When a diff was cut at
-  the size limit (`Change.Truncated`), `scan` prints a warning on stderr that names the tool and the
-  server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
-  before you accept it`. Then `writeAcceptHints` prints one line for each hint on stdout:
+  the pin rows. The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the
+  dropped LLM rows.
+- The pin findings and the tool rule findings join the config findings in one report. A changed
+  tool and a new tool also get a diff, so the user can review the content of a new tool before
+  they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
+  lines. A not verified tool with a diff (see 5b) has the header
+  `Not verified tool <tool> on server <server> (current text):` and only added lines. A finding
+  that the user ignored gets no diff. `report.WriteDiffs` prints the diffs after the findings.
+  When a diff was cut at the size limit (`Change.Truncated`), `scan` prints a warning on stderr
+  that names the tool and the server: `the diff of tool <tool> on server <server> was cut at the
+  size limit; review the full tool before you accept it`. Then `writeAcceptHints` prints one line
+  for each hint on stdout:
   `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
   `scan --config <file>`, the command holds `--config <file>` too, so `pin` reads the same file, and
   `--project <path>` when the hint has a project. When a diff of that server was cut, the line ends
@@ -276,8 +331,8 @@ the connect and pin steps between step 5 and step 6:
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
-In `reportScan`, a signal during the inspection or the LLM step, or a report write error, returns 2
-at once.
+In `reportScan`, a signal during the inspection, the tool rule step or the LLM step, an internal
+error of the tool rule step, or a report write error, returns 2 at once.
 Otherwise `reportScan` prints the report and then gets the exit code from `scanExitCode` in
 `cmd/mcpmoat/scan_findings.go`. An execution error gives 2, and 2 wins over 1. Otherwise
 `hasFailingFinding` gives 1 when a row (the ignored findings are already dropped) has a severity at
@@ -322,12 +377,10 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
 A signal during step 3 (Ctrl-C, `SIGTERM` or `SIGHUP`, see Signals above) stops the server. `pin`
 saves nothing, prints `mcpmoat pin: interrupted; no pins were saved` and exits with 2.
 
-The code below is built and tested, but `scan` does not call it yet: `rules.CheckShadowing`. The
-tool rules (descriptions and schemas) do not run
-yet (#143). `scan` loads the rules from `--rules` and checks them, but does not apply them. It
-prints a notice on stderr that says so.
+The code below is built and tested, but `scan` does not call it yet: `rules.CheckShadowing`
+(#200).
 
-Known gaps: the store has no lock (#150), only a read just before the save.
+Known gap: the store has no lock (#150), only a read just before the save.
 
 Known limit: a renamed or moved server (a new name, config file or project path) has a new identity.
 `scan` pins it again as a new server, and it does not report the old pin. A follow-up issue will
@@ -335,12 +388,16 @@ track this.
 
 ### Planned (PRD section 8)
 
-The target flow is `discover -> inspect -> rules -> pins -> report`. The `discover`, `inspect`,
-`pins` and `report` steps run today, and the `rules` step is not applied to tools yet:
+The target flow is `discover -> inspect -> rules -> pins -> report`. All five steps run today.
+`scan` runs the tool rules after the pin step, not before it. The order does not change the
+findings, because neither step reads the result of the other. The open parts are in the `rules`
+step:
 
 - `discover` lists the servers.
 - `inspect` connects and reads the tools, prompts and resources.
-- `rules` applies the rules and the heuristics to what `inspect` read.
+- `rules` applies the rules and the heuristics to what `inspect` read. Today the tool rules read
+  only the description and the input schema of each tool (see 5d), not the prompts or the
+  resources. The shadowing check is not applied yet (#200).
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls). This part is
   built (see above).
 - `report` prints the findings, as a table and as JSON. Both are built (see above).
@@ -587,7 +644,9 @@ The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk
 (`ChangeKind.Risk` and `ChangeKind.Remediation`). These remediations name the `To accept` command.
 `scan` prints no such line for a server whose tools cannot be pinned, so it gives every pin finding
 of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pins.go`). The
-MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too. The LLM findings
+MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too. The budget finding
+MOAT-T1-023 has no YAML file, so its title, risk and fix are fixed texts in
+`cmd/mcpmoat/scan_tools.go` (`budgetTitle`, `budgetRisk`, `budgetRemediation`). The LLM findings
 MOAT-LLM-001 and MOAT-LLM-002 have fixed titles, risk texts and remediations in `internal/llm`
 (`Title`, `Category.Text`, `Remediation`, `InvalidTitle`, `InvalidText`, `InvalidRemediation`). No
 text from the model reaches them.
@@ -631,7 +690,9 @@ Shape (`schema_version` 2):
   be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
   internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
   the reason is on stderr only. A failed save of new pins comes after the document is written, so it
-  does not change `complete`: the findings are whole, and the exit code is 2.
+  does not change `complete`: the findings are whole, and the exit code is 2. A server that used up
+  its rule analysis budget does not change `complete` either: it is a `MOAT-T1-023` finding (see
+  5d).
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.

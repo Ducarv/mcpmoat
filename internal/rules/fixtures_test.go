@@ -221,59 +221,51 @@ const (
 	t3Prefix = "MOAT-T3-"
 )
 
-// compiledRule is a built-in rule with its compiled match block.
-type compiledRule struct {
-	id     string
-	target rules.Target
-	m      *rules.Matcher
-}
-
-// prefixRules returns the built-in rules whose ID starts with prefix and that
-// run on a description or a schema, with their match blocks compiled. Config
-// rules need a server config, so they are skipped.
-func prefixRules(t *testing.T, prefix string) []compiledRule {
+// prefixAnalyzer returns an Analyzer for the built-in rules whose ID starts
+// with prefix and that run on a description or a schema, and the sorted IDs
+// of these rules. Config rules need a server config, so they are skipped.
+// The tests call CheckTool on it, so they run the same path as scan.
+func prefixAnalyzer(t *testing.T, prefix string) (*rules.Analyzer, []string) {
 	t.Helper()
-	c := rules.BuiltinCompiler()
 	// WithCompiler makes a load error name the file, the line and the column.
-	// The loader discards the Matchers (see WithCompiler), so compile again.
-	rs := rules.MustBuiltin(t, rules.WithCompiler(c))
-	var out []compiledRule
+	rs := rules.MustBuiltin(t, rules.WithCompiler(rules.BuiltinCompiler()))
+	var picked []rules.Rule
+	var ids []string
 	for _, r := range rs {
 		if r.Target == rules.TargetConfig || !strings.HasPrefix(r.ID, prefix) {
 			continue
 		}
-		m, err := c(r.Match, r.Target)
-		if err != nil {
-			t.Fatalf("%s: compile: %v", r.ID, err)
-		}
-		out = append(out, compiledRule{id: r.ID, target: r.Target, m: m})
+		picked = append(picked, r)
+		ids = append(ids, r.ID)
 	}
-	return out
-}
-
-// ruleHits returns the sorted IDs of the rules in rs with the given target
-// that match text. It prepares text once and shares it between the rules, so
-// one set of match forms is built for each target text (not for a schema
-// target, whose strings get their own forms, see matchPrepared).
-func ruleHits(rs []compiledRule, target rules.Target, text string) []string {
-	p := rules.PrepareText(text)
-	var ids []string
-	for _, cr := range rs {
-		if cr.target == target && len(rules.MatchPrepared(cr.m, p)) > 0 {
-			ids = append(ids, cr.id)
-		}
+	set, errs := rules.NewSet(picked, nil)
+	if len(errs) > 0 {
+		t.Fatalf("NewSet(%s rules) errors = %v", prefix, errs)
+	}
+	a, errs := rules.NewAnalyzer(set)
+	if len(errs) > 0 {
+		t.Fatalf("NewAnalyzer(%s rules) errors = %v", prefix, errs)
 	}
 	slices.Sort(ids)
-	return ids
+	return a, ids
 }
 
-// targetText returns the text that a rule with target sees in tool: the
-// description, or the input schema as raw JSON.
-func targetText(tool inspect.Tool, target rules.Target) string {
-	if target == rules.TargetSchema {
-		return string(tool.InputSchema)
+// toolHits runs a.CheckTool on tool and returns the sorted IDs of the rules
+// that match, for each target.
+func toolHits(t *testing.T, a *rules.Analyzer, tool inspect.Tool) map[rules.Target][]string {
+	t.Helper()
+	findings, err := a.CheckTool(t.Context(), tool)
+	if err != nil {
+		t.Fatalf("CheckTool(%s) error = %v, want nil", tool.Name, err)
 	}
-	return tool.Description
+	hits := make(map[rules.Target][]string)
+	for _, f := range findings {
+		hits[f.Target] = append(hits[f.Target], f.RuleID)
+	}
+	for _, ids := range hits {
+		slices.Sort(ids)
+	}
+	return hits
 }
 
 // toolTarget is a tool and one of its targets, the key of an expected result.
@@ -288,11 +280,7 @@ type toolTarget struct {
 func TestBuiltinT1IDs(t *testing.T) {
 	t.Parallel()
 
-	var ids []string
-	for _, cr := range prefixRules(t, t1Prefix) {
-		ids = append(ids, cr.id)
-	}
-	slices.Sort(ids)
+	_, ids := prefixAnalyzer(t, t1Prefix)
 	wantIDs := []string{
 		"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005",
 		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-010",
@@ -306,16 +294,17 @@ func TestBuiltinT1IDs(t *testing.T) {
 }
 
 // TestFixtureBuiltinT1 runs the built-in T1 rules on every tool of the fixture
-// servers, once for the description and once for the schema. It does not check
-// prompts or resources. A rule has one target, so the two are checked apart.
-// Each tool and target must match the rule IDs listed for it, and no others;
-// a pair that is not listed must match none. The test also checks the tool
-// names of each server, so a missing or new tool fails the test.
+// servers with Analyzer.CheckTool, the scan path, which reads the description
+// and the schema. It does not check prompts or resources. A rule has one
+// target, so the hits of the two targets are checked apart. Each tool and
+// target must match the rule IDs listed for it, and no others; a pair that is
+// not listed must match none. The test also checks the tool names of each
+// server, so a missing or new tool fails the test.
 func TestFixtureBuiltinT1(t *testing.T) {
 	t.Parallel()
 
-	rs := prefixRules(t, t1Prefix)
-	if len(rs) == 0 {
+	a, ids := prefixAnalyzer(t, t1Prefix)
+	if len(ids) == 0 {
 		t.Fatal("no built-in T1 rules loaded; the checks would pass with no rule")
 	}
 
@@ -357,16 +346,16 @@ func TestFixtureBuiltinT1(t *testing.T) {
 		}
 
 		for _, tool := range st.Tools {
-			for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
-				t.Run(fx.name+"/"+tool.Name+"/"+string(target), func(t *testing.T) {
-					t.Parallel()
-					got := ruleHits(rs, target, targetText(tool, target))
+			t.Run(fx.name+"/"+tool.Name, func(t *testing.T) {
+				t.Parallel()
+				hits := toolHits(t, a, tool)
+				for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
 					want := fx.want[toolTarget{tool.Name, target}]
-					if !slices.Equal(got, want) {
-						t.Errorf("T1 hits = %q, want %q", got, want)
+					if got := hits[target]; !slices.Equal(got, want) {
+						t.Errorf("%s T1 hits = %q, want %q", target, got, want)
 					}
-				})
-			}
+				}
+			})
 		}
 	}
 }
@@ -453,13 +442,13 @@ func TestFixtureTyposquatConfig(t *testing.T) {
 }
 
 // TestFixtureBuiltinT3 runs the built-in T3 rules on every tool of the fixture
-// servers, once for the description and once for the schema. Only the
-// description of add_numbers in the shadowing fixture may match.
+// servers with Analyzer.CheckTool, which reads the description and the schema.
+// Only the description of add_numbers in the shadowing fixture may match.
 func TestFixtureBuiltinT3(t *testing.T) {
 	t.Parallel()
 
-	rs := prefixRules(t, t3Prefix)
-	if len(rs) == 0 {
+	a, ids := prefixAnalyzer(t, t3Prefix)
+	if len(ids) == 0 {
 		t.Fatal("no built-in T3 rules loaded; the checks would pass with no rule")
 	}
 	want := map[string]map[toolTarget][]string{ // sorted; a pair not listed matches none
@@ -473,8 +462,9 @@ func TestFixtureBuiltinT3(t *testing.T) {
 			}
 		}
 		for _, tool := range st.Tools {
+			hits := toolHits(t, a, tool)
 			for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
-				got := ruleHits(rs, target, targetText(tool, target))
+				got := hits[target]
 				if w := want[name][toolTarget{tool.Name, target}]; !slices.Equal(got, w) {
 					t.Errorf("%s/%s/%s: T3 hits = %q, want %q", name, tool.Name, target, got, w)
 				}

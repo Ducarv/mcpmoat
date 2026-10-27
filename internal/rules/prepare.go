@@ -6,47 +6,85 @@ import (
 )
 
 // maxRegexForms is the largest number of forms that regexForms returns, 21
-// in all: the seven base forms of matchForms, the seven plain folds
+// in all: the seven base forms of baseFormsCut, the seven plain folds
 // (foldMarks) and the seven skeleton folds (foldSkeleton) of the base forms.
 const maxRegexForms = 3 * maxBaseForms
 
 // maxKeywordForms is the largest number of forms that keywordForms returns:
-// the folds of the base forms of matchForms.
+// the folds of the base forms of baseFormsCut.
 const maxKeywordForms = maxBaseForms
 
 // preparedText is one target text and the match forms built from it. The
 // forms are built once for each target text, so the rules that read the same
-// text do not normalize it again. The build is lazy: it runs on the first
-// call of regexForms or keywordForms. A heuristic gets only raw, so it does
-// not build the forms of p. The match_window heuristic builds its own forms
-// of raw (see matchWindowCut).
+// text do not normalize it again.
+//
+// The build is lazy and has two steps. Each step runs at most once:
+//
+//   - Step one (buildBase) calls baseFormsCut once. It keeps the base forms
+//     and the cut flag of the match window. windowCut runs only this step,
+//     so the match_window heuristic does not build the folds.
+//   - Step two (buildFolds) builds the plain folds and the skeleton folds
+//     from the base forms of step one. regexForms and keywordForms run it,
+//     and it runs step one first when step one did not run yet.
+//
+// The other heuristics get only raw, so they build no forms of p.
 //
 // The forms are shared only when the caller shares the preparedText: a
 // caller that builds one preparedText for each target text and calls
 // matchPrepared for every rule with it builds the forms once. Match builds
-// one preparedText for each call. A schema rule does not share p:
-// matchPrepared reads a schema with matchSchema, and each schema string gets
-// its own preparedText (see matchPrepared).
+// one preparedText for each call.
 //
-// A preparedText is safe for concurrent reads: once guards the build, so the
-// first call of regexForms or keywordForms builds the forms, and the other
-// calls wait for it and then only read them. Do not copy a preparedText
-// (it holds a sync.Once); pass the pointer.
+// For the schema target, raw is a JSON schema. schema decodes it once into
+// a preparedSchema and keeps it. So all schema rules of one tool that share
+// p also share the decoded strings, the preparedText of each string and of
+// each seam, and so the forms and the window cut flag of each of them (see
+// preparedSchema).
+//
+// A preparedText is safe for concurrent reads. A sync.Once guards each step
+// and the schema: the first call builds, and the other calls wait for it and
+// then only read. Do not copy a preparedText (it holds sync.Once values);
+// pass the pointer.
 type preparedText struct {
-	raw      string    // the target text, as the server sent it
-	once     sync.Once // guards build
+	raw string // the target text, as the server sent it
+
+	baseOnce sync.Once // guards buildBase (step one)
+	base     []string  // the base forms of baseFormsCut (dedup)
+	cut      bool      // the cut flag of baseFormsCut
+
+	foldOnce sync.Once // guards buildFolds (step two)
 	regex    []string  // base forms, then their plain and skeleton folds (dedup)
 	keywords []string  // the foldMarks of each base form, no skeleton (dedup)
+
+	schemaOnce sync.Once       // guards the prepareSchemaFrom call of schema
+	sch        *preparedSchema // raw decoded as a schema; nil until schema runs
 }
 
-// prepareText returns a preparedText for raw. It does not build the forms yet
-// (see preparedText).
+// prepareText returns a preparedText for raw. It does not build the forms or
+// the schema yet (see preparedText).
 func prepareText(raw string) *preparedText {
 	return &preparedText{raw: raw}
 }
 
+// windowCut reports whether the match window cuts raw: the cut flag of
+// baseFormsCut(raw). It runs step one (buildBase) when it did not run yet,
+// and it does not build the folds.
+func (p *preparedText) windowCut() bool {
+	p.baseOnce.Do(p.buildBase)
+	return p.cut
+}
+
+// schema returns raw decoded as a tool schema (see prepareSchemaFrom). The
+// first call decodes it, and the next calls return the same preparedSchema.
+// So the schema rules that share p decode the schema once and share the
+// forms of its strings and seams. The raw text pass of the schema reads p
+// itself, so p is not prepared a second time.
+func (p *preparedText) schema() *preparedSchema {
+	p.schemaOnce.Do(func() { p.sch = prepareSchemaFrom(p) })
+	return p.sch
+}
+
 // regexForms returns the forms that the regex matchers (any_regex and
-// all_regex) read: the base forms of matchForms, and then, for each base
+// all_regex) read: the base forms of baseFormsCut, and then, for each base
 // form that is not only ASCII, its plain fold (foldMarks) and its skeleton
 // fold (foldSkeleton), each one when it is a new form. A regex matches when
 // it matches in one form. So the regex `ignore` also matches the fullwidth
@@ -73,28 +111,41 @@ func prepareText(raw string) *preparedText {
 // The caller must not modify the returned slice or its elements: the next
 // call returns the same slice.
 func (p *preparedText) regexForms() []string {
-	p.once.Do(p.build)
+	p.foldOnce.Do(p.buildFolds)
 	return p.regex
 }
 
 // keywordForms returns the forms that the keyword matcher reads: the fold
-// (foldMarks) of each base form of matchForms, without the confusable
+// (foldMarks) of each base form of baseFormsCut, without the confusable
 // skeleton of the regex forms. Equal folds are kept only once, so there are
 // at most maxKeywordForms forms, each at most MaxMatchInputBytes long.
 //
 // The caller must not modify the returned slice or its elements: the next
 // call returns the same slice.
 func (p *preparedText) keywordForms() []string {
-	p.once.Do(p.build)
+	p.foldOnce.Do(p.buildFolds)
 	return p.keywords
 }
 
-// build builds the forms of p. regexForms and keywordForms call it through
-// p.once, so it runs once. It calls matchForms once, and it folds each base
-// form once with foldMarks: the plain fold is a keyword form and a regex
-// form. It then adds the skeleton fold (foldSkeleton) to the regex forms. A
-// base form that is only ASCII is its own fold, so it is not folded
-// (foldMarks and foldSkeleton would return it unchanged).
+// buildBase is step one of the build (see preparedText). windowCut and
+// buildFolds call it through p.baseOnce, so it runs once. It calls
+// baseFormsCut once, so the base forms and the cut flag come from the same
+// build of each form.
+func (p *preparedText) buildBase() {
+	p.base, p.cut = baseFormsCut(p.raw)
+}
+
+// buildFolds is step two of the build (see preparedText). regexForms and
+// keywordForms call it through p.foldOnce, so it runs once. It gets the base
+// forms from step one, and it folds each base form once with foldMarks: the
+// plain fold is a keyword form and a regex form. It then adds the skeleton
+// fold (foldSkeleton) to the regex forms. A base form that is only ASCII is
+// its own fold, so it is not folded (foldMarks and foldSkeleton would return
+// it unchanged).
+//
+// The two steps have their own sync.Once, so buildFolds can call
+// p.baseOnce.Do while it runs under p.foldOnce. buildBase never calls
+// p.foldOnce, so the two never wait for each other in a loop.
 //
 // The plain fold stays a regex form next to the skeleton fold, so no match
 // of the plain fold is lost. The skeleton can move a word edge: a rune of
@@ -105,15 +156,17 @@ func (p *preparedText) keywordForms() []string {
 // ".env" keeps the old edge, so the pattern matches in it.
 //
 // skeletonFold computes the skeleton fold from the plain fold when it can,
-// so build does not call foldMarks twice for one base form.
+// so buildFolds does not call foldMarks twice for one base form.
 //
-// The cut of the match window does not change: matchWindowCut reads the
-// base forms of raw (see buildFormCut), and the max_length heuristic counts
-// the runes of raw. Neither reads the folds. A fold is never longer than its
-// base form (see foldMarks and skeleton), so it holds all of the text of the
-// base form.
-func (p *preparedText) build() {
-	base := matchForms(p.raw) // distinct already (see appendNew)
+// The cut of the match window does not change: windowCut reads the cut flag
+// of the base forms of raw (see buildFormCut), and the max_length heuristic
+// counts the runes of raw. Neither reads the folds. A fold is never longer
+// than its base form (see foldMarks and skeleton), so it holds all of the
+// text of the base form.
+func (p *preparedText) buildFolds() {
+	p.baseOnce.Do(p.buildBase)
+	base := p.base // distinct already (see appendNew)
+	// A copy: regex gets new elements, and base must stay as step one made it.
 	regex := append(make([]string, 0, maxRegexForms), base...)
 	keywords := make([]string, 0, maxKeywordForms)
 	for _, f := range base {

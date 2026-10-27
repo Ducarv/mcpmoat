@@ -225,7 +225,7 @@ func TestHeuristicMixedScript(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileHeuristic(%v) error = %v", tt.params, err)
 			}
-			if got := fn(text); !slices.Equal(got, tt.want) {
+			if got := fn(prepareText(text)); !slices.Equal(got, tt.want) {
 				t.Errorf("params %v: fn() = %v, want %v", tt.params, got, tt.want)
 			}
 		}

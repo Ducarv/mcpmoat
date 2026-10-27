@@ -157,7 +157,7 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
 - A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
   that the model rates `none` or `low`, or whose answer is unusable.
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
-- A hostile config that hides the LLM findings: only `--ignore` hides them, not `.mcpmoat-ignore`.
+- A hostile config that hides the LLM findings or the rule time budget finding: only `--ignore` hides them, not `.mcpmoat-ignore`.
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
   environment or a placeholder, and docs/llm.md advises a key made for `--llm` with a low spend
   limit.
@@ -449,9 +449,10 @@ references:
 - `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
   entries scoped to a rule ID, optionally limited to a server and tool.
 - Ignored findings do not affect the exit code and are counted as "ignored" in the summary.
-- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`) or the LLM rules
-  (`MOAT-LLM-001` and `MOAT-LLM-002`). The file can come from a cloned repository, and it must not
-  silence the rug-pull alarm or the LLM classifier (FR-17) for every server of the user. Only
+- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`), the LLM rules
+  (`MOAT-LLM-001` and `MOAT-LLM-002`) or the budget rule (`MOAT-T1-023`). The file can come from a
+  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17) or the
+  sign that a server used up its rule time budget for every server of the user. Only
   `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a warning
   when a file entry for such a rule matches a finding.
 

@@ -35,7 +35,6 @@ gap: the rule needs a priority claim such as "always" or "before any other tool"
 "Before using this tool, ..." is also a common benign setup step. The other markers of this tool
 still trigger MOAT-T1-002 to MOAT-T1-005.
 
-MOAT-T1-007 (oversized description) has no marker here yet.
 MOAT-T1-010 and MOAT-T1-011 (mixed-script word) have no marker here yet.
 
 ## Notes

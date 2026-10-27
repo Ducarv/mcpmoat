@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime/debug"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
@@ -59,6 +60,12 @@ type cli struct {
 	// without the flag no LLM code runs (NFR-01). Tests inject a fake, or a
 	// stub that fails to prove that it is never called.
 	newClassifier func(llm.Config) (toolClassifier, error)
+	// toolBudget is the time that the tool rule step of scan can use for the
+	// tools of one server. Zero means the default, toolRulesBudget, so
+	// runWithContext does not set it. A negative value is used up at once
+	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
+	// not enough, because the context can still be live for a short time.
+	toolBudget time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -247,7 +254,8 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
 	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
 	fprintf(tw, "  --rules <dir>\tLoad extra *.yaml and *.yml rules from this folder (not recursive)\n")
-	fprintf(tw, "  \tA folder with no rule file, or a rule ID that clashes with a built-in rule, is an error\n")
+	fprintf(tw, "  \tA folder with no rule file, a rule ID that clashes with a built-in rule, or a reserved native rule ID is an error\n")
+	fprintf(tw, "  \tRules with target description or schema apply to the tools. Rules with target config are not applied\n")
 	fprintf(tw, "  --timeout <duration>\tTime limit for each server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
@@ -260,7 +268,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis: it can come from a cloned repository. Use --ignore for them\n")
 	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
 	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
 	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
@@ -289,7 +297,11 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
 	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
-	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
+	fprintf(w, "  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n")
+	fprintf(w, "  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n")
+	fprintf(w, "  The rule analysis of each server has a time budget of %s. A server that uses it up is a finding (MOAT-T1-023):\n", toolRulesBudget)
+	fprintf(w, "  high, or critical when a description or schema rule from --rules is critical.\n")
+	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
 	fprintf(w, "  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools)
