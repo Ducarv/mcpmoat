@@ -85,6 +85,20 @@ func TestIsSecretName(t *testing.T) {
 		{name: "Cookie", want: true},
 		{name: "SESSION_ID", want: true},
 		{name: "AWS_CREDENTIALS", want: true},
+		{name: "passcode", want: true},
+		{name: "PASS_CODE", want: true},
+		{name: "userPasscode", want: true},
+		{name: "ACCESS_CODE", want: true},
+		{name: "access-code", want: true},
+		{name: "accessCode", want: true},
+		{name: "accesscode", want: true},
+		{name: "SIGNATURE", want: true},
+		{name: "webhookSignature", want: true},
+		{name: "x-hub-signature-256", want: true},
+		// Accepted false positives: the name holds a secret word but is
+		// not a credential name.
+		{name: "SIGNATURE_ALGORITHM", want: true},
+		{name: "ACCESS_CODE_LENGTH", want: true},
 
 		// Short forms match as a whole word, or at the end of an all-caps word.
 		{name: "pass", want: true},
@@ -95,6 +109,21 @@ func TestIsSecretName(t *testing.T) {
 		{name: "githubPat", want: true},
 		{name: "pin", want: true},
 		{name: "OTP", want: true},
+		{name: "salt", want: true},
+		{name: "SIGNING_SALT", want: true},
+		{name: "passwordSalt", want: true},
+		{name: "--salt2", want: true},
+		{name: "PWSALT", want: true},
+
+		// An all-caps word that starts with "PASS" matches.
+		{name: "PASSCODE", want: true},
+		{name: "DB_PASSWRD", want: true},
+		{name: "PASSCODE1", want: true},
+		// Accepted false positives of the all-caps rules.
+		{name: "PASSIVE_MODE", want: true},
+		{name: "PASSTHROUGH", want: true},
+		{name: "SALT_ROUNDS", want: true},
+		{name: "BASALT", want: true},
 
 		// Not secret names.
 		{name: "LOG_LEVEL", want: false},
@@ -108,6 +137,21 @@ func TestIsSecretName(t *testing.T) {
 		{name: "spin", want: false},
 		{name: "pinned", want: false},
 		{name: "credit", want: false},
+		{name: "passive", want: false},
+		{name: "passthrough", want: false},
+		{name: "salty", want: false},
+		{name: "SALTY_DOG_ENABLED", want: false},
+		{name: "basalt", want: false},
+		{name: "signing", want: false},
+		{name: "SIGNING_METHOD", want: false},
+		{name: "ACCESS_LEVEL", want: false},
+		{name: "access", want: false},
+		{name: "ERROR_CODE", want: false},
+		{name: "SUCCESS_CODE", want: false},
+		{name: "--assignee", want: false},
+		{name: "--license", want: false},
+		{name: "LICENSE", want: false},
+		{name: "seed", want: false},
 		{name: "Content-Type", want: false},
 		{name: "", want: false},
 	}

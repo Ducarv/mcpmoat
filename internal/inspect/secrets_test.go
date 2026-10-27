@@ -238,6 +238,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			want: []string{
 				rmBasic("user-name", "userinfo-pw-1"),
 				strings.TrimPrefix(rmBasic("user-name", "userinfo-pw-1"), "Basic "),
+				// The whole user info, from urlCredentials.
+				"user-name:userinfo-pw-1",
 				"userinfo-pw-1",
 			},
 		},
@@ -249,6 +251,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			want: []string{
 				rmBasic("ghp_userinfo1", "x-oauth-basic"),
 				strings.TrimPrefix(rmBasic("ghp_userinfo1", "x-oauth-basic"), "Basic "),
+				// The whole user info, from urlCredentials.
+				"ghp_userinfo1:x-oauth-basic",
 				"ghp_userinfo1",
 				"x-oauth-basic",
 			},
@@ -271,7 +275,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			name: "secret path segment",
 			url:  func(ts *httptest.Server) string { return ts.URL + "/" + pathSecret + "/mcp" },
 			wrap: func(next http.Handler) http.Handler { return http.StripPrefix("/"+pathSecret, next) },
-			want: []string{pathSecret},
+			// The value of the key=value segment, from urlCredentials.
+			want: []string{pathSecret, "path-secret-1"},
 		},
 		{
 			name:    "expanded values",
@@ -360,7 +365,9 @@ func TestRemoteResultSecretsShortScrub(t *testing.T) {
 			t.Fatalf("Remote() error = %v", err)
 		}
 		basic := rmBasic("short-user", shortPassword)
-		rmCheckResult(t, got, basic, strings.TrimPrefix(basic, "Basic "), longHeader)
+		// The whole user info has more than 8 bytes, so it is in the list
+		// (from urlCredentials). The short password alone is not.
+		rmCheckResult(t, got, basic, strings.TrimPrefix(basic, "Basic "), userinfo, longHeader)
 	})
 
 	t.Run("failure echoes the values", func(t *testing.T) {
@@ -453,6 +460,16 @@ const credTok = "FAKE-TOKEN-0123456789"
 // token-like, so only discover.ArgCredentials, which finds the password,
 // makes it a credential.
 const credDSN = "postgres://app:hunter2pw@db/prod" //nolint:gosec // G101: fake test credential
+
+// credDSNPort is a fake connection URL with a port and a password of 14
+// bytes. Its inner pieces "app:S3cretPassw0rd" and "S3cretPassw0rd" are long
+// enough for Result.Secrets.
+const credDSNPort = "postgres://app:S3cretPassw0rd@db:5432/app" //nolint:gosec // G101: fake test credential
+
+// credDSNShortPW is a fake connection URL with a password of 2 bytes. Its
+// inner pieces are too short for Result.Secrets: they go to the whole-word
+// list of the error scrub only. The whole URL is long enough.
+const credDSNShortPW = "postgres://app:pw@db/app" //nolint:gosec // G101: fake test credential
 
 // checkCredentials fails the test when the revealed values of r.Credentials
 // are not want, in the same order, or when want is empty and r.Credentials is
@@ -615,7 +632,8 @@ func TestEnvCredentials(t *testing.T) {
 		{name: "plain values", env: map[string]string{"NODE_ENV": "production", "LOG_LEVEL": "information"}, want: nil},
 		{name: "secret-like key", env: map[string]string{"API_KEY": "production"}, want: []string{"production"}},
 		{name: "token-like value", env: map[string]string{"REGION": credTok}, want: []string{credTok}},
-		{name: "URL with a password", env: map[string]string{"DATABASE_URL": credDSN}, want: []string{credDSN}},
+		// After the value, the credentials inside it (see valueCredentials).
+		{name: "URL with a password", env: map[string]string{"DATABASE_URL": credDSN}, want: []string{credDSN, "app:hunter2pw", "hunter2pw"}},
 		{
 			name: "connection string with no password",
 			env:  map[string]string{"PGOPTS": "host=localhost dbname=production user=postgres"},
@@ -632,7 +650,7 @@ func TestEnvCredentials(t *testing.T) {
 			// The keys sort as A_TOKEN, B_PLAIN, C_URL, NODE_ENV.
 			name: "mixed in key order",
 			env:  map[string]string{"NODE_ENV": "production", "C_URL": credDSN, "B_PLAIN": "plain-value", "A_TOKEN": "EIGHT888"},
-			want: []string{"EIGHT888", credDSN},
+			want: []string{"EIGHT888", credDSN, "app:hunter2pw", "hunter2pw"},
 		},
 		{
 			// resultCredentials removes the duplicate later.
@@ -653,6 +671,87 @@ func TestEnvCredentials(t *testing.T) {
 				t.Errorf("envCredentials() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestInnerCredentialsEverySource checks that the credentials inside one
+// config value (see valueCredentials) reach the same lists whether the value
+// is an env value (envSecrets, envCredentials), the value of an expanded
+// variable (lookupRecorder) or a header value (splitHeaders,
+// headerCredentials, headerShortSecrets). A server can echo the password of a
+// connection URL alone, so a long piece goes to Secrets and Credentials and a
+// short piece to the whole-word list only. A value with no credential in it
+// gets no inner piece.
+func TestInnerCredentialsEverySource(t *testing.T) {
+	t.Parallel()
+
+	// lists are the lists of one source for one config value: the long list
+	// for Result.Secrets, the credentials and the short whole-word list.
+	type lists struct{ secrets, creds, short []string }
+	// The env key, the variable name and the header key are plain, so only
+	// the value can make it a credential.
+	sources := map[string]func(value string) lists{
+		"env value": func(value string) lists {
+			env := discover.SecretMap{"MCPMOAT_TEST_VALUE": discover.NewSecret(value)}
+			secrets, short := envSecrets(env)
+			return lists{secrets, envCredentials(env), short}
+		},
+		"expanded variable": func(value string) lists {
+			rec := &lookupRecorder{lookup: func(string) (string, bool) { return value, true }}
+			rec.Lookup("MCPMOAT_TEST_VALUE")
+			return lists{rec.values, rec.credentials, rec.short}
+		},
+		"header value": func(value string) lists {
+			cfg := discover.SecretMap{"X-Db": discover.NewSecret(value)}
+			_, secrets := splitHeaders(cfg)
+			return lists{secrets, headerCredentials(cfg), headerShortSecrets(cfg)}
+		},
+	}
+	tests := []struct {
+		name        string
+		value       string
+		wantSecrets []string // in the order of Result.Secrets
+		wantCreds   []string // in the order of Result.Secrets
+		wantShort   []string // sorted, each value one time
+	}{
+		{
+			name:        "long password",
+			value:       credDSNPort,
+			wantSecrets: []string{credDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{credDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+		},
+		{
+			name:        "short password",
+			value:       credDSNShortPW,
+			wantSecrets: []string{credDSNShortPW},
+			wantCreds:   []string{credDSNShortPW},
+			wantShort:   []string{"app:pw", "pw"},
+		},
+		// Must not match: a media type has no credential in it.
+		{
+			name:        "media type",
+			value:       "application/json",
+			wantSecrets: []string{"application/json"},
+		},
+	}
+	for _, tt := range tests {
+		for name, source := range sources {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				got := source(tt.value)
+				// The same filters as Inspect and Remote.
+				r := Result{Secrets: resultSecrets(got.secrets)}
+				r.Credentials = resultCredentials(r.Secrets, got.creds)
+
+				checkSecrets(t, r.Secrets, tt.wantSecrets)
+				checkCredentials(t, r, tt.wantCreds)
+				// slices.Sorted reads the values from the iterator that
+				// slices.Values gives and returns them in a new sorted slice.
+				if short := slices.Compact(slices.Sorted(slices.Values(got.short))); !slices.Equal(short, tt.wantShort) {
+					t.Errorf("short list = %q, want %q", short, tt.wantShort)
+				}
+			})
+		}
 	}
 }
 

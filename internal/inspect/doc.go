@@ -109,7 +109,17 @@
 // and the text of a [Result] (the names and descriptions of tools, prompts
 // and resources, and ServerName) is not scrubbed. So a server can echo a
 // secret in its Result. On success, Inspect puts the recorded values and the
-// configured values of at least 8 bytes in Result.Secrets.
+// configured values of at least 8 bytes in Result.Secrets. A server can also
+// echo one piece of a value alone. So Result.Secrets also holds these pieces
+// of at least 8 bytes:
+//
+//   - the credential pieces inside env values, expanded values and header
+//     values, as discover.ArgCredentials finds them, such as the password of
+//     "postgres://u:pw@h/db";
+//   - each pair ("sid=x") and each value ("x") of a Cookie, Set-Cookie or
+//     Cookie2 header, also the value without its quotes;
+//   - the URL credentials: the whole user info, and the value inside a
+//     "key=value" path segment or a matrix parameter (";token=x").
 //
 // A stdio server also gets its argv, and real configs often put a token
 // there ("--api-key", -H "Authorization: Bearer <token>"). So for a stdio
@@ -123,9 +133,12 @@
 // Result.Credentials is the subset of Result.Secrets that looks like a
 // credential (issues #229 and #235): an env value or a variable whose name is
 // secret-like or whose value looks like a token, the credential pieces of
-// the argv (discover.ArgCredentials), the values of credential headers, the
-// URL user info and the URL parts with a secret-like key or a token-like
-// value. Plain config words, such as "NODE_ENV=production" or a
+// the argv (discover.ArgCredentials), the credential pieces inside env
+// values, expanded values and header values (such as the password of a
+// connection URL), the values of credential headers with all their pieces
+// (every pair and value of a cookie header counts), the URL user info and the
+// URL parts with a secret-like key or a token-like value, also the value
+// inside a "key=value" path segment or a matrix parameter. Plain config words, such as "NODE_ENV=production" or a
 // "Content-Type" value, are not in it. scan --llm uses Result.Credentials to
 // replace those values in the tool names and descriptions that it sends to
 // the provider (FR-17). The local report (terminal and JSON) uses the wide
@@ -318,9 +331,18 @@
 // the SDK. It sends the userinfo as a Basic Authorization header, unless the
 // config sets an Authorization header.
 //
-// On success, the same values of at least 8 bytes go to Result.Secrets, and
-// the ones that look like a credential also go to Result.Credentials (see
-// Placeholder expansion).
+// The package also removes the pieces of these values that a server can
+// echo alone: the credential part after an auth scheme, the decoded Basic
+// name and password, the credential pieces inside a header value, each pair
+// and each value of a cookie header, and the URL credentials (the whole user
+// info, and the value inside a "key=value" path segment or a matrix
+// parameter). A password is removed wherever it stands, at any length. A
+// cookie piece or a piece inside a header value that is shorter than 8 bytes
+// is removed as a whole word only.
+//
+// On success, the same values and pieces of at least 8 bytes go to
+// Result.Secrets, and the ones that look like a credential also go to
+// Result.Credentials (see Placeholder expansion).
 //
 // The text of a [ConnectError] can still hold text that the server controls
 // (see "Untrusted data" below).

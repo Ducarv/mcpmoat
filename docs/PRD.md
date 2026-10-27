@@ -628,12 +628,16 @@ with `--no-color`).
   has no colour.
 - A server gets the configured env values, header values and args, and it can echo one of them in
   its tool text. The report (terminal and `--json`, `scan` and `pin`) shows each such value of 8
-  bytes or more as `********` in every tool name and pin diff that it prints. The mask comes before
-  any cut. A value shorter than 8 bytes is not masked. Nothing says that a value was masked.
+  bytes or more as `********` in every tool name and pin diff that it prints, and also each
+  credential piece inside a value that a server can echo alone (the password of a connection URL,
+  each pair and value of a cookie header, the value of a `key=value` URL path segment). The mask
+  comes before any cut. A value shorter than 8 bytes is not masked. Nothing says that a value was
+  masked.
   `.mcpmoat-ignore` and `--ignore` still match the real tool name. The hashes and `pins.json` keep
   the raw text. docs/limits.md holds the limits.
 - When a server fails, mcpmoat removes the configured values from the failure text (the reason in
-  the summary, the `pin` error and the stderr warning of `--json`). A value of 8 bytes or more and a
+  the summary, the `pin` error and the stderr warning of `--json`), and the credential pieces inside
+  them (the password of a connection URL, one cookie value). A value of 8 bytes or more and a
   header value go wherever they stand. A value of 1 to 7 bytes goes only where it stands as a whole
   word, so a common word that is also a configured value is masked too (with a value `1`, `exit
   status 1` shows as `exit status ********`). This stops an accidental echo only: a hostile server
@@ -722,10 +726,15 @@ the machine**.
   in the name and the description of the tools of that server, before it cuts them. A value is a
   credential when it is: an env value or an expanded placeholder value whose name looks secret, or
   that looks like a token or holds a credential (`DATABASE_URL=postgres://app:pw@db/prod`); a
-  header value when the header name looks secret, the value is an auth scheme and a credential
-  (`Bearer <token>`), or it looks like a token; the URL user info and password, and a query or path
-  part whose key looks secret or that looks like a token; for a stdio server, a part of the
-  expanded command and args that looks like a credential. Plain config words, such as
+  header value when the header name looks secret or is a cookie header (`Cookie`, `Set-Cookie`),
+  the value is an auth scheme and a credential (`Bearer <token>`), or it looks like a token; the
+  whole URL user info and the password, and a query or path part, or the value inside a
+  `key=value` path segment or matrix parameter, whose key looks secret or that looks like a token;
+  for a stdio server, a part of the expanded command and args that looks like a credential. The
+  credential pieces inside an env value, an expanded value or a header value count too, by the arg
+  rules (the password of `postgres://app:pw@db/prod`), and so do each `name=value` pair and each
+  value of a cookie header, also a plain pair such as `theme=dark` (fail closed). A server can echo
+  such a piece alone. Plain config words, such as
   `NODE_ENV=production`, `Content-Type: application/json` or `?workspace=engineering`, are not
   removed. The wide list of every configured value (`inspect.Result.Secrets`) is for local use only,
   by the report mask (FR-14). The scrub of failure text removes the same values, and the shorter
@@ -733,7 +742,9 @@ the machine**.
   field `redacted: true`, and the system prompt tells the model that `********` is removed text and
   not an instruction. The limits:
   - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
-  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed. The
+  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed, nor a
+    value with a backslash sequence (`C:\tools\new_dir`) that the server sends as real control
+    characters, which then show as the same escapes. The
     decoded `name:password` text of a `Basic` header is not removed as a whole: only the password
     (8 bytes or more) and the base64 forms are.
   - A plain config value that a server echoes reaches the provider, for example the env value

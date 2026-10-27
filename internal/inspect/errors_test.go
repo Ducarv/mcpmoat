@@ -1899,6 +1899,60 @@ func TestScrubShortWords(t *testing.T) {
 			short:   []string{"*"},
 			want:    "got ******** and ********",
 		},
+		{
+			// The last "*" of the stars is the first byte of the value: the
+			// copy of the Mask must not take it and leave "1234".
+			name:  "value with a leading star after seven stars",
+			text:  "*******" + "*1234",
+			short: []string{"*1234"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			name:  "value with a leading star inside a mask in a sentence",
+			text:  "pin ********1234 end",
+			short: []string{"*1234"},
+			want:  "pin *******" + discover.Mask + " end",
+		},
+		{
+			name:  "value with a leading star right after a mask",
+			text:  discover.Mask + "*1234",
+			short: []string{"*1234"},
+			want:  discover.Mask + discover.Mask,
+		},
+		{
+			name:  "value with a leading star glued to a letter stays",
+			text:  discover.Mask + "1234x",
+			short: []string{"*1234"},
+			want:  discover.Mask + "1234x",
+		},
+		{
+			// The longer form "*1234" wins over "1234" at the same text.
+			name:  "value with a leading star and its tail as values",
+			text:  discover.Mask + "1234",
+			short: []string{"1234", "*1234"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			// A match that ends inside the mask is only stars: the mask is
+			// copied once, then the star after it goes.
+			name:  "value star after a mask is masked once",
+			text:  discover.Mask + "*",
+			short: []string{"*"},
+			want:  discover.Mask + discover.Mask,
+		},
+		{
+			// "**" starts at the last star of the mask and ends after it.
+			name:  "value of two stars across the mask end",
+			text:  discover.Mask + "*",
+			short: []string{"**"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			name:  "value star in a run of masks does not blow up",
+			text:  strings.Repeat(discover.Mask, 3),
+			short: []string{"*"},
+			want:  strings.Repeat(discover.Mask, 3),
+		},
 		{name: "cut after replace drops a value at the cut edge", text: cutText, short: []string{"12345"}, want: cutPrefix + "…"},
 		{name: "cut without the value in short keeps it", text: cutText, want: cutPrefix + "12345…"},
 		{name: "nil short changes nothing", text: "exit status 1", want: "exit status 1"},

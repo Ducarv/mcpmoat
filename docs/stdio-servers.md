@@ -151,7 +151,9 @@ Rules:
 - The server list shows the config as written, not the expanded values. When a server fails,
   mcpmoat removes the values that the server got from the error text: the env values and the
   secrets in the args of a stdio server, the header values of a remote server, and the expanded
-  values of both. This covers the
+  values of both. It also removes the credential pieces inside these values that the arg check
+  finds, such as the password `pw` of `postgres://app:pw@db/app`, and each `name=value` pair and
+  each value of a `Cookie` or `Set-Cookie` header. This covers the
   reason in the summary on stdout, the error of `pin` and the stderr warning of `--json`. A value
   of 8 bytes or more and a header value are removed wherever they stand. A value of 1 to 7 bytes
   is removed only where it stands as a whole word: the byte before it and the byte after it are

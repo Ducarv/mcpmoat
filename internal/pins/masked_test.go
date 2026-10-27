@@ -485,6 +485,51 @@ func TestCompareMaskedHidesSecrets(t *testing.T) {
 	}
 }
 
+// TestCompareMaskedEscapeLikeSecretLimit pins the current behaviour of an
+// accepted limit, the encoded-form limit in docs/limits.md. The mask compares
+// the decoded JSON text. A configured value that holds a backslash sequence
+// as plain characters, such as the "\t" and "\n" of a Windows path, is not
+// found when a server echoes it into a JSON string as is: JSON decodes "\t"
+// to a tab and "\n" to a newline. The render writes them back as "\t" and
+// "\n", so the configured value shows in the diff. If a change closes this
+// limit, this test fails: then update it and docs/limits.md.
+func TestCompareMaskedEscapeLikeSecretLimit(t *testing.T) {
+	t.Parallel()
+
+	// A raw string literal (in backquotes) keeps each backslash as a plain
+	// character: this is the fake value as the user typed it in the config.
+	const configured = `C:\tools\new_dir`
+	mask := func(s string) string { return strings.ReplaceAll(s, configured, maskMarker) }
+	// The server writes the value into the JSON text with no escaping.
+	current := withBase(func(c *inspect.Tool) {
+		c.InputSchema = json.RawMessage(`{"default":"` + configured + `"}`)
+	})
+
+	// Self-check: the decoded default holds a tab and a newline (an
+	// interpreted string literal, in double quotes, reads "\t" and "\n" as
+	// those characters), so the mask cannot find the configured text in it.
+	var schema struct {
+		Default string `json:"default"`
+	}
+	if err := json.Unmarshal(current.InputSchema, &schema); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if schema.Default != "C:\tools\new_dir" {
+		t.Fatalf("fixture: decoded default = %q, want a tab and a newline in it", schema.Default)
+	}
+
+	got := CompareMasked(mustSnapshot(t, []inspect.Tool{maskedBase()}), []inspect.Tool{current}, mask)
+	if k := kinds(got); !slices.Equal(k, []string{"changed:fetch"}) {
+		t.Fatalf("kinds = %q, want %q", k, []string{"changed:fetch"})
+	}
+	if !strings.Contains(got[0].Diff, configured) {
+		t.Errorf("Diff does not show the configured value, so the limit changed; update this test and docs/limits.md:\n%s", got[0].Diff)
+	}
+	if strings.Contains(got[0].Diff, maskMarker) {
+		t.Errorf("Diff holds %s, so the mask found the value; update this test and docs/limits.md:\n%s", maskMarker, got[0].Diff)
+	}
+}
+
 // TestCompareMaskedKeepsVerdict checks that the verdicts come from the raw
 // text: a tool that holds a secret value but did not change is not reported,
 // and a mask that hides all text still gives the changes of Compare.

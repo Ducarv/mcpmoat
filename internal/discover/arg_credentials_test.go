@@ -58,6 +58,23 @@ var argCredentialsCases = []argCredentialsCase{
 	{name: "env pair alone", args: []string{"GITHUB_TOKEN=" + credPw}, want: []string{credPw}, redacted: []string{"GITHUB_TOKEN=" + mk}},
 	{name: "secret key and colon", args: []string{"token:" + credPw}, want: []string{credPw}, redacted: []string{mk}},
 
+	// The security review probe: values that are not token-like count only
+	// because their names are secret-like.
+	{name: "passcode number", args: []string{"PASSCODE=48291736"}, want: []string{"48291736"}, redacted: []string{"PASSCODE=" + mk}},
+	{name: "access code word", args: []string{"-e", "ACCESS_CODE=Summer2024!x"}, want: []string{"Summer2024!x"}, redacted: []string{"-e", "ACCESS_CODE=" + mk}},
+	{name: "signing salt word", args: []string{"SIGNING_SALT=pepperpepper"}, want: []string{"pepperpepper"}, redacted: []string{"SIGNING_SALT=" + mk}},
+	{name: "signature flag", args: []string{"--signature", credPw}, want: []string{credPw}, redacted: []string{"--signature", mk}},
+	{name: "passcode in a query", args: []string{"https://example.com/mcp?passcode=" + credPw}, want: []string{credPw}, redacted: []string{"https://example.com/mcp?passcode=" + mk}},
+	{
+		// "SALTY_DOG_ENABLED" has no secret-like word, so "on" is no
+		// credential.
+		name:     "salty is not salt",
+		args:     []string{"SALTY_DOG_ENABLED=on"},
+		want:     nil,
+		notWant:  []string{"on"},
+		redacted: []string{"SALTY_DOG_ENABLED=on"},
+	},
+
 	// Token-like pieces fail closed.
 	{name: "uuid path segment", args: []string{"/data/" + credUUID + "/x"}, want: []string{credUUID}, redacted: []string{"/data/" + mk + "/x"}},
 	{name: "token prefix path segment", args: []string{"/data/ghp_FAKE0123/x"}, want: []string{"ghp_FAKE0123"}, redacted: []string{"/data/" + mk + "/x"}},

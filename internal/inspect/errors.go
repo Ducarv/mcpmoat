@@ -502,7 +502,9 @@ func replaceSecrets(text, rawURL, redactedURL string, secrets, short []string) s
 // not leave "-c" behind when "ab" is a value too. The checks read text as it
 // was before this call, and a discover.Mask already in text is copied as it
 // is: a value such as "*" must not mask the stars of a mask again and again.
-// A text with no value in it comes back unchanged.
+// But a match that starts inside such a Mask and goes on past its end is a
+// value that the copy would cut in two (see maskedWordAt), so it goes too. A
+// text with no value in it comes back unchanged.
 func replaceWords(text string, short []string) string {
 	forms := wordForms(text, short)
 	if len(forms) == 0 {
@@ -512,8 +514,16 @@ func replaceWords(text string, short []string) string {
 	b.Grow(len(text))
 	for i := 0; i < len(text); {
 		if strings.HasPrefix(text[i:], discover.Mask) {
+			j, n := maskedWordAt(text, i, forms)
+			if n == 0 {
+				b.WriteString(discover.Mask)
+				i += len(discover.Mask)
+				continue
+			}
+			// Copy the stars before the match, then mask the match.
+			b.WriteString(text[i:j])
 			b.WriteString(discover.Mask)
-			i += len(discover.Mask)
+			i = j + n
 			continue
 		}
 		if n := wordAt(text, i, forms); n > 0 {
@@ -576,6 +586,25 @@ func wordAt(text string, i int, forms []string) int {
 		}
 	}
 	return 0
+}
+
+// maskedWordAt looks for a whole-word match (see wordAt) that starts inside
+// the discover.Mask at text[i] and ends after it. It returns the start and
+// the length n of the first such match, or n = 0 if there is none.
+//
+// A value that starts with "*" needs this. For the value "*1234" and the text
+// "*******" + "*1234" (the same bytes as discover.Mask + "1234"), a copy of
+// the Mask as a whole would take the first "*" of the value and leave "1234".
+// A match that ends inside the Mask is only stars (a value such as "*"), so
+// the copy of the Mask keeps the rule that a Mask is not masked again.
+func maskedWordAt(text string, i int, forms []string) (start, n int) {
+	maskEnd := i + len(discover.Mask)
+	for j := i; j < maskEnd; j++ {
+		if m := wordAt(text, j, forms); j+m > maskEnd {
+			return j, m
+		}
+	}
+	return 0, 0
 }
 
 // wordStart reports whether a word can start at text[i]: i is the start of

@@ -139,12 +139,14 @@ type RemoteOptions struct {
 // warnings that the lists add (see listInto), and to ConnectError.Warnings
 // when the inspection fails after the connect started.
 //
-// On success, Result.Secrets holds the header values, the URL user info, the
-// secret URL parts and opts.secrets that have at least discover.MinSecretBytes
-// bytes (see resultSecrets). Result.Credentials holds the values of
-// Result.Secrets that look like a credential: the values of credential
-// headers (see headerCredentials), the URL user info, the URL parts of
-// urlCredentials and opts.credentials (see Result.Credentials).
+// On success, Result.Secrets holds the header values and the credentials
+// inside them, such as the pairs and values of a Cookie header (see
+// headerSecrets), the URL user info, the secret URL parts,
+// the URL parts of urlCredentials and opts.secrets that have at least
+// discover.MinSecretBytes bytes (see resultSecrets). Result.Credentials holds
+// the values of Result.Secrets that look like a credential: the values of
+// credential headers (see headerCredentials), the URL user info, the URL
+// parts of urlCredentials and opts.credentials (see Result.Credentials).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -190,7 +192,16 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
 	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
+	// urlSecrets holds whole path segments, such as "apikey=x" or
+	// "mcp;token=x", but urlCredentials can find the value inside one ("x").
+	// A server can echo that value alone, and resultCredentials keeps only
+	// the values of Secrets, so the value must be in secrets too.
+	secrets = append(secrets, urlCredentials(raw)...)
 	secrets = append(secrets, opts.secrets...)
+	// short are the strings that classify removes from error text as whole
+	// words only: the short expanded values and the short credentials inside
+	// the header values (see headerShortSecrets).
+	short := slices.Concat(opts.shortSecrets, headerShortSecrets(srv.Headers))
 
 	proxy := opts.proxy
 	if proxy == nil {
@@ -290,7 +301,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = joinContextErr(ctxErr, err)
 		}
-		ce := classify(err, srv, ev, secrets, opts.shortSecrets)
+		ce := classify(err, srv, ev, secrets, short)
 		ce.Warnings = warnings
 		return Result{}, ce
 	}
@@ -412,22 +423,28 @@ func urlSecrets(rawQuery, raw string) []string {
 // splitHeaders returns the config headers with their raw values, for the
 // HTTP client, and the secrets in them, for classify to remove from error
 // text: each non-empty value and, for a value with an auth scheme such as
-// "Bearer <token>", the credential part alone (see credentialPart).
+// "Bearer <token>", the credential part alone (see credentialPart), and the
+// other secrets of headerSecrets.
 func splitHeaders(cfg discover.SecretMap) (headers map[string]string, secrets []string) {
 	headers = make(map[string]string, len(cfg))
 	for key, secret := range cfg {
 		value := secret.Reveal()
 		headers[key] = value
-		secrets = append(secrets, headerSecrets(value)...)
+		secrets = append(secrets, headerSecrets(key, value)...)
 	}
 	return headers, secrets
 }
 
-// headerSecrets returns the secrets in one header value, for splitHeaders and
-// headerCredentials: the value when it is not empty, the credential part
-// after an auth scheme (see credentialPart) and the parts of a decoded Basic
-// value (see basicSecrets).
-func headerSecrets(value string) []string {
+// headerSecrets returns the secrets in the value of the header key, for
+// splitHeaders and headerCredentials: the value when it is not empty, the
+// credential part after an auth scheme (see credentialPart), the parts of a
+// decoded Basic value (see basicSecrets), the long pieces of a cookie header
+// (see cookieSecrets) and the credentials inside the value of at least
+// discover.MinSecretBytes bytes (see valueCredentials), such as the password
+// of a connection URL. A value with no credential in it, such as
+// "application/json", gets no inner piece. The shorter inner credentials are
+// in headerShortSecrets.
+func headerSecrets(key, value string) []string {
 	var secrets []string
 	if value != "" {
 		secrets = append(secrets, value)
@@ -435,17 +452,110 @@ func headerSecrets(value string) []string {
 	if cred := credentialPart(value); cred != "" {
 		secrets = append(secrets, cred)
 	}
-	return append(secrets, basicSecrets(value)...)
+	secrets = append(secrets, basicSecrets(value)...)
+	cookieLong, _ := cookieSecrets(key, value)
+	innerLong, _ := valueCredentials(value)
+	for _, piece := range slices.Concat(cookieLong, innerLong) {
+		// The credential part is often an inner piece too ("x" of "Bearer
+		// x"). Add each piece one time only.
+		if !slices.Contains(secrets, piece) {
+			secrets = append(secrets, piece)
+		}
+	}
+	return secrets
+}
+
+// headerShortSecrets returns the credentials inside the config header values
+// that are shorter than discover.MinSecretBytes (see valueCredentials and
+// cookieSecrets), for classify to remove from error text as whole words only
+// (see replaceWords). A short piece is too likely to match ordinary words to
+// remove it wherever it stands, and it never goes to Result.Secrets. The
+// whole header values, at any length, are in the list of splitHeaders.
+//
+// The result holds raw values. Never print, log or encode them.
+func headerShortSecrets(cfg discover.SecretMap) []string {
+	var short []string
+	for key, secret := range cfg {
+		value := secret.Reveal()
+		_, cookieShort := cookieSecrets(key, value)
+		_, innerShort := valueCredentials(value)
+		// A piece can be in both lists. A copy in short does no harm:
+		// wordForms removes the copies.
+		short = append(short, cookieShort...)
+		short = append(short, innerShort...)
+	}
+	return short
+}
+
+// isCookieHeader reports whether key names a header that carries cookies:
+// "Cookie", "Set-Cookie" or the old "Cookie2", in any case.
+func isCookieHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "cookie", "set-cookie", "cookie2":
+		return true
+	}
+	return false
+}
+
+// cookieSecrets returns the pieces of the value of a cookie header (see
+// isCookieHeader). A server can echo one cookie alone, such as "sid=x" or
+// "x", and not the whole header value, so each piece must be a secret on its
+// own.
+//
+// The value is a list of pairs split by ";", as in "sid=x; theme=dark". For
+// each pair it returns the pair "name=value" and the value. A quoted value
+// (name="x") also gives the value without the quotes. A part without "=",
+// such as the "HttpOnly" attribute of Set-Cookie, gives nothing. Every pair
+// counts, also one with a plain name such as "theme": the whole header is a
+// credential, so the check fails closed.
+//
+// long holds the pieces of at least discover.MinSecretBytes bytes, short the
+// shorter non-empty ones. Neither holds the whole value, nor a piece two
+// times. For any other header key, both are nil.
+//
+// The results hold raw values. Never print, log or encode them.
+func cookieSecrets(key, value string) (long, short []string) {
+	if !isCookieHeader(key) {
+		return nil, nil
+	}
+	add := func(piece string) {
+		switch {
+		case piece == "", piece == value, slices.Contains(long, piece), slices.Contains(short, piece):
+			// Empty, the whole value (splitHeaders has it already) or a
+			// piece that is in a list already.
+		case len(piece) >= discover.MinSecretBytes:
+			long = append(long, piece)
+		default:
+			short = append(short, piece)
+		}
+	}
+	for _, part := range strings.Split(value, ";") {
+		pair := strings.TrimSpace(part)
+		name, val, found := strings.Cut(pair, "=")
+		if !found || strings.TrimSpace(name) == "" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		add(pair)
+		add(val)
+		if len(val) >= 2 && strings.HasPrefix(val, `"`) && strings.HasSuffix(val, `"`) {
+			add(val[1 : len(val)-1])
+		}
+	}
+	return long, short
 }
 
 // headerCredentials returns the secrets of the config headers that are
 // credentials, for Result.Credentials. For each header that isCredentialHeader
 // accepts, it returns all the secrets that splitHeaders takes from its value
-// (see headerSecrets): the whole value, the credential after the auth scheme
-// and the parts of a decoded Basic value. A Basic credential that does not
-// decode stays in the list in its encoded form (the credential part), so the
-// check fails closed. For any other header, such as "Content-Type:
-// application/json" or a plain User-Agent, it returns nothing.
+// (see headerSecrets): the whole value, the credential after the auth scheme,
+// the parts of a decoded Basic value, the long cookie pieces and the long
+// credentials inside the value. A Basic credential that does not decode stays in the list in its
+// encoded form (the credential part), so the check fails closed. For any
+// other header, such as "Content-Type: application/json" or a plain
+// User-Agent, it returns nothing. Such a header has no inner credential
+// either: isCredentialHeader accepts every value in which
+// discover.ArgCredentials finds a credential (see looksLikeCredential).
 //
 // The result holds raw values. Never print, log or encode them.
 func headerCredentials(cfg discover.SecretMap) []string {
@@ -453,7 +563,7 @@ func headerCredentials(cfg discover.SecretMap) []string {
 	for key, secret := range cfg {
 		value := secret.Reveal()
 		if isCredentialHeader(key, value) {
-			credentials = append(credentials, headerSecrets(value)...)
+			credentials = append(credentials, headerSecrets(key, value)...)
 		}
 	}
 	return credentials
@@ -464,6 +574,8 @@ func headerCredentials(cfg discover.SecretMap) []string {
 //
 //   - the key is secret-like (discover.IsSecretName): "Authorization",
 //     "Proxy-Authorization", "Cookie", "X-Api-Key" and similar;
+//   - the key names a cookie header (see isCookieHeader): "Cookie",
+//     "Set-Cookie" or "Cookie2";
 //   - the value has an auth scheme and text after it ("Bearer x", "Basic x",
 //     "Token x"; see discover.IsAuthScheme, the rule of
 //     discover.ArgCredentials);
@@ -476,7 +588,7 @@ func isCredentialHeader(key, value string) bool {
 	if value == "" {
 		return false
 	}
-	if discover.IsSecretName(key) {
+	if discover.IsSecretName(key) || isCookieHeader(key) {
 		return true
 	}
 	if scheme, rest, found := strings.Cut(value, " "); found && strings.TrimSpace(rest) != "" && discover.IsAuthScheme(scheme) {

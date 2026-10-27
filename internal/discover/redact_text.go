@@ -1,6 +1,8 @@
 package discover
 
 import (
+	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 )
@@ -74,11 +76,15 @@ func SecretTextValues(secrets []Secret) []string {
 //
 // The values must not be empty (SecretTextValues gives only values of at
 // least [MinSecretBytes] bytes). An empty value is skipped.
+//
+// RedactText builds the search tables of the values on each call. To redact
+// many texts with the same values, use a [TextRedactor], which builds them
+// once.
 func RedactText(s string, values []string) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
 	}
-	return redactWindow(s, values, len(s), -1)
+	return redactWindow(s, values, nil, len(s), -1)
 }
 
 // RedactTextPrefix replaces each occurrence of each value in values with
@@ -112,19 +118,141 @@ func RedactText(s string, values []string) (string, bool) {
 //
 // The values must not be empty (SecretTextValues gives only values of at
 // least [MinSecretBytes] bytes). An empty value is skipped.
+//
+// RedactTextPrefix builds the search tables of the values for each window.
+// To redact many texts with the same values, use a [TextRedactor], which
+// builds them once.
 func RedactTextPrefix(s string, values []string, limit int) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
 	}
+	return redactPrefix(s, values, nil, limit)
+}
+
+// redactPrefix is RedactTextPrefix for a non-empty s and values. tables is
+// nil or holds the border table of each value (see redactWindow).
+func redactPrefix(s string, values []string, tables [][]int, limit int) (string, bool) {
 	limit = max(limit, 0)
 	end := min(len(s), limit+1)
 	for {
-		out, redacted := redactWindow(s, values, end, limit)
+		out, redacted := redactWindow(s, values, tables, end, limit)
 		if len(out) > limit || end == len(s) {
 			return out, redacted
 		}
 		end = min(len(s), 2*end)
 	}
+}
+
+// The build fails if TextRedactor stops implementing one of these
+// interfaces. Each one makes fmt or log/slog print Mask, not the values.
+var (
+	_ fmt.Formatter  = TextRedactor{}
+	_ fmt.Stringer   = TextRedactor{}
+	_ fmt.GoStringer = TextRedactor{}
+	_ slog.LogValuer = TextRedactor{}
+)
+
+// TextRedactor removes the secret values of one set of secrets (for example
+// the secrets of one server) from many texts. It gives the same results as
+// [RedactText] and [RedactTextPrefix] with the values of
+// [SecretTextValues], but it reads the secrets and builds the search table
+// of each value once, in [NewTextRedactor], not once for each text. This
+// matters when the same values go over many short texts, such as each JSON
+// string of a tool schema.
+//
+// A nil *TextRedactor and the zero TextRedactor redact nothing: Text and
+// Prefix return their input. A TextRedactor never changes after
+// NewTextRedactor, so many goroutines can use one at the same time.
+//
+// A TextRedactor holds secret values, but it never prints them: fmt, log/slog
+// and encoding/json give Mask or "{}". The output methods use value
+// receivers, so a *TextRedactor also gives Mask.
+type TextRedactor struct {
+	// redact keeps the values and their tables inside a closure: redact(s,
+	// -1) redacts all of s (RedactText), and redact(s, limit) with limit >= 0
+	// gives the start that RedactTextPrefix gives.
+	//
+	// It is a func, not a pointer to a struct with the values. fmt prints a
+	// struct in an unexported field by reflection, and for a verb that does
+	// not fit a pointer (such as %q or %s) it even follows a pointer to a
+	// struct and prints its fields. fmt prints a func only as an address.
+	// secretMask in cmd/mcpmoat uses the same idea.
+	redact func(s string, limit int) (string, bool)
+}
+
+// NewTextRedactor returns a TextRedactor for the values that
+// SecretTextValues gives for secrets. It returns nil when no value is long
+// enough (see MinSecretBytes); a nil TextRedactor redacts nothing.
+//
+// It builds the border table (see borders) of each value: one int for each
+// byte of the value.
+func NewTextRedactor(secrets []Secret) *TextRedactor {
+	values := SecretTextValues(secrets)
+	if len(values) == 0 {
+		return nil
+	}
+	tables := make([][]int, len(values))
+	for i, v := range values {
+		// nil as the buffer: each value gets its own table, so no table is
+		// shared with another value and written again later.
+		tables[i] = borders(v, nil)
+	}
+	// The closure only reads values and tables, so calls from many
+	// goroutines at the same time are safe.
+	redact := func(s string, limit int) (string, bool) {
+		if limit < 0 {
+			return redactWindow(s, values, tables, len(s), -1)
+		}
+		return redactPrefix(s, values, tables, limit)
+	}
+	return &TextRedactor{redact: redact}
+}
+
+// Text returns s with each occurrence of each value replaced with Mask, the
+// same as RedactText(s, SecretTextValues(secrets)) for the secrets of
+// NewTextRedactor.
+func (r *TextRedactor) Text(s string) string {
+	if r == nil || r.redact == nil || s == "" {
+		return s
+	}
+	out, _ := r.redact(s, -1)
+	return out
+}
+
+// Prefix returns the same result as RedactTextPrefix(s,
+// SecretTextValues(secrets), limit) for the secrets of NewTextRedactor: the
+// start of the redacted text, and whether that start holds a Mask. A
+// negative limit counts as 0. See RedactTextPrefix for which start and for
+// the flag.
+func (r *TextRedactor) Prefix(s string, limit int) (string, bool) {
+	if r == nil || r.redact == nil || s == "" {
+		return s, false
+	}
+	// max keeps a negative limit from meaning "all of s" in redact.
+	return r.redact(s, max(limit, 0))
+}
+
+// String returns Mask. It implements fmt.Stringer.
+func (TextRedactor) String() string {
+	return Mask
+}
+
+// GoString returns Mask. It implements fmt.GoStringer.
+func (TextRedactor) GoString() string {
+	return Mask
+}
+
+// Format passes the verb and flags to Mask, so only Mask reaches fmt (see
+// Secret.Format). It implements fmt.Formatter.
+func (TextRedactor) Format(f fmt.State, verb rune) {
+	// fmt has no way to report a write error from Format, so the result is
+	// discarded on purpose.
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), Mask)
+}
+
+// LogValue returns Mask. It implements slog.LogValuer.
+func (TextRedactor) LogValue() slog.Value {
+	return slog.StringValue(Mask)
 }
 
 // decodedPerByte returns s with each byte that is not part of a valid UTF-8
@@ -166,10 +294,15 @@ func decodedPerByte(s string) string {
 // The values must not be empty (SecretTextValues gives only values of at
 // least MinSecretBytes bytes). An empty value is skipped: it would match at
 // every byte, and it marks nothing.
-func redactWindow(s string, values []string, end, limit int) (string, bool) {
+//
+// tables is nil, or it holds the border table of each value (tables[i] is
+// borders(values[i]), see TextRedactor). When it is nil, redactWindow builds
+// the table of each value that it searches in one buffer. It never writes to
+// tables, so callers can share them.
+func redactWindow(s string, values []string, tables [][]int, end, limit int) (string, bool) {
 	var marked []bool // nil until the first match
-	var border []int  // one buffer for the border table of each value
-	for _, v := range values {
+	var buf []int     // one buffer for the border table of each value
+	for i, v := range values {
 		if v == "" {
 			continue
 		}
@@ -180,7 +313,13 @@ func redactWindow(s string, values []string, end, limit int) (string, bool) {
 		if len(window) < len(v) {
 			continue // no occurrence is possible
 		}
-		border = borders(v, border)
+		var border []int
+		if tables != nil {
+			border = tables[i]
+		} else {
+			buf = borders(v, buf)
+			border = buf
+		}
 		marked = markValue(window, v, border, marked, end)
 	}
 	if marked == nil {

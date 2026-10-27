@@ -1,8 +1,10 @@
 package discover
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -458,7 +460,7 @@ func TestRedactWindowEmptyValue(t *testing.T) {
 		// With no stop (-1) the result is all of it; with a stop after 5
 		// bytes it is a prefix that still holds the Mask at offset 2.
 		for _, limit := range []int{-1, 5} {
-			got, flag := redactWindow("abcdefghij", tt.values, 10, limit)
+			got, flag := redactWindow("abcdefghij", tt.values, nil, 10, limit)
 			if (limit < 0 && got != tt.want) || !strings.HasPrefix(tt.want, got) || flag != tt.wantFlag {
 				t.Errorf("redactWindow(%q, %d) = (%q, %v), want a prefix of %q and %v", tt.values, limit, got, flag, tt.want, tt.wantFlag)
 			}
@@ -762,4 +764,281 @@ func BenchmarkRedactNonPeriodicSecret(b *testing.B) {
 	for b.Loop() {
 		RedactText(s, values)
 	}
+}
+
+// TestTextRedactorMatchesRedactText compares TextRedactor.Text and
+// TextRedactor.Prefix with RedactText and RedactTextPrefix (which the tests
+// above check against the oracle) for random secrets and random text. The
+// secrets are periodic or random over a small alphabet with an invalid UTF-8
+// byte, so they match often, overlap, and get a decoded form. The seed is
+// fixed, so a failure repeats.
+func TestTextRedactorMatchesRedactText(t *testing.T) {
+	t.Parallel()
+
+	const alphabet = "ab*\xff"
+	rng := rand.New(rand.NewPCG(2026, 10)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
+	randString := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = alphabet[rng.IntN(len(alphabet))]
+		}
+		return string(b)
+	}
+	var masked int
+	for range 3000 {
+		// Values of 6 to 12 bytes: the ones under MinSecretBytes are skipped
+		// by both forms.
+		var raw []string
+		for range 1 + rng.IntN(3) {
+			n := 6 + rng.IntN(7)
+			if rng.IntN(2) == 0 {
+				raw = append(raw, strings.Repeat(randString(1+rng.IntN(3)), n)[:n])
+			} else {
+				raw = append(raw, randString(n))
+			}
+		}
+		secrets := newSecrets(raw...)
+		values := SecretTextValues(secrets)
+		r := NewTextRedactor(secrets)
+
+		// The text is built from the values and their decoded forms, whole
+		// or in part, so most texts hold a match or a near miss.
+		var b strings.Builder
+		for range rng.IntN(8) {
+			switch {
+			case len(values) == 0 || rng.IntN(3) == 0:
+				b.WriteString(randString(rng.IntN(6)))
+			case rng.IntN(2) == 0:
+				b.WriteString(values[rng.IntN(len(values))]) // a whole value
+			default:
+				v := values[rng.IntN(len(values))]
+				b.WriteString(v[rng.IntN(len(v)):]) // the end of a value
+			}
+		}
+		s := b.String()
+
+		want, wantFlag := RedactText(s, values)
+		if got := r.Text(s); got != want {
+			t.Fatalf("Text(%q) with values %q = %q, want %q", s, values, got, want)
+		}
+		if wantFlag {
+			masked++
+		}
+		limit := rng.IntN(len(s)+4) - 2 // a few negative limits too
+		wantPrefix, wantPrefixFlag := RedactTextPrefix(s, values, limit)
+		if got, flag := r.Prefix(s, limit); got != wantPrefix || flag != wantPrefixFlag {
+			t.Fatalf("Prefix(%q, %d) with values %q = (%q, %v), want (%q, %v)", s, limit, values, got, flag, wantPrefix, wantPrefixFlag)
+		}
+	}
+	// The generator must reach a match often, or the test checks little.
+	if masked < 1000 {
+		t.Errorf("texts with a Mask %d of 3000: too few", masked)
+	}
+}
+
+// TestTextRedactorEmpty checks that a TextRedactor with no value redacts
+// nothing: a nil *TextRedactor, the zero TextRedactor, and the result of
+// NewTextRedactor for no secrets or for values that are all too short.
+func TestTextRedactorEmpty(t *testing.T) {
+	t.Parallel()
+
+	if r := NewTextRedactor(nil); r != nil {
+		t.Errorf("NewTextRedactor(nil) = %v, want nil", r)
+	}
+	if r := NewTextRedactor(newSecrets("1234567", "", "short")); r != nil {
+		t.Errorf("NewTextRedactor(values under %d bytes) = %v, want nil", MinSecretBytes, r)
+	}
+	text := "pin 1234567 and " + secretCanary
+	for name, r := range map[string]*TextRedactor{"nil": nil, "zero": {}} {
+		if got := r.Text(text); got != text {
+			t.Errorf("%s Text(%q) = %q, want the text", name, text, got)
+		}
+		if got, flag := r.Prefix(text, 3); got != text || flag {
+			t.Errorf("%s Prefix(%q, 3) = (%q, %v), want the text and false", name, text, got, flag)
+		}
+	}
+}
+
+// TestTextRedactorText pins a few results of Text and Prefix, also for an
+// empty text and for a value that is not valid UTF-8 (its decoded form goes
+// too).
+func TestTextRedactorText(t *testing.T) {
+	t.Parallel()
+
+	r := NewTextRedactor(newSecrets(secretCanary, "short", "abc\xffdefgh"))
+	tests := []struct {
+		s    string
+		want string
+	}{
+		{s: "", want: ""},
+		{s: "no secret here", want: "no secret here"},
+		{s: "key=" + secretCanary + ".", want: "key=" + Mask + "."},
+		{s: "short", want: "short"}, // under MinSecretBytes
+		{s: "raw abc\xffdefgh and decoded abc" + ffd + "defgh", want: "raw " + Mask + " and decoded " + Mask},
+	}
+	for _, tt := range tests {
+		if got := r.Text(tt.s); got != tt.want {
+			t.Errorf("Text(%q) = %q, want %q", tt.s, got, tt.want)
+		}
+		if got, _ := r.Prefix(tt.s, len(tt.s)); got != tt.want {
+			t.Errorf("Prefix(%q, %d) = %q, want %q", tt.s, len(tt.s), got, tt.want)
+		}
+	}
+	if got, flag := r.Prefix("x"+secretCanary+strings.Repeat("y", 100), 2); got != "x"+Mask || !flag {
+		t.Errorf("Prefix(2) = (%q, %v), want (%q, true)", got, flag, "x"+Mask)
+	}
+}
+
+// TestTextRedactorPrintsNoValue checks that fmt, log/slog and encoding/json
+// never show a value of a TextRedactor: as a pointer, as a value, and as an
+// unexported field of another struct, where fmt reads the fields by
+// reflection. With %q or %s, fmt follows a pointer to a struct in such a
+// field and prints its fields, so the state must not be such a pointer.
+func TestTextRedactorPrintsNoValue(t *testing.T) {
+	t.Parallel()
+
+	r := NewTextRedactor(newSecrets(secretCanary))
+	type holder struct {
+		r  *TextRedactor
+		rv TextRedactor
+	}
+	h := holder{r: r, rv: *r}
+	var out []string
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%10v"} {
+		out = append(out, fmt.Sprintf(verb, r), fmt.Sprintf(verb, *r), fmt.Sprintf(verb, h))
+	}
+	out = append(out, r.String(), r.GoString())
+	// encoding/json skips unexported fields, so the check uses exported
+	// ones: the TextRedactor encodes as "{}".
+	exported := struct {
+		R  *TextRedactor
+		RV TextRedactor
+	}{R: r, RV: *r}
+	data, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	out = append(out, string(data))
+	var logs strings.Builder
+	slog.New(slog.NewTextHandler(&logs, nil)).Info("x", "r", r, "rv", *r, "h", h)
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("x", "r", r, "rv", *r, "h", h)
+	out = append(out, logs.String())
+	for _, s := range out {
+		if strings.Contains(s, "CANARY") || strings.Contains(s, hex.EncodeToString([]byte("CANARY"))) {
+			t.Errorf("output %q shows the secret value", s)
+		}
+	}
+	if got := fmt.Sprint(r); got != Mask {
+		t.Errorf("fmt.Sprint(r) = %q, want %q", got, Mask)
+	}
+}
+
+// TestTextRedactorConcurrent shares one TextRedactor between parallel
+// subtests. Run it with -race: a write to the shared tables or values would
+// be a data race. Each subtest also checks its results.
+func TestTextRedactorConcurrent(t *testing.T) {
+	t.Parallel()
+
+	values := []string{secretCanary, "abababab", "aaaaaaaaaa", "a*b*a*b*"}
+	r := NewTextRedactor(newSecrets(values...))
+	texts := []string{
+		"x" + secretCanary + "y",
+		strings.Repeat("ab", 100),
+		strings.Repeat("a", 300) + "b",
+		"a*b*a*b*a*b*",
+		strings.Repeat("no secret ", 50),
+	}
+	for i := range 8 {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			for range 50 {
+				for _, s := range texts {
+					want, _ := RedactText(s, values)
+					if got := r.Text(s); got != want {
+						t.Fatalf("Text(%q) = %q, want %q", s, got, want)
+					}
+					wantPrefix, wantFlag := RedactTextPrefix(s, values, 20)
+					if got, flag := r.Prefix(s, 20); got != wantPrefix || flag != wantFlag {
+						t.Fatalf("Prefix(%q, 20) = (%q, %v), want (%q, %v)", s, got, flag, wantPrefix, wantFlag)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestTextRedactorBuildsTablesOnce checks that Text and Prefix do not build
+// the border tables again: for a text with no secret they allocate nothing,
+// while RedactText allocates the border buffer on each call.
+//
+// No t.Parallel: testing.AllocsPerRun counts the allocations of the whole
+// program, so other tests that run at the same time would add to the count.
+func TestTextRedactorBuildsTablesOnce(t *testing.T) {
+	values, texts := redactorBenchData(50, 1)
+	r := NewTextRedactor(newSecrets(values...))
+	s := texts[0]
+	if strings.Contains(r.Text(s), Mask) {
+		t.Fatal("the test text holds a secret; want a text with none")
+	}
+	if n := testing.AllocsPerRun(100, func() { r.Text(s) }); n != 0 {
+		t.Errorf("Text() allocates %v times for each call, want 0 (are the tables built again?)", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { r.Prefix(s, 10) }); n != 0 {
+		t.Errorf("Prefix() allocates %v times for each call, want 0 (are the tables built again?)", n)
+	}
+	// The contrast: RedactText builds a table on each call, so the check
+	// above measures the right thing.
+	if n := testing.AllocsPerRun(100, func() { RedactText(s, values) }); n == 0 {
+		t.Error("RedactText() allocates nothing: the check above no longer shows a rebuild")
+	}
+}
+
+// redactorBenchData returns n FAKE secret values of 24 random letters and m
+// texts of 40 random letters, from a fixed seed. Every 100th text holds a
+// value. A text is longer than a value, so a search of each value reads it.
+func redactorBenchData(n, m int) (values, texts []string) {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	rng := rand.New(rand.NewPCG(500, 20000)) //nolint:gosec // G404: fixed seed for fake test data, not for security
+	randLetters := func(k int) string {
+		b := make([]byte, k)
+		for i := range b {
+			b[i] = letters[rng.IntN(len(letters))]
+		}
+		return string(b)
+	}
+	for range n {
+		values = append(values, randLetters(24))
+	}
+	for i := range m {
+		s := randLetters(40)
+		if i%100 == 99 {
+			s = s[:8] + values[i%n] + s[32:]
+		}
+		texts = append(texts, s)
+	}
+	return values, texts
+}
+
+// BenchmarkRedactManyShortTexts redacts 20,000 short texts (such as the JSON
+// strings of a large enum) with the 500 values of one server, the case of
+// the pin diffs. RedactText builds the border table of each value for each
+// text; a TextRedactor builds them once, outside the loop of texts.
+func BenchmarkRedactManyShortTexts(b *testing.B) {
+	values, texts := redactorBenchData(500, 20000)
+	b.Run("RedactText", func(b *testing.B) {
+		for b.Loop() {
+			for _, s := range texts {
+				RedactText(s, values)
+			}
+		}
+	})
+	b.Run("TextRedactor", func(b *testing.B) {
+		for b.Loop() {
+			// One TextRedactor for each server, so the build is in the loop.
+			r := NewTextRedactor(newSecrets(values...))
+			for _, s := range texts {
+				r.Text(s)
+			}
+		}
+	})
 }

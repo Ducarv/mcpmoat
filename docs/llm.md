@@ -52,17 +52,22 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   in these cases:
   - An env value, when the key looks secret (`API_KEY`, `GITHUB_TOKEN`), or when the value looks
     like a token or holds a credential. So `DATABASE_URL=postgres://app:pw@db/prod` counts, but
-    `NODE_ENV=production` does not.
+    `NODE_ENV=production` does not. The credential pieces inside an env value, an expanded value
+    or a header value count too, by the same rules as the args below. So the password of
+    `postgres://app:pw@db/prod` is removed when a server echoes it alone (when it has 8 bytes or
+    more).
   - A header value, when the header name looks secret (`Authorization`, `Proxy-Authorization`,
     `Cookie`, `X-Api-Key`, or any name with a word such as `key` or `session`), when the value is
     an auth scheme and a credential (`Bearer <token>`, `Basic <base64>`, `Token <token>`), or when
     the value looks like a token. Then all the parts of that header count: the whole value, the
     credential after the scheme, and the base64 text and the password of a `Basic` value. A
-    `Cookie` value counts as one whole line. `Content-Type: application/json` and a plain
-    `User-Agent` do not count.
-  - In the URL: the user info and the password, always. A query or path part only when its key
-    looks secret (`?api_key=x`) or it looks like a token. So `?workspace=engineering` does not
-    count.
+    `Cookie`, `Set-Cookie` or `Cookie2` header always counts: the whole value, and each
+    `name=value` pair and each value in it, so a server that echoes one cookie value alone is
+    found. Every pair counts, also a plain one such as `theme=dark`, so the check fails closed.
+    `Content-Type: application/json` and a plain `User-Agent` do not count.
+  - In the URL: the whole user info and the password, always. A query or path part, or the value
+    inside a `key=value` path segment or a matrix parameter (`;token=x`), only when its key looks
+    secret (`?api_key=x`) or it looks like a token. So `?workspace=engineering` does not count.
   - The value of an expanded placeholder, when the variable name looks secret or the value looks
     like a token or holds a credential.
   - For a stdio server, the parts of the command and the args (after the expansion) that look like
@@ -93,7 +98,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   - A value shorter than 8 bytes is not removed, because it would also hide ordinary words such as
     `true` or `json`.
   - An encoded form of a value is not removed, for example the value in base64, URL-encoded, or
-    split with spaces.
+    split with spaces. A value that holds a backslash sequence (the `\t` and `\n` of the Windows
+    path `C:\tools\new_dir`) is not found when the server sends a real tab and newline there, and
+    the JSON of the request then shows the same escapes.
   - The check fails closed: mcpmoat also removes some text that is not secret. A word of 32 bytes
     or more counts as a token, also a readable path segment (such as a segment of the macOS
     `$TMPDIR`), and so does a nix hash or a UUID. A header value that starts with an auth scheme

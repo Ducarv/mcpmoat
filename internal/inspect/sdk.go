@@ -121,8 +121,9 @@ func New(opts SDKOptions) *SDKInspector {
 // context.DeadlineExceeded) works for timeouts.
 //
 // On success, Result.Secrets holds the configured values, the expanded
-// values and, for a stdio server, the argv secrets that have at least
-// discover.MinSecretBytes bytes (see Result.Secrets and resultSecrets).
+// values, the credentials inside them (see valueCredentials) and, for a
+// stdio server, the argv secrets that have at least discover.MinSecretBytes
+// bytes (see Result.Secrets and resultSecrets).
 // Result.Credentials holds the values of Result.Secrets that look like a
 // credential (see Result.Credentials and resultCredentials). For a remote
 // server, [Remote] sets both.
@@ -266,8 +267,9 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	// the defer below stops the process first; stop is idempotent.
 	defer proc.stop()
 
-	// The configured env values, the expanded values and the secrets in the
-	// argv (see argSecrets). The child gets all of them and can echo them.
+	// The configured env values, the expanded values, the credentials inside
+	// both (see valueCredentials) and the secrets in the argv (see
+	// argSecrets). The child gets all of them and can echo them.
 	// secrets holds the ones of at least discover.MinSecretBytes bytes, and
 	// short the shorter ones, which the scrub removes as whole words only.
 	envLong, envShort := envSecrets(s.Env)
@@ -385,32 +387,43 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 // secret-like or the value looks like a credential (see isCredential). The
 // same value can come first from a plain name ("A=x") and then from a
 // secret-like one ("TOKEN=x"), so a repeated lookup still checks the name.
+//
+// After each new value, it also records the credentials inside the value
+// (see valueCredentials), such as the password of a connection URL: the
+// server can echo the password alone. A long piece goes to values and to
+// credentials, and a short piece goes to short, by the same length rule as
+// a whole value.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
-	// values and short hold raw values of the user's environment, each one
-	// time, in the order of the first lookup. seen holds the values of both
-	// lists, to find a value that is already recorded. credentials holds the
-	// values of values that are credentials, each one time, in the order in
-	// which they became one, and credential holds the same values, to find
+	// values and short hold raw values of the user's environment and the
+	// credentials inside them, each one time, in the order in which they
+	// were recorded. listed holds the strings of both lists, to find one
+	// that is already there. seen holds the values that a lookup returned,
+	// to find a value that was checked already. credentials holds the
+	// strings of values that are credentials, each one time, in the order in
+	// which they became one, and credential holds the same strings, to find
 	// one that is already there. Never print, log or encode them.
 	values      []string
 	short       []string
 	credentials []string
 	seen        map[string]struct{}
+	listed      map[string]struct{}
 	credential  map[string]struct{}
 }
 
 // Lookup returns the value of the variable name and whether it is set, and
-// records the value if it is not recorded yet.
+// records the value and the credentials inside it if the value is not
+// recorded yet.
 func (r *lookupRecorder) Lookup(name string) (string, bool) {
 	value, ok := r.lookup(name)
 	if !ok || value == "" {
 		return value, ok
 	}
 	if _, dup := r.seen[value]; dup {
-		// The value check (looksLikeCredential) ran at the first lookup and
-		// gives the same answer now. Only a secret-like name can make the
-		// value a credential, and that check is cheap.
+		// The value check (looksLikeCredential) and the pieces
+		// (valueCredentials) ran at the first lookup and give the same
+		// answer now. Only a secret-like name can make the value a
+		// credential, and that check is cheap.
 		if discover.IsSecretName(name) {
 			r.addCredential(value)
 		}
@@ -420,15 +433,37 @@ func (r *lookupRecorder) Lookup(name string) (string, bool) {
 		r.seen = make(map[string]struct{})
 	}
 	r.seen[value] = struct{}{}
-	if len(value) >= discover.MinSecretBytes {
-		r.values = append(r.values, value)
-	} else {
-		r.short = append(r.short, value)
-	}
+	r.record(value)
 	if isCredential(name, value) {
 		r.addCredential(value)
 	}
+	// Each piece is a credential by itself. addCredential drops the short
+	// ones, so only the record call matters for them.
+	innerLong, innerShort := valueCredentials(value)
+	for _, piece := range slices.Concat(innerLong, innerShort) {
+		r.record(piece)
+		r.addCredential(piece)
+	}
 	return value, ok
+}
+
+// record keeps s in r.values when it has at least discover.MinSecretBytes
+// bytes, or else in r.short, unless one of the lists has it already. A
+// piece of one value can be the whole of another, so the check is on the
+// lists and not on r.seen.
+func (r *lookupRecorder) record(s string) {
+	if _, dup := r.listed[s]; dup {
+		return
+	}
+	if r.listed == nil {
+		r.listed = make(map[string]struct{})
+	}
+	r.listed[s] = struct{}{}
+	if len(s) >= discover.MinSecretBytes {
+		r.values = append(r.values, s)
+	} else {
+		r.short = append(r.short, s)
+	}
 }
 
 // addCredential keeps value in r.credentials when it has at least
@@ -594,7 +629,13 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 // resultSecrets). short holds the other non-empty values, for classify to
 // remove from error text as whole words only (see replaceWords): a shorter
 // value is too likely to match ordinary words ("1", "true", "info"), but the
-// child gets it and can echo it. Both lists are in the order of env.Keys.
+// child gets it and can echo it.
+//
+// After each value, the lists also get the credentials inside it (see
+// valueCredentials), such as the password of
+// "DATABASE_URL=postgres://u:pw@h/db": the child can echo the password alone.
+// The long pieces go to secrets and the short ones to short, by the same
+// length rule. Both lists are in the order of env.Keys.
 //
 // The results hold raw values. Never print, log or encode them.
 func envSecrets(env discover.SecretMap) (secrets, short []string) {
@@ -606,6 +647,9 @@ func envSecrets(env discover.SecretMap) (secrets, short []string) {
 		case v != "":
 			short = append(short, v)
 		}
+		innerLong, innerShort := valueCredentials(v)
+		secrets = append(secrets, innerLong...)
+		short = append(short, innerShort...)
 	}
 	return secrets, short
 }
@@ -614,7 +658,9 @@ func envSecrets(env discover.SecretMap) (secrets, short []string) {
 // Result.Credentials: the values of at least discover.MinSecretBytes bytes
 // (the long list of envSecrets) whose key is secret-like or that look like a
 // credential (see isCredential). So "API_KEY=production" gives "production",
-// and "NODE_ENV=production" gives nothing. The list is in the order of
+// and "NODE_ENV=production" gives nothing. After each value, it also returns
+// the long credentials inside the value (see valueCredentials), which
+// envSecrets puts in its long list too. The list is in the order of
 // env.Keys.
 //
 // The result holds raw values. Never print, log or encode them.
@@ -625,6 +671,11 @@ func envCredentials(env discover.SecretMap) []string {
 		if len(v) >= discover.MinSecretBytes && isCredential(key, v) {
 			credentials = append(credentials, v)
 		}
+		// The blank identifier _ drops the short pieces: a value under
+		// discover.MinSecretBytes bytes never goes to Result.Secrets, so it
+		// cannot be a credential either.
+		innerLong, _ := valueCredentials(v)
+		credentials = append(credentials, innerLong...)
 	}
 	return credentials
 }

@@ -291,12 +291,15 @@ func Compare(stored ServerPins, current []inspect.Tool) []Change {
 // changes nothing.
 //
 // mask is applied to the decoded text before the diff is rendered, wrapped
-// and cut (see render), so a wrap, a cut or a JSON escape cannot leave a part
-// of a secret. It is also applied to Tool, after the sort: the order is that
-// of the raw names. Change.RawTool keeps the raw name for the lookups of the
-// caller, such as an ignore entry. The verdicts come from the raw text: the hashes, the pins
-// and the name lookups never use the mask, so a secret echo still changes the
-// hash and cannot change a pin silently.
+// and cut (see render). So a wrap or a cut cannot leave a part of a secret,
+// and a JSON escape that the server writes cannot hide one. A configured value
+// that holds a backslash sequence as plain characters (such as \t or \n) is
+// not found when the server sends the real characters (see render and
+// docs/limits.md). mask is also applied to Tool, after the sort: the order
+// is that of the raw names. Change.RawTool keeps the raw name for the lookups
+// of the caller, such as an ignore entry. The verdicts come from the raw text:
+// the hashes, the pins and the name lookups never use the mask, so a secret
+// echo still changes the hash and cannot change a pin silently.
 //
 // When the hashes differ but the masked texts are equal, the change is only
 // in masked text. Diff is then the fixed note diffSecretOnly, never an empty

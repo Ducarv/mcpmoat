@@ -542,16 +542,24 @@ untrusted text is escaped](#where-untrusted-text-is-escaped)).
 Masked diffs: `scan` and `pin` call `pins.CompareMasked(stored, current, mask)`. `pins.Compare` is
 the same call with a nil mask. The mask comes from `cmd/mcpmoat` (`secretMask` in `scan_tools.go`,
 one for each server, built from `inspect.Result.Secrets`), so `internal/pins` needs no list of
-secrets. `render` applies the mask to the decoded text of both sides before the 200-rune wrap, the
-trim and the 64 KiB cut: to the name, the title, the description, and every JSON string value, key
-and number of the annotations, `_meta`, icons and schemas (`maskJSON`). So a wrap, a cut or a JSON
-escape cannot leave a part of a value. `CompareMasked` also masks `Change.Tool` and keeps the real
-name in `Change.RawTool`, which only the ignore lookup reads and which is never printed. The
-verdicts, the hashes, the digest and `pins.json` use the raw text. When the hashes differ but the
-masked texts are equal, the diff is the fixed note `the tool changed only in text that holds a
-secret value from the config, so the diff is hidden`. Limits: a value split over two JSON strings,
-or over the name and the description, is not found, and a value that is no longer configured (a
-rotated token) can still show on the pinned side.
+secrets. `newSecretMask` builds one `discover.TextRedactor` for each server: it reads the values
+and builds the border table of the search for each value once, and every string of a pin diff
+reuses them. The search still runs once for each configured value, so a hostile config with very
+many values makes a large diff slower. A multi-pattern search would fix that (a follow-up).
+`render` applies the mask to the decoded text of both sides before the 200-rune wrap, the trim and
+the 64 KiB cut: to the name, the title, the description, and every JSON string value, key and
+number of the annotations, `_meta`, icons and schemas (`maskJSON`). So a wrap or a cut cannot
+leave a part of a value, and a JSON escape in the server text (`\"`, `\u0041`) cannot hide one.
+This holds for how the server writes the value, not for the value itself: the mask compares the
+decoded bytes, so a configured value that holds a backslash sequence (the Windows path
+`C:\tools\new_dir` holds `\t` and `\n`) is not found when the server sends a real tab and newline
+there, and the escaped output then shows the value again. `CompareMasked` also masks
+`Change.Tool` and keeps the real name in `Change.RawTool`, which only the ignore lookup reads and
+which is never printed. The verdicts, the hashes, the digest and `pins.json` use the raw text.
+When the hashes differ but the masked texts are equal, the diff is the fixed note `the tool
+changed only in text that holds a secret value from the config, so the diff is hidden`. Limits: a
+value split over two JSON strings, or over the name and the description, is not found, and a value
+that is no longer configured (a rotated token) can still show on the pinned side.
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
@@ -1215,6 +1223,13 @@ report, and its subset `Result.Credentials` for the request. So the path is:
    in the tool text. The inner values over-match on purpose: they can add a plain word of 8 bytes
    or more from a masked arg, such as `Negotiate` after a header colon. The limits of `RedactArgs`
    (such as `--db mypassword` or a positional value) are in its doc comment in `internal/discover`.
+   For the env values, the expanded values and the header values, `valueCredentials` (in
+   `secrets.go`) adds the credential pieces that `discover.ArgCredentials` finds inside each
+   value, such as the password of `postgres://app:pw@db/app`, because a server can echo a piece
+   alone. A piece under 8 bytes goes only to the whole-word scrub list of the failure text. For a
+   `Cookie`, `Set-Cookie` or `Cookie2` header, `cookieSecrets` (in `remote.go`) adds each
+   `name=value` pair and each value. For the URL, `urlCredentials` adds the whole user info and
+   the value inside a `key=value` path segment or a matrix parameter, not only the whole segment.
    Each value has at least 8 bytes and is in the list one time, longest first. The values are
    `discover.Secret`, so they print and encode only as the mask.
 2. `inspect` also puts the values of `Result.Secrets` that look like a credential in
@@ -1222,13 +1237,17 @@ report, and its subset `Result.Credentials` for the request. So the path is:
    same order. A value is a credential when: an env value or an expanded variable has a
    secret-like name (`discover.IsSecretName`) or a token-like value, or holds a credential that
    `discover.ArgCredentials` finds (`DATABASE_URL=postgres://app:pw@db/prod`); a header has a
-   secret-like name, a value `<auth scheme> <credential>` or a token-like value, and then every
-   part of that header counts (`headerCredentials` in `internal/inspect/remote.go`); a URL part is
-   the user info or the password, or has a secret-like key or a token-like value; an argv piece is
-   in `discover.ArgCredentials`. Plain words such as `NODE_ENV=production`, the plain words of a
-   DSN, `My Documents`, `?workspace=engineering` and `Content-Type: application/json` are not
-   credentials. The check fails closed: a word of 32 bytes or more counts as token-like, and an
-   auth-scheme word at the start of a header value (`Token count`) counts as a scheme.
+   secret-like name, a cookie header name, a value `<auth scheme> <credential>` or a token-like
+   value, and then every part of that header counts (`headerCredentials` in
+   `internal/inspect/remote.go`), also each cookie pair and value, even a plain one such as
+   `theme=dark` (fail closed); a URL part is the whole user info or the password, or has a
+   secret-like key or a token-like value (also the value inside a `key=value` path segment); an
+   argv piece is in `discover.ArgCredentials`; a credential piece inside an env, expanded or
+   header value (`valueCredentials`) is a credential too. Plain words such as
+   `NODE_ENV=production`, the plain words of a DSN, `My Documents`, `?workspace=engineering` and
+   `Content-Type: application/json` are not credentials. The check fails closed: a word of 32
+   bytes or more counts as token-like, and an auth-scheme word at the start of a header value
+   (`Token count`) counts as a scheme.
 3. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the `Result.Credentials` slice of
    each server into `llm.Input.Secrets` of each tool of that server. So a value of one server is
    removed only from the tools of that server, and a plain config value that the server echoes

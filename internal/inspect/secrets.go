@@ -54,7 +54,8 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 // resultCredentials returns the values of secrets that are also in one of
 // lists, for Result.Credentials. secrets is the result of resultSecrets, and
 // lists hold the values that the credential checks found (see isCredential,
-// envCredentials, argCredentials, headerCredentials and urlCredentials).
+// envCredentials, argCredentials, headerCredentials, urlCredentials and
+// valueCredentials).
 //
 // Credentials is a subset of Secrets by construction: the function only
 // drops values from secrets, so it cannot add a value that Secrets does not
@@ -110,6 +111,44 @@ func isCredential(name, value string) bool {
 // It never prints or stores value.
 func looksLikeCredential(value string) bool {
 	return discover.TokenLike(value) || len(discover.ArgCredentials([]string{value})) > 0
+}
+
+// valueCredentials returns the credentials inside value, one config value
+// (an env value, the value of an expanded variable or a header value): the
+// pieces that discover.ArgCredentials finds when it reads value as one
+// argument, such as the password of "postgres://u:pw@h/db" or the token of
+// "Bearer x". A server can echo such a piece alone, and the lists that hold
+// the whole value do not match the piece alone. So the callers add the
+// pieces to the lists of the whole value, as argCredentials and argSecrets do
+// for the argv.
+//
+// long holds the pieces of at least discover.MinSecretBytes bytes, for
+// Result.Secrets, for Result.Credentials and for the error scrub. short holds
+// the shorter pieces, for the whole-word scrub of error text only (see
+// replaceWords), as the short list of argSecrets. Each piece is a credential,
+// so the caller can add long to both Result lists. A value with no
+// credential in it (looksLikeCredential is false), such as "production" or
+// "application/json", gives two nil lists.
+//
+// Each piece is in the lists one time, and value itself is not in them: the
+// callers put the whole value in their lists already. When
+// discover.ArgCredentials returns value itself, looksLikeCredential is true,
+// so the callers also count the whole value as a credential.
+//
+// The results hold raw values. Never print, log or encode them.
+func valueCredentials(value string) (long, short []string) {
+	for _, v := range discover.ArgCredentials([]string{value}) {
+		switch {
+		case v == value, slices.Contains(long, v), slices.Contains(short, v):
+			// The whole value, or a piece that is in a list already. The
+			// lists are short, so a linear search is enough.
+		case len(v) >= discover.MinSecretBytes:
+			long = append(long, v)
+		case v != "":
+			short = append(short, v)
+		}
+	}
+	return long, short
 }
 
 // argCredentials returns the pieces of the command line of s that look like

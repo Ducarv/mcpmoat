@@ -18,13 +18,15 @@ import (
 // a shape that is not on the list is masked, even when it is not a secret.
 //
 // A name (of a flag or a variable) is secret-like if it contains a word such
-// as "token", "secret", "password", "passphrase", "key", "auth", "private"
-// or "cookie", or if one of its words is a short form such as "pass", "pw",
-// "pin", "otp", "jwt", "pat" or "cred" ("DB_PASS", "--github-pat",
-// "--pin"). An all-caps word that ends in a short form is secret-like too
-// ("PGPASS", "DBPW"). A number at the end of a word does not change this
-// ("--pass2", "REDIS_PASS1"). "bypass", "--path", "--spin", "--option",
-// "--opt2" and "--credit" are not secret-like.
+// as "token", "secret", "password", "passphrase", "passcode", "key",
+// "auth", "private", "signature" or "cookie", or if one of its words is a
+// short form such as "pass", "pw", "pin", "otp", "jwt", "pat", "cred" or
+// "salt" ("DB_PASS", "--github-pat", "--pin", "SIGNING_SALT"). An all-caps
+// word that ends in a short form or starts with "PASS" is secret-like too
+// ("PGPASS", "DBPW", "PASSCODE"). A number at the end of a word does not
+// change this ("--pass2", "REDIS_PASS1"). "bypass", "--path", "--spin",
+// "--option", "--opt2" and "--credit" are not secret-like. IsSecretName
+// holds the full list.
 //
 // Flags. An argument "-name", "--name" or "--name=value", where name has only
 // ASCII letters, digits, "_", "-" and ".", is a flag. The flag is shown as
@@ -1107,10 +1109,17 @@ func IsSecretName(name string) bool {
 	// "clientSecret" and "X-Api-Key" match. "apikey" needs no entry of its
 	// own: "key" covers it. "credential" covers "credentials"; "cred" is a
 	// short form, so that "credit" does not match.
+	//
+	// joined has no separators, so a part can span words: "accesscode"
+	// matches "ACCESS_CODE", "access-code" and "accessCode", and "passcode"
+	// matches "PASS_CODE". A name that only holds such a part matches too
+	// ("SIGNATURE_ALGORITHM", "ACCESS_CODE_LENGTH"). That is a false
+	// positive we accept, because a missed credential name can send the value
+	// to the --llm provider.
 	secretParts := [...]string{
-		"token", "secret", "password", "passwd", "passphrase", "pwd", "key",
-		"auth", "credential", "bearer", "cookie", "session", "mnemonic",
-		"private",
+		"token", "secret", "password", "passwd", "passphrase", "passcode",
+		"pwd", "key", "auth", "credential", "bearer", "cookie", "session",
+		"mnemonic", "private", "signature", "accesscode",
 	}
 	joined := strings.ToLower(strings.Join(words, ""))
 	for _, part := range secretParts {
@@ -1123,14 +1132,17 @@ func IsSecretName(name string) bool {
 
 // isShortForm reports whether word is a short form such as "pass", "pin" or
 // "jwt" in any case, or an all-caps word that ends in one ("DBPASS",
-// "PGPASS").
+// "PGPASS"). The list also holds "salt", a short word that gives false
+// positives inside other words ("basalt", "salty"). An all-caps word that
+// starts with "PASS" is secret-like too ("PASSCODE", "PASSWRD").
 //
 // Short forms do not match inside a lower-case or mixed-case word, because
-// there they give false positives: "bypass", "compass" (pass), "path",
-// "patch", "pattern" (pat), "spin", "pinned" (pin), "credit" (cred). All-caps
-// env names glue words with no separator more often ("PGPASS" is the
-// PostgreSQL password variable), so for them a suffix match is worth a rare
-// false positive such as "BYPASS".
+// there they give false positives: "bypass", "compass", "passthrough"
+// (pass), "path", "patch", "pattern" (pat), "spin", "pinned" (pin), "credit"
+// (cred). All-caps env names glue words with no separator more often
+// ("PGPASS" is the PostgreSQL password variable), so for them a suffix or a
+// "PASS" prefix match is worth a rare false positive such as "BYPASS",
+// "BASALT", "PASSIVE" or "PASSTHROUGH".
 func isShortForm(word string) bool {
 	// A number at the end does not change the word: "--pass2", "DB_PW1" and
 	// "REDIS_PASS1" are secret-like too.
@@ -1138,7 +1150,7 @@ func isShortForm(word string) bool {
 	if word == "" {
 		return false
 	}
-	shortForms := [...]string{"pass", "pw", "pin", "otp", "jwt", "pat", "cred", "creds"}
+	shortForms := [...]string{"pass", "pw", "pin", "otp", "jwt", "pat", "cred", "creds", "salt"}
 	lower := strings.ToLower(word)
 	allCaps := word == strings.ToUpper(word)
 	for _, short := range shortForms {
@@ -1146,7 +1158,7 @@ func isShortForm(word string) bool {
 			return true
 		}
 	}
-	return false
+	return allCaps && strings.HasPrefix(lower, "pass")
 }
 
 // nameWords splits name into words, in their original case. A word ends at

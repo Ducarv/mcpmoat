@@ -416,6 +416,51 @@ func TestRedactArgsSecretNames(t *testing.T) {
 				"--opt", "o", "--crediting", "c", "--credit", "d", "--privacy", "strict",
 			},
 		},
+
+		// passcode, access code, salt and signature names. The first case
+		// holds the fake values of the security review probe: a number, a
+		// word with "!" and a plain word, which no token rule masks.
+		{
+			name: "passcode, access code and salt with values that are not token-like",
+			args: []string{"PASSCODE=48291736", "ACCESS_CODE=Summer2024!x", "SIGNING_SALT=pepperpepper"},
+			want: []string{"PASSCODE=" + discover.Mask, "ACCESS_CODE=" + discover.Mask, "SIGNING_SALT=" + discover.Mask},
+		},
+		{
+			name: "passcode, access code, salt and signature flags",
+			args: []string{
+				"--passcode", argShort, "--pass-code=" + argShort, "--access-code", argShort,
+				"--accessCode=" + argShort, "--salt", argShort, "--passwordSalt=" + argShort,
+				"--signature", argShort, "--webhook-signature=" + argShort,
+			},
+			want: []string{
+				"--passcode", discover.Mask, "--pass-code=" + discover.Mask, "--access-code", discover.Mask,
+				"--accessCode=" + discover.Mask, "--salt", discover.Mask, "--passwordSalt=" + discover.Mask,
+				"--signature", discover.Mask, "--webhook-signature=" + discover.Mask,
+			},
+		},
+		{
+			name: "all-caps words that start with PASS",
+			args: []string{"DB_PASSWRD=" + argShort, "PASSCODE2=" + argShort, "--PASSKEY", argShort},
+			want: []string{"DB_PASSWRD=" + discover.Mask, "PASSCODE2=" + discover.Mask, "--PASSKEY", discover.Mask},
+		},
+		{
+			// Accepted false positives (fail closed): these names are not
+			// credential names, but their values are masked.
+			name: "names that look secret but are not",
+			args: []string{"PASSIVE_MODE=on", "SIGNATURE_ALGORITHM=x", "SALT_ROUNDS=10"},
+			want: []string{"PASSIVE_MODE=" + discover.Mask, "SIGNATURE_ALGORITHM=" + discover.Mask, "SALT_ROUNDS=" + discover.Mask},
+		},
+		{
+			name: "words that contain salt, signing, access or a license",
+			args: []string{
+				"SALTY_DOG_ENABLED=on", "--basalt", "x", "--signing-method", "rs256",
+				"ACCESS_LEVEL=read", "--assignee", "bob", "--license", "MIT", "--passive", "on",
+			},
+			want: []string{
+				"SALTY_DOG_ENABLED=on", "--basalt", "x", "--signing-method", "rs256",
+				"ACCESS_LEVEL=read", "--assignee", "bob", "--license", "MIT", "--passive", "on",
+			},
+		},
 		{
 			name: "lower case h is help, not a header flag",
 			args: []string{"-h", "server"},

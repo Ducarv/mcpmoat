@@ -411,9 +411,10 @@ func toolKey(name string) string {
 // a value (FR-14, FR-17).
 //
 // mask(s, limit) returns s with each secret value replaced with discover.Mask:
-// all of s when limit is negative (discover.RedactText), or only the start of
-// the result that discover.RedactTextPrefix gives for limit. Use the methods
-// below, not the function itself.
+// all of s when limit is negative (discover.TextRedactor.Text), or only the
+// start of the result that discover.TextRedactor.Prefix gives for limit (the
+// same start as discover.RedactTextPrefix). Use the methods below, not the
+// function itself.
 //
 // Only the printed text is masked. The ignore list, the pin store, the hashes
 // and the lookups by name use the real tool text.
@@ -429,20 +430,20 @@ func toolKey(name string) string {
 type secretMask func(s string, limit int) string
 
 // newSecretMask returns the mask of a server with the secret values secrets
-// (inspect.Result.Secrets). It reads the values once
-// (discover.SecretTextValues), so the caller makes one mask for each server,
-// not one for each row. It returns nil when no value is long enough.
+// (inspect.Result.Secrets). It reads the values and builds their search
+// tables once (discover.NewTextRedactor), so the caller makes one mask for
+// each server, not one for each row: the pin diffs call the mask once for each
+// JSON string of a schema. It returns nil when no value is long enough.
 func newSecretMask(secrets []discover.Secret) secretMask {
-	values := discover.SecretTextValues(secrets)
-	if len(values) == 0 {
+	r := discover.NewTextRedactor(secrets)
+	if r == nil {
 		return nil
 	}
 	return func(s string, limit int) string {
 		if limit < 0 {
-			out, _ := discover.RedactText(s, values)
-			return out
+			return r.Text(s)
 		}
-		out, _ := discover.RedactTextPrefix(s, values, limit)
+		out, _ := r.Prefix(s, limit)
 		return out
 	}
 }
@@ -464,7 +465,7 @@ func (m secretMask) text(s string) string {
 // value. The mask reads only the start of a long name: maxToolKeyRunes runes
 // have at most utf8.UTFMax bytes each, so a masked text of more than
 // utf8.UTFMax*maxToolKeyRunes bytes has more than maxToolKeyRunes runes, and
-// the start that discover.RedactTextPrefix returns for that limit gives the
+// the start that discover.TextRedactor.Prefix returns for that limit gives the
 // same cut as the whole masked name.
 func (m secretMask) toolKey(name string) string {
 	if m == nil {

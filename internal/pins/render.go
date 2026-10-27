@@ -82,8 +82,13 @@ type renderedTool struct {
 // applies it to the decoded text before it wraps the lines: to the name, the
 // title and the description, and to every string (object keys included) and
 // every number in the JSON parts (see maskJSON). So a secret that would be
-// split over two wrapped lines, or hidden by a JSON escape such as \" or \\,
-// is still found. A nil mask changes nothing.
+// split over two wrapped lines is still found. A secret that the server writes
+// with a JSON escape (such as \" or \u0041) is also found, because the decode
+// removes the escape. The mask does not find a configured value that holds a
+// backslash sequence as plain characters (such as the \t and \n of the Windows
+// path C:\tools\new_dir) when the server sends the real characters (a tab, a
+// newline). The output then escapes those characters, so the value can show.
+// docs/limits.md lists this limit. A nil mask changes nothing.
 //
 // Apart from the mask, render keeps every byte of the strings as the server
 // sent them. It does not escape or normalise anything, so an added invisible
@@ -166,9 +171,12 @@ func maskTool(t *renderedTool, mask func(string) string) error {
 // other bytes stay as they are, so the result equals raw when mask changes
 // nothing. An empty raw stays empty. mask must not be nil.
 //
-// The mask works on the decoded text, not on the escaped JSON, so an escape
-// such as \" inside a secret cannot hide it. maskJSON returns an error when
-// raw is not one valid JSON value. The error holds no server text.
+// The mask works on the decoded text, not on the escaped JSON. So a JSON
+// escape that the server writes (such as \" or \u0041) cannot hide a secret.
+// A configured value that holds a backslash sequence as plain characters
+// (such as \t, \n or \uXXXX) is not found when the server sends the real
+// characters (see render). maskJSON returns an error when raw is not one
+// valid JSON value. The error holds no server text.
 func maskJSON(raw json.RawMessage, mask func(string) string) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return raw, nil

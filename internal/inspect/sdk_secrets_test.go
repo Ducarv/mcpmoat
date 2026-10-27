@@ -537,6 +537,14 @@ const sdkCredTok = "FAKE-TOKEN-0123456789"
 // sdkCredDSN is a fake connection URL with a password.
 const sdkCredDSN = "postgres://app:hunter2pw@db/prod" //nolint:gosec // G101: fake test credential
 
+// sdkCredDSNPort is a fake connection URL with a port and a password of 14
+// bytes, so its inner pieces are long enough for Result.Secrets.
+const sdkCredDSNPort = "postgres://app:S3cretPassw0rd@db:5432/app" //nolint:gosec // G101: fake test credential
+
+// sdkCredDSNShortPW is a fake connection URL with a password of 2 bytes, so
+// its inner pieces are too short for Result.Secrets.
+const sdkCredDSNShortPW = "postgres://app:pw@db/app" //nolint:gosec // G101: fake test credential
+
 // sdkCredScript is the sh script of the arg cases of
 // TestSDKInspectCredentialsStdio, for the fixture "benign". discover.ArgSecrets
 // masks the value after "-c", so it is in the wide Result.Secrets. It is not a
@@ -549,12 +557,14 @@ const sdkCredScript = "exec benign"
 // temp path: the masked segments of such a path depend on the machine (see
 // sdkPathSecrets), and the lists below can then be exact. REGION and
 // API_KEY hold the same plain value under a plain and a secret-like name.
+// DB_URL holds a connection URL under a plain name.
 func sdkCredParent(t *testing.T) []string {
 	t.Helper()
 	return []string{
 		"PATH=" + filepath.Dir(inspecttest.Fixture(t, "benign")) + ":/usr/bin:/bin",
 		"MCPMOAT_TEST_REGION=production",
 		"MCPMOAT_TEST_API_KEY=production",
+		"MCPMOAT_TEST_DB_URL=" + sdkCredDSNPort,
 	}
 }
 
@@ -596,10 +606,32 @@ func TestSDKInspectCredentialsStdio(t *testing.T) {
 			wantCreds:   []string{sdkCredTok},
 		},
 		{
-			name:        "connection URL with a password",
-			env:         map[string]string{"DATABASE_URL": sdkCredDSN},
-			wantSecrets: []string{sdkCredDSN},
-			wantCreds:   []string{sdkCredDSN},
+			name: "connection URL with a password",
+			env:  map[string]string{"DATABASE_URL": sdkCredDSN},
+			// The credentials inside the value too (see valueCredentials).
+			wantSecrets: []string{sdkCredDSN, "app:hunter2pw", "hunter2pw"},
+			wantCreds:   []string{sdkCredDSN, "app:hunter2pw", "hunter2pw"},
+		},
+		{
+			name:        "connection URL with a port",
+			env:         map[string]string{"DATABASE_URL": sdkCredDSNPort},
+			wantSecrets: []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+		},
+		{
+			// The inner pieces are short: they go to the whole-word list of
+			// the error scrub only (see envSecrets).
+			name:        "connection URL with a short password",
+			env:         map[string]string{"DATABASE_URL": sdkCredDSNShortPW},
+			wantSecrets: []string{sdkCredDSNShortPW},
+			wantCreds:   []string{sdkCredDSNShortPW},
+		},
+		{
+			// The env key and the variable name are plain; the value is not.
+			name:        "expanded connection URL",
+			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_DB_URL}"},
+			wantSecrets: []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
 		},
 		{
 			name:        "connection string with no password",
