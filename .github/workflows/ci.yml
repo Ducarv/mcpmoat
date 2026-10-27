@@ -67,7 +67,7 @@ jobs:
       - name: Check for known vulnerabilities
         if: runner.os == 'Linux'
         env:
-          # Dependabot does not bump this version string. The release-check
+          # Dependabot does not bump this version string. The tool-pins
           # job checks that release.yml and govulncheck.yml pin the same
           # version.
           GOVULNCHECK_VERSION: v1.9.0
@@ -127,18 +127,42 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: .github/scripts/run-offline.sh
 
+  # Guards the tool version pins and checks the shell scripts in
+  # .github/scripts/. It is a separate small job, with no Go setup and no
+  # GoReleaser, so that it can be a required check on every branch.
+  tool-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck is preinstalled on ubuntu-latest.
+      - name: Lint the scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test the pin check
+        run: .github/scripts/check-tool-pins-test.sh
+
+      - name: Check the tool version pins
+        run: .github/scripts/check-tool-pins.sh
+
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
-  # fails here and not at tag time. It uses no secrets: a snapshot does not
-  # publish, so the tap token is not needed.
+  # fails here and not at tag time. It then tests the release scripts against
+  # the snapshot and checks the snapshot artifacts. It uses no secrets: a
+  # snapshot does not publish, so the tap token is not needed.
   release-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     env:
-      # Dependabot does not bump this version string. The "Check the tool
-      # version pins" step below checks that release.yml and CONTRIBUTING.md
-      # pin the same version.
+      # Dependabot does not bump this version string. The tool-pins job
+      # checks that release.yml and CONTRIBUTING.md pin the same version.
       GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
@@ -147,12 +171,6 @@ jobs:
           # GoReleaser reads the git tags to compute the version.
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Test the pin check
-        run: .github/scripts/check-tool-pins-test.sh
-
-      - name: Check the tool version pins
-        run: .github/scripts/check-tool-pins.sh
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -177,6 +195,14 @@ jobs:
           distribution: goreleaser
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
+
+      # The next two tests need jq, file and go, which this job has. The
+      # snapshot test reads dist/ from the step above.
+      - name: Test the snapshot check
+        run: .github/scripts/check-snapshot-test.sh
+
+      - name: Test the verify and publish script
+        run: .github/scripts/verify-and-publish-test.sh
 
       - name: Check the snapshot artifacts
         run: .github/scripts/check-snapshot.sh
