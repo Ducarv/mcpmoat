@@ -88,6 +88,46 @@ var argCredentialsCases = []argCredentialsCase{
 	// User flag values: the whole value and the password after ":".
 	{name: "user flag with password", args: []string{"-u", "fakeuser:" + credPw}, want: []string{"fakeuser:" + credPw, credPw}, redacted: []string{"-u", mk}},
 	{name: "long user flag", args: []string{"--user", "fakeuser"}, want: []string{"fakeuser"}, redacted: []string{"--user", mk}},
+	{
+		// The password ends at the last "@", not at a ":" of the port.
+		name:     "user flag with a dsn",
+		args:     []string{"-u", "fakeuser:" + credPw + "@tcp(db:3306)/x"},
+		want:     []string{"fakeuser:" + credPw + "@tcp(db:3306)/x", credPw},
+		redacted: []string{"-u", mk},
+	},
+
+	// A user and a password before an "@": the whole text and the password
+	// alone.
+	{
+		name:     "dsn user and password",
+		args:     []string{"app:hunter2hunter@tcp(db:3306)/x"},
+		want:     []string{"app:hunter2hunter@tcp(db:3306)/x", "hunter2hunter"},
+		notWant:  []string{"app", "3306"},
+		redacted: []string{mk},
+	},
+	{name: "user and password at a host", args: []string{"app:hunter2hunter@db"}, want: []string{"app:hunter2hunter@db", "hunter2hunter"}, notWant: []string{"app"}, redacted: []string{mk}},
+	{name: "password with an at sign", args: []string{"app:" + credPw + "@x@db"}, want: []string{credPw + "@x"}, redacted: []string{mk}},
+	{
+		// Oracle "user/password@tns". The whole text is token-like.
+		name:     "oracle user and password",
+		args:     []string{"scott/hunter2hunter@orcl"},
+		want:     []string{"scott/hunter2hunter@orcl", "hunter2hunter"},
+		notWant:  []string{"scott", "orcl"},
+		redacted: []string{mk},
+	},
+	{
+		// A positional "user:password" that is token-like: the whole text
+		// and the password, as after "-u".
+		name:     "token-like user and password positional",
+		args:     []string{"admin:hunter2secretpw"},
+		want:     []string{"admin:hunter2secretpw", "hunter2secretpw"},
+		notWant:  []string{"admin"},
+		redacted: []string{mk},
+	},
+	// An "@" before the ":", a mail address and a URL path have no password.
+	{name: "ssh address", args: []string{"git@github.com:org/repo"}, want: nil, notWant: []string{"org/repo", "github.com"}, redacted: []string{mk}},
+	{name: "mail address", args: []string{"user@example.com"}, want: nil, notWant: []string{"user", "example.com"}, redacted: []string{mk}},
+	{name: "at sign in a url path", args: []string{"https://example.com/a@b"}, want: nil, notWant: []string{"//example.com/a", "a"}, redacted: []string{mk}},
 
 	// Header values.
 	{
@@ -169,12 +209,28 @@ var argCredentialsCases = []argCredentialsCase{
 	// Ambiguous cases, pinned as the current behaviour.
 	{
 		// Current: a positional "user:password" is a credential only when
-		// it is token-like.
+		// it is token-like (see "token-like user and password positional").
 		name:     "plain user and password positional",
 		args:     []string{"admin:plainpass"},
 		want:     nil,
 		notWant:  []string{"admin:plainpass", "plainpass"},
 		redacted: []string{mk},
+	},
+	{
+		// Current: the same for Oracle "user/password@tns", because
+		// "owner/repo@ref" has the same shape.
+		name:     "plain oracle user and password",
+		args:     []string{"scott/tiger@orcl"},
+		want:     nil,
+		notWant:  []string{"scott/tiger@orcl", "tiger"},
+		redacted: []string{mk},
+	},
+	{
+		// The value of a secret-like name is a credential, even with spaces.
+		name:     "seed phrase",
+		args:     []string{"APP_SEED=correct horse battery staple"},
+		want:     []string{"correct horse battery staple"},
+		redacted: []string{"APP_SEED=" + mk},
 	},
 	{
 		// Current: a short password glued to "-p" is shown, so it is no
@@ -297,6 +353,10 @@ func FuzzArgCredentials(f *testing.F) {
 	}
 	f.Add("--conn\x00Server=h;Password=pw\x00host=h password=pw dbname=x", `{"token":"pw"}`)
 	f.Add("-H\x00Authorization:\x00-H\x00a b: c", "Bearer\x00ApiKey  x y")
+	// Users and passwords before an "@", and texts with an "@" and no
+	// password.
+	f.Add("app:pw@tcp(db:3306)/x\x00-u\x00u:p@w:rd@host", "scott/pw@//h:1521/orcl\x00u:@h")
+	f.Add("git@github.com:org/repo\x00user@example.com", "https://example.com/a@b\x00a/b:c@d")
 
 	f.Fuzz(func(t *testing.T, before, after string) {
 		args := append(strings.Split(before, "\x00"), strings.Split(after, "\x00")...)

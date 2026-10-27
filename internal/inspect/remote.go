@@ -81,28 +81,16 @@ type RemoteOptions struct {
 	// baseTransport is set. SDKInspector.Inspect passes SDKOptions.Dial.
 	dial DialFunc
 
-	// secrets are more strings that classify removes from error text, on
-	// top of the ones that Remote finds in srv (header values, URL user
-	// info, query and path parts). SDKInspector.Inspect passes the values of
-	// the variables that it expanded in srv, because they can stand in any
-	// part of the URL. They are never shown. On success, Remote also puts
-	// them in Result.Secrets.
-	secrets []string
-
-	// shortSecrets are the values of the expanded variables that are shorter
-	// than discover.MinSecretBytes. classify removes them from error text only
-	// where they stand as whole words (see replaceWords): a short value is too
-	// likely to match ordinary words to remove it everywhere.
-	// SDKInspector.Inspect sets them. They are never shown, and they do not go
-	// to Result.Secrets.
-	shortSecrets []string
-
-	// credentials are the values of secrets that are credentials (see
-	// lookupRecorder): the variable name is secret-like or the value looks
-	// like a credential. SDKInspector.Inspect sets them. On success, Remote
-	// puts them in Result.Credentials, with the credentials that it finds in
-	// srv. They are never shown.
-	credentials []string
+	// expanded holds the values of the variables that SDKInspector.Inspect
+	// expanded in srv (see lookupRecorder.lists), on top of the values that
+	// Remote finds in srv itself (see remoteSecretLists). They can stand in
+	// any part of the URL. classify removes expanded.long from error text
+	// wherever it stands, and expanded.short only where it stands as a whole
+	// word (see replaceWords): a short value is too likely to match ordinary
+	// words to remove it everywhere. On success, Remote puts expanded.long in
+	// Result.Secrets and expanded.credentials, the values that are
+	// credentials, in Result.Credentials. They are never shown.
+	expanded secretLists
 }
 
 // Remote connects to a remote MCP server (streamable HTTP or legacy SSE, from
@@ -142,11 +130,12 @@ type RemoteOptions struct {
 // On success, Result.Secrets holds the header values and the credentials
 // inside them, such as the pairs and values of a Cookie header (see
 // headerSecrets), the URL user info, the secret URL parts,
-// the URL parts of urlCredentials and opts.secrets that have at least
-// discover.MinSecretBytes bytes (see resultSecrets). Result.Credentials holds
-// the values of Result.Secrets that look like a credential: the values of
-// credential headers (see headerCredentials), the URL user info, the URL
-// parts of urlCredentials and opts.credentials (see Result.Credentials).
+// the URL parts of urlCredentials and the expanded values of opts that have
+// at least discover.MinSecretBytes bytes (see remoteSecretLists and
+// resultSecrets). Result.Credentials holds the values of Result.Secrets that
+// look like a credential: the values of credential headers (see
+// headerCredentials), the URL user info, the URL parts of urlCredentials and
+// the expanded credentials of opts (see Result.Credentials).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -186,22 +175,10 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	endpointURL, user := splitUserinfo(u)
 	endpoint := endpointURL.String()
 
-	// secrets are all the strings that classify removes from error text. On
-	// success, the ones of at least discover.MinSecretBytes bytes also go to
-	// Result.Secrets.
-	headers, secrets := splitHeaders(srv.Headers)
-	secrets = append(secrets, userinfoSecrets(user)...)
-	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
-	// urlSecrets holds whole path segments, such as "apikey=x" or
-	// "mcp;token=x", but urlCredentials can find the value inside one ("x").
-	// A server can echo that value alone, and resultCredentials keeps only
-	// the values of Secrets, so the value must be in secrets too.
-	secrets = append(secrets, urlCredentials(raw)...)
-	secrets = append(secrets, opts.secrets...)
-	// short are the strings that classify removes from error text as whole
-	// words only: the short expanded values and the short credentials inside
-	// the header values (see headerShortSecrets).
-	short := slices.Concat(opts.shortSecrets, headerShortSecrets(srv.Headers))
+	headers, _ := splitHeaders(srv.Headers)
+	// lists are all the strings that classify removes from error text, and
+	// the ones that go to the Result lists on success.
+	lists := remoteSecretLists(srv, u, opts.expanded)
 
 	proxy := opts.proxy
 	if proxy == nil {
@@ -228,7 +205,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if err != nil {
 		if errors.Is(err, errReservedHeader) || errors.Is(err, errInvalidHeaderValue) {
 			// The text holds the header key only, never a value.
-			return Result{}, configError(srv, truncate(err.Error()))
+			return Result{}, configError(srv, cutWords(err.Error(), nil))
 		}
 		return Result{}, configError(srv, "invalid HTTP client settings")
 	}
@@ -301,7 +278,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = joinContextErr(ctxErr, err)
 		}
-		ce := classify(err, srv, ev, secrets, short)
+		ce := classify(err, srv, ev, lists)
 		ce.Warnings = warnings
 		return Result{}, ce
 	}
@@ -337,14 +314,56 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// values under discover.MinSecretBytes bytes, such as a short header value or
 	// a short password: in ordinary text they would garble words. The error
 	// scrub still removes them.
-	result.Secrets = resultSecrets(secrets)
+	result.Secrets = resultSecrets(lists.long)
 	// The values of Secrets that look like a credential, for scan --llm (see
 	// Result.Credentials). resultCredentials only filters Secrets, so
-	// Credentials is a subset of it. All the strings of userinfoSecrets count:
-	// the user info of a URL is always a credential.
-	result.Credentials = resultCredentials(result.Secrets,
-		headerCredentials(srv.Headers), userinfoSecrets(user), urlCredentials(raw), opts.credentials)
+	// Credentials is a subset of it.
+	result.Credentials = resultCredentials(result.Secrets, lists.credentials)
 	return result, nil
+}
+
+// remoteSecretLists returns the lists of Remote for srv, the expanded server,
+// whose URL parses to u: expanded (see RemoteOptions) plus what Remote finds
+// in srv itself.
+//
+//   - long: the header values and the secrets inside them (see
+//     splitHeaders), the secrets of the URL user info (see userinfoSecrets),
+//     the secret query parts and path segments (see urlSecrets), the URL
+//     credentials (see urlCredentials) and expanded.long.
+//   - short: the short values of remoteShortSecrets.
+//   - credentials: the secrets of the credential headers (see
+//     headerCredentials), all the strings of userinfoSecrets (the user info
+//     of a URL is always a credential), the URL credentials and
+//     expanded.credentials.
+//
+// urlSecrets holds whole path segments, such as "apikey=x" or "mcp;token=x",
+// but urlCredentials can find the value inside one ("x"). A server can echo
+// that value alone, and resultCredentials keeps only the values of Secrets,
+// so the URL credentials go to long too.
+//
+// The result holds raw values. Never print, log or encode them.
+func remoteSecretLists(srv discover.Server, u *url.URL, expanded secretLists) secretLists {
+	raw := srv.URL.Reveal()
+	_, headerValues := splitHeaders(srv.Headers)
+	userValues := userinfoSecrets(u.User)
+	urlCreds := urlCredentials(raw)
+	return secretLists{
+		long:        slices.Concat(headerValues, userValues, urlSecrets(u.RawQuery, raw), urlCreds, expanded.long),
+		short:       remoteShortSecrets(srv, expanded),
+		credentials: slices.Concat(headerCredentials(srv.Headers), userValues, urlCreds, expanded.credentials),
+	}
+}
+
+// remoteShortSecrets returns the strings that classify removes from the error
+// text of the remote server srv as whole words only: expanded.short, the
+// short expanded values, and the short credentials inside the header values
+// of srv (see headerShortSecrets). Remote passes them to classify, and
+// SDKInspector.Inspect passes the same list to showDiscoveredURL, so that
+// both remove the same values.
+//
+// The result holds raw values. Never print, log or encode them.
+func remoteShortSecrets(srv discover.Server, expanded secretLists) []string {
+	return slices.Concat(expanded.short, headerShortSecrets(srv.Headers))
 }
 
 // callRecords returns the sending middleware that gives each MCP call its own
@@ -502,12 +521,18 @@ func isCookieHeader(key string) bool {
 // "x", and not the whole header value, so each piece must be a secret on its
 // own.
 //
-// The value is a list of pairs split by ";", as in "sid=x; theme=dark". For
-// each pair it returns the pair "name=value" and the value. A quoted value
-// (name="x") also gives the value without the quotes. A part without "=",
-// such as the "HttpOnly" attribute of Set-Cookie, gives nothing. Every pair
-// counts, also one with a plain name such as "theme": the whole header is a
-// credential, so the check fails closed.
+// The value of "Cookie" and "Cookie2" is a list of pairs split by ";", as in
+// "sid=x; theme=dark". For each pair it returns the pair "name=value" and the
+// value. A quoted value (name="x") also gives the value without the quotes.
+// A part without "=" gives nothing. Every pair counts, also one with a plain
+// name such as "theme": the whole header is a credential, so the check fails
+// closed.
+//
+// The value of "Set-Cookie" holds one cookie, the first pair, and then
+// attributes such as "Path=/", "Domain=example.com", "Expires=..." or
+// "HttpOnly". Only the first pair is a cookie, so cookieSecrets reads only
+// that pair. An attribute is no secret: "example.com" must not become a
+// credential that scan --llm masks.
 //
 // long holds the pieces of at least discover.MinSecretBytes bytes, short the
 // shorter non-empty ones. Neither holds the whole value, nor a piece two
@@ -529,7 +554,13 @@ func cookieSecrets(key, value string) (long, short []string) {
 			short = append(short, piece)
 		}
 	}
-	for _, part := range strings.Split(value, ";") {
+	parts := strings.Split(value, ";")
+	if strings.EqualFold(strings.TrimSpace(key), "set-cookie") {
+		// The cookie of Set-Cookie is its first pair; the rest are
+		// attributes. strings.Split always returns at least one part.
+		parts = parts[:1]
+	}
+	for _, part := range parts {
 		pair := strings.TrimSpace(part)
 		name, val, found := strings.Cut(pair, "=")
 		if !found || strings.TrimSpace(name) == "" {
@@ -555,7 +586,7 @@ func cookieSecrets(key, value string) (long, short []string) {
 // other header, such as "Content-Type: application/json" or a plain
 // User-Agent, it returns nothing. Such a header has no inner credential
 // either: isCredentialHeader accepts every value in which
-// discover.ArgCredentials finds a credential (see looksLikeCredential).
+// discover.ArgCredentials finds a credential (see holdsCredential).
 //
 // The result holds raw values. Never print, log or encode them.
 func headerCredentials(cfg discover.SecretMap) []string {
@@ -579,7 +610,7 @@ func headerCredentials(cfg discover.SecretMap) []string {
 //   - the value has an auth scheme and text after it ("Bearer x", "Basic x",
 //     "Token x"; see discover.IsAuthScheme, the rule of
 //     discover.ArgCredentials);
-//   - the value looks like a credential by itself (see looksLikeCredential):
+//   - the value holds a credential by itself (see holdsCredential):
 //     a word of it looks like a token, as in "<word> ghp_x", or it holds a
 //     credential that discover.ArgCredentials finds.
 //
@@ -594,13 +625,13 @@ func isCredentialHeader(key, value string) bool {
 	if scheme, rest, found := strings.Cut(value, " "); found && strings.TrimSpace(rest) != "" && discover.IsAuthScheme(scheme) {
 		return true
 	}
-	return looksLikeCredential(value)
+	return holdsCredential(value)
 }
 
 // urlCredentials returns the secrets of the configured URL raw that are
 // credentials, for Result.Credentials: the parts that
 // discover.ArgCredentials finds in raw as one argument, with at least
-// discover.MinSecretBytes bytes. They are the user info, the password and,
+// discover.MinSecretBytes bytes (see longCredentials). They are the user info, the password and,
 // by the rule of discover.IsSecretUserName, the user name, always; a query
 // value when its key is secret-like ("?api_key=x"); and a path segment, a
 // matrix parameter or a query part when it looks like a token. So
@@ -609,13 +640,7 @@ func isCredentialHeader(key, value string) bool {
 //
 // The result holds raw values. Never print, log or encode them.
 func urlCredentials(raw string) []string {
-	var credentials []string
-	for _, v := range discover.ArgCredentials([]string{raw}) {
-		if len(v) >= discover.MinSecretBytes {
-			credentials = append(credentials, v)
-		}
-	}
-	return credentials
+	return longCredentials([]string{raw})
 }
 
 // basicSecrets returns the secrets inside a "Basic <base64>" value: the

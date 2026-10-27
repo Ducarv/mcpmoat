@@ -8,6 +8,27 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
+// secretLists holds the config values of one server that the server gets and
+// can echo, for the scrub of error text (see classify) and for the Result
+// lists. Inspect, Remote and inspectStdio pass one secretLists and not three
+// slices in a row, so that a caller cannot swap two of them.
+//
+// The lists hold raw values. Never print, log or encode them.
+type secretLists struct {
+	// long holds the values of at least discover.MinSecretBytes bytes, and
+	// can hold shorter header values and a short URL password. classify
+	// removes them from error text wherever they stand. The ones of at least
+	// discover.MinSecretBytes bytes go to Result.Secrets (see resultSecrets).
+	long []string
+	// short holds the values shorter than discover.MinSecretBytes. classify
+	// removes them from error text only where they stand as whole words (see
+	// replaceWords). They never go to a Result list.
+	short []string
+	// credentials holds the values of long that are credentials, for
+	// Result.Credentials (see resultCredentials). classify does not read it.
+	credentials []string
+}
+
 // resultSecrets returns the values in lists as discover.Secret values, for
 // Result.Secrets. It keeps only the values of at least discover.MinSecretBytes
 // bytes, each one time.
@@ -55,7 +76,7 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 // lists, for Result.Credentials. secrets is the result of resultSecrets, and
 // lists hold the values that the credential checks found (see isCredential,
 // envCredentials, argCredentials, headerCredentials, urlCredentials and
-// valueCredentials).
+// valueCredentials), usually secretLists.credentials.
 //
 // Credentials is a subset of Secrets by construction: the function only
 // drops values from secrets, so it cannot add a value that Secrets does not
@@ -90,26 +111,30 @@ func resultCredentials(secrets []discover.Secret, lists ...[]string) []discover.
 
 // isCredential reports whether value, the value of the env key or of the
 // variable called name, is a credential for Result.Credentials: name is
-// secret-like (discover.IsSecretName, as in "API_KEY"), or value looks like a
-// credential by itself (see looksLikeCredential). name can be "" when only
+// secret-like (discover.IsSecretName, as in "API_KEY"), or value holds a
+// credential by itself (see holdsCredential). name can be "" when only
 // the value is known. So "NODE_ENV=production" is no credential, and
 // "API_KEY=production" is one.
 //
 // It never prints or stores name or value.
 func isCredential(name, value string) bool {
-	return discover.IsSecretName(name) || looksLikeCredential(value)
+	return discover.IsSecretName(name) || holdsCredential(value)
 }
 
-// looksLikeCredential reports whether value, a config value with no name to
-// go by, looks like a credential: a word of it looks like a token
+// holdsCredential reports whether value, a config value with no name to go
+// by, is or holds a credential: a word of it looks like a token
 // (discover.TokenLike), or discover.ArgCredentials finds a credential in it
 // when it reads value as one argument. The second check finds a credential
 // inside a longer value, such as the password of "postgres://u:pw@h/db", the
 // token of "Bearer x" or the value of "password=x" in a connection string.
 // Plain words, such as "production" or "application/json", give false.
 //
+// It is not the rule of package discover for one value: discover.TokenLike
+// alone reads value as one token, while holdsCredential splits value into
+// words and adds the checks of discover.ArgCredentials.
+//
 // It never prints or stores value.
-func looksLikeCredential(value string) bool {
+func holdsCredential(value string) bool {
 	return discover.TokenLike(value) || len(discover.ArgCredentials([]string{value})) > 0
 }
 
@@ -127,12 +152,12 @@ func looksLikeCredential(value string) bool {
 // the shorter pieces, for the whole-word scrub of error text only (see
 // replaceWords), as the short list of argSecrets. Each piece is a credential,
 // so the caller can add long to both Result lists. A value with no
-// credential in it (looksLikeCredential is false), such as "production" or
+// credential in it (holdsCredential is false), such as "production" or
 // "application/json", gives two nil lists.
 //
 // Each piece is in the lists one time, and value itself is not in them: the
 // callers put the whole value in their lists already. When
-// discover.ArgCredentials returns value itself, looksLikeCredential is true,
+// discover.ArgCredentials returns value itself, holdsCredential is true,
 // so the callers also count the whole value as a credential.
 //
 // The results hold raw values. Never print, log or encode them.
@@ -151,17 +176,15 @@ func valueCredentials(value string) (long, short []string) {
 	return long, short
 }
 
-// argCredentials returns the pieces of the command line of s that look like
-// a credential (see discover.ArgCredentials), with at least
-// discover.MinSecretBytes bytes, for Result.Credentials. It reads the same
-// line as argSecrets, and discover.ArgCredentials is a subset of
-// discover.ArgSecrets, so each piece is also in the long list of argSecrets.
+// longCredentials returns the pieces of line that look like a credential
+// (see discover.ArgCredentials), with at least discover.MinSecretBytes bytes,
+// for Result.Credentials. A shorter piece never goes to Result.Secrets, so it
+// cannot be a credential either. argCredentials and urlCredentials call it.
 // The list can hold a value more than one time: resultCredentials removes
 // duplicates.
 //
 // The result holds raw values. Never print, log or encode them.
-func argCredentials(s discover.Server) []string {
-	line := append([]string{s.Command}, s.Args.Values()...)
+func longCredentials(line []string) []string {
 	var credentials []string
 	for _, v := range discover.ArgCredentials(line) {
 		if len(v) >= discover.MinSecretBytes {
@@ -169,6 +192,26 @@ func argCredentials(s discover.Server) []string {
 		}
 	}
 	return credentials
+}
+
+// argCredentials returns the long credentials in the command line of s (see
+// longCredentials and commandLine), for Result.Credentials. It reads the same
+// line as argSecrets, and discover.ArgCredentials is a subset of
+// discover.ArgSecrets, so each piece is also in the long list of argSecrets.
+//
+// The result holds raw values. Never print, log or encode them.
+func argCredentials(s discover.Server) []string {
+	return longCredentials(commandLine(s))
+}
+
+// commandLine returns the command of s and then its args: the argv that the
+// child gets (see stdioCommand). The command goes first, as in the report
+// (formatCommand in internal/report), so that the same rules see the same
+// line.
+//
+// The result holds raw values. Never print, log or encode them.
+func commandLine(s discover.Server) []string {
+	return append([]string{s.Command}, s.Args.Values()...)
 }
 
 // argSecrets returns the secrets in the command line of s: the text that
@@ -183,14 +226,11 @@ func argCredentials(s discover.Server) []string {
 // s is the expanded server, so these are the command and the args that the
 // child gets as argv (see stdioCommand). The configured form is not needed:
 // its "${VAR}" text never reaches the child, and the expanded values are in
-// the list of the lookup already. The command goes first, as in the report
-// (formatCommand in internal/report), so that the same rules see the same
-// line.
+// the list of the lookup already. The line is the one of commandLine.
 //
 // The results hold raw values. Never print, log or encode them.
 func argSecrets(s discover.Server) (secrets, short []string) {
-	line := append([]string{s.Command}, s.Args.Values()...)
-	for _, v := range discover.ArgSecrets(line) {
+	for _, v := range discover.ArgSecrets(commandLine(s)) {
 		switch {
 		case len(v) >= discover.MinSecretBytes:
 			secrets = append(secrets, v)

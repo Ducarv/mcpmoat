@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -36,35 +35,12 @@ const llmEchoCanary = "mcpmoat-llm-secret-Vb6Lr9QzT3"
 // llmSecretServer is one server of a test: its tools, and the values that
 // Inspect gave it. credentials go to both inspect.Result.Secrets and
 // inspect.Result.Credentials. secrets go to Result.Secrets only (see
-// llmSetSecrets).
+// setFakeSecrets).
 type llmSecretServer struct {
 	name        string
 	credentials []string
 	secrets     []string
 	tools       []inspect.Tool
-}
-
-// llmSetSecrets sets the Secrets and the Credentials of res as Inspect does:
-// Credentials holds credentials, and Secrets holds credentials and secrets,
-// each value one time. So Credentials is a subset of Secrets, as the doc of
-// inspect.Result.Credentials promises. The values stay in memory: a
-// discover.Secret prints as discover.Mask.
-func llmSetSecrets(res *inspect.Result, credentials, secrets []string) {
-	res.Secrets, res.Credentials = nil, nil
-	seen := map[string]bool{}
-	for _, v := range slices.Concat(credentials, secrets) {
-		if !seen[v] {
-			seen[v] = true
-			res.Secrets = append(res.Secrets, discover.NewSecret(v))
-		}
-	}
-	seen = map[string]bool{}
-	for _, v := range credentials {
-		if !seen[v] {
-			seen[v] = true
-			res.Credentials = append(res.Credentials, discover.NewSecret(v))
-		}
-	}
 }
 
 // TestScanLLMRedactsSecrets checks that scan --llm replaces each credential
@@ -285,7 +261,7 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 
 // llmSecretScan runs "mcpmoat scan --llm" on one stdio server for each entry
 // of servers, with the real LLM client against api. The fake inspector gives
-// each server its tools, its Secrets and its Credentials (see llmSetSecrets).
+// each server its tools, its Secrets and its Credentials (see setFakeSecrets).
 func llmSecretScan(t *testing.T, api *fakeProvider, servers []llmSecretServer, jsonOut bool) pinRunResult {
 	t.Helper()
 	tools := make(map[string][]inspect.Tool, len(servers))
@@ -294,11 +270,7 @@ func llmSecretScan(t *testing.T, api *fakeProvider, servers []llmSecretServer, j
 	}
 	insp := fakeServers(tools)
 	for _, s := range servers {
-		// A map value is not addressable in Go, so copy the Result out,
-		// change it and put it back.
-		res := insp.Results[s.name]
-		llmSetSecrets(&res, s.credentials, s.secrets)
-		insp.Results[s.name] = res
+		setFakeSecrets(insp, s.name, s.credentials, s.secrets)
 	}
 	return llmRealScan(t, api, llmEnv(t, tools), insp, 0, jsonOut)
 }
@@ -324,9 +296,9 @@ const (
 // "--api-key", the header line after "-H", and the parts of that line), with
 // at least 8 bytes. It puts in Result.Credentials the subset that
 // discover.ArgCredentials returns: the request hides only these values. The
-// fake inspector gets the same values: the test calls the real
-// discover.ArgSecrets and discover.ArgCredentials on the command line of the
-// config (see llmArgFixture), and checks that both canaries are credentials.
+// fake inspector gets the same values, as literal lists. TestArgCredentials
+// and TestResultSecrets in internal/inspect test the real lists of such a
+// command line.
 //
 // Each tool echoes a part of the args. The provider must get discover.Mask
 // and "redacted": true for each echoed secret, never a canary, and the
@@ -367,25 +339,20 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 		"pkg":    sent["pkg"],
 	}
 
-	// argSecrets and argCredentials are what inspect gives a stdio server:
+	// argSecrets and argCredentials are what inspect gives this stdio server:
 	// the values of discover.ArgSecrets and discover.ArgCredentials of the
-	// command line (the command first), with at least 8 bytes.
-	// The values are raw secrets: the test compares them in memory only,
-	// and never prints them.
-	argSecrets, argCredentials := llmArgFixture(append([]string{command}, args...))
-	// The package name is no secret, so no value may hold it: else the
-	// redaction would mask it, and the test would check the wrong thing.
-	for _, v := range slices.Concat(argSecrets, argCredentials) {
-		if strings.Contains(v, llmArgPackage) {
-			t.Fatalf("discover.ArgSecrets or discover.ArgCredentials gave a value with the package name, want none")
-		}
+	// command line (the command first), with at least 8 bytes. Each value is
+	// a credential, so the two lists are equal. No value holds the package
+	// name, so the redaction does not mask it. Both canaries are
+	// credentials: the request hides only those. The values are raw
+	// secrets: the test compares them in memory only, and never prints them.
+	argCredentials := []string{
+		"Authorization: Bearer " + llmArgHeaderCanary,
+		"Bearer " + llmArgHeaderCanary,
+		llmArgFlagCanary,
+		llmArgHeaderCanary,
 	}
-	// Both canaries must be credentials: the request hides only those.
-	for _, canary := range []string{llmArgFlagCanary, llmArgHeaderCanary} {
-		if !slices.Contains(argCredentials, canary) {
-			t.Fatalf("discover.ArgCredentials misses a canary of the args (%d values), want both canaries", len(argCredentials))
-		}
-	}
+	argSecrets := slices.Clone(argCredentials)
 
 	// The tools with a secret in their text get the floor row (MOAT-LLM-001,
 	// medium): their text had a value removed, so the model rating is not
@@ -395,7 +362,7 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 	tests := []struct {
 		name string
 		// credentials go to Result.Secrets and Result.Credentials, secrets
-		// to Result.Secrets only (see llmSetSecrets).
+		// to Result.Secrets only (see setFakeSecrets).
 		credentials []string
 		secrets     []string
 		want        map[string]providerPayload
@@ -413,9 +380,7 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 					api := newFakeProvider(t, provider)
 					e := newPinEnv(t, map[string]any{"srv": map[string]any{"command": command, "args": args}})
 					insp := fakeServers(map[string][]inspect.Tool{"srv": tools})
-					res := insp.Results["srv"]
-					llmSetSecrets(&res, tt.credentials, tt.secrets)
-					insp.Results["srv"] = res
+					setFakeSecrets(insp, "srv", tt.credentials, tt.secrets)
 
 					r := llmRealScan(t, api, e, insp, 0, out.json)
 
@@ -531,8 +496,10 @@ func llmSecretAssertAbsent(t *testing.T, secret, what, out string) {
 // and the server can echo it after <IMPORTANT> in a tool description, so the
 // model does not see the text. The config puts the phrase under a
 // secret-like env key (API_KEY), so Inspect gives it in Result.Secrets and in
-// Result.Credentials, and the request hides it. The fake inspector gets the
-// values of llmEnvFixture, the env rule of Inspect. The tool "fetch" gets one
+// Result.Credentials, and the request hides it. Every case has the same
+// config, so the cases share one literal pair of lists for the fake
+// inspector. TestIsCredential and TestEnvCredentials in internal/inspect test
+// the env rule of Inspect itself. The tool "fetch" gets one
 // MOAT-LLM-001 row, of at least medium, whatever the model answers with no
 // rating (none), a low rating, or no usable answer: the row has the risk text
 // of the removal, or of the cut when the text was cut too. A model rating of
@@ -548,13 +515,13 @@ func TestScanLLMHostileEnv(t *testing.T) {
 	if len(hostile) < discover.MinSecretBytes {
 		t.Fatalf("the hostile phrase has %d bytes, want %d or more", len(hostile), discover.MinSecretBytes)
 	}
-	// The phrase is plain words, so only the secret-like key makes it a
-	// credential. Under a plain key (NODE_ENV) it would go to the provider
-	// as it is, and the model would rate the text that it sees.
-	envSecrets, envCredentials := llmEnvFixture(map[string]string{"API_KEY": hostile})
-	if !slices.Contains(envCredentials, hostile) {
-		t.Fatalf("the env rule does not make the hostile phrase under API_KEY a credential")
-	}
+	// envSecrets and envCredentials are what Inspect gives for the env
+	// API_KEY=<hostile>. The phrase is plain words, so only the secret-like
+	// key makes it a credential. Under a plain key (NODE_ENV) it would be in
+	// Secrets only: it would go to the provider as it is, and the model would
+	// rate the text that it sees.
+	envSecrets := []string{hostile}
+	envCredentials := []string{hostile}
 	add := mkTool("add", "Add.")
 	addSent := providerPayload{ToolName: "add", ToolDescription: "Add."}
 	// cutDesc is longer than llm.MaxDescriptionBytes, with the phrase before
@@ -679,96 +646,6 @@ func TestScanLLMHostileEnv(t *testing.T) {
 	}
 }
 
-// The fixture helpers below give the Secrets and the Credentials that Inspect
-// gives for one source of config values. They call the public rules of
-// package discover that Inspect calls (internal/inspect/secrets.go, sdk.go
-// and remote.go keep the glue unexported). The tests of internal/inspect own
-// the exact glue; these helpers only keep the fixtures of this file close to
-// it. Each helper keeps the values of at least discover.MinSecretBytes bytes,
-// as inspect does. The results hold raw values: compare them in memory only.
-
-// llmLongValues returns the values of vs with at least
-// discover.MinSecretBytes bytes.
-func llmLongValues(vs []string) []string {
-	var out []string
-	for _, v := range vs {
-		if len(v) >= discover.MinSecretBytes {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// llmLooksLikeCredential is the value rule of Inspect for a config value with
-// no name to go by: a word of it looks like a token, or
-// discover.ArgCredentials finds a credential in it.
-func llmLooksLikeCredential(v string) bool {
-	return discover.TokenLike(v) || len(discover.ArgCredentials([]string{v})) > 0
-}
-
-// llmEnvFixture returns the Secrets and the Credentials of the env of a stdio
-// server: every value is a secret, and a value is a credential when its key
-// is secret-like or the value looks like a credential.
-func llmEnvFixture(env map[string]string) (secrets, credentials []string) {
-	for key, v := range env {
-		if len(v) < discover.MinSecretBytes {
-			continue
-		}
-		secrets = append(secrets, v)
-		if discover.IsSecretName(key) || llmLooksLikeCredential(v) {
-			credentials = append(credentials, v)
-		}
-	}
-	return secrets, credentials
-}
-
-// llmArgFixture returns the Secrets and the Credentials of the command line of
-// a stdio server (the command first): discover.ArgSecrets and its subset
-// discover.ArgCredentials.
-func llmArgFixture(line []string) (secrets, credentials []string) {
-	return llmLongValues(discover.ArgSecrets(line)), llmLongValues(discover.ArgCredentials(line))
-}
-
-// llmURLFixture returns the Secrets and the Credentials of the URL of a remote
-// server with no user info: the query and path parts that discover.RedactURL
-// masks, and the parts that discover.ArgCredentials finds in the URL.
-func llmURLFixture(t *testing.T, raw string) (secrets, credentials []string) {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse the fixture URL: %v", err)
-	}
-	secrets = llmLongValues(slices.Concat(discover.SecretQueryParts(u.RawQuery), discover.SecretPathSegments(raw)))
-	return secrets, llmLongValues(discover.ArgCredentials([]string{raw}))
-}
-
-// llmHeaderFixture returns the Secrets and the Credentials of the headers of a
-// remote server: each value, and the credential after an auth scheme
-// ("Bearer <token>"). All of them are credentials when the header name is
-// secret-like, the value has an auth scheme, or the value looks like a
-// credential. A plain header such as "Content-Type: application/json" gives
-// no credential.
-func llmHeaderFixture(headers map[string]string) (secrets, credentials []string) {
-	for key, value := range headers {
-		values := []string{value}
-		isCredential := discover.IsSecretName(key) || llmLooksLikeCredential(value)
-		if scheme, rest, ok := strings.Cut(value, " "); ok && discover.IsAuthScheme(scheme) && strings.TrimSpace(rest) != "" {
-			values = append(values, strings.TrimSpace(rest))
-			isCredential = true
-		}
-		values = llmLongValues(values)
-		secrets = append(secrets, values...)
-		if isCredential {
-			credentials = append(credentials, values...)
-		}
-	}
-	return secrets, credentials
-}
-
-// llmFakeBearer is the fake bearer token of TestScanLLMCredentialsOnly. It is
-// token-like, so Inspect makes it a credential.
-const llmFakeBearer = "FAKE-TOKEN-0123456789"
-
 // TestScanLLMCredentialsOnly checks the split of issues #229 and #235: scan
 // --llm hides only Result.Credentials in the request, and the local report
 // hides all of Result.Secrets in the Key of a row.
@@ -783,11 +660,14 @@ const llmFakeBearer = "FAKE-TOKEN-0123456789"
 // the removal). The Key of a row shows discover.Mask for every value of
 // Secrets, a plain value too, in the terminal report and in --json.
 //
-// Each case builds the Secrets and the Credentials of its config with the
-// fixture helpers above, and checks first that the values of the case sit in
-// the list that the case is about. No config value shows on stdout or
-// stderr: the report prints env and header values never, and args and URLs
-// masked.
+// Each case lists, as literals, the Secrets and the Credentials that Inspect
+// gives for its config, as echoConfigs does. The tests of internal/inspect
+// (TestIsCredential, TestEnvCredentials, TestArgCredentials,
+// TestRemoteResultSecrets and the others in secrets_test.go) test how
+// Inspect builds these lists from a config. Each case checks first that its
+// lists agree with the values that the case is about, and that Credentials
+// is a subset of Secrets. No config value shows on stdout or stderr: the
+// report prints env and header values never, and args and URLs masked.
 func TestScanLLMCredentialsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -806,8 +686,10 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 		name string
 		// server is the config entry of the server "alpha".
 		server map[string]any
-		// fixture gives the Secrets and the Credentials of server.
-		fixture func(t *testing.T) (secrets, credentials []string)
+		// secrets and credentials are the Result.Secrets and the
+		// Result.Credentials that Inspect gives for server. The values are
+		// fake; the test compares them in memory only.
+		secrets, credentials []string
 		// plain must be in Secrets and not in Credentials. credential must be
 		// in Credentials. The case is about these values.
 		plain, credential []string
@@ -822,19 +704,18 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 		wantCode int
 	}{
 		{
-			name:   "plain env value",
-			server: map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmEnvFixture(map[string]string{"NODE_ENV": "production"})
-			},
-			plain: []string{"production"},
-			tools: []inspect.Tool{mkTool("deploy", "Deploys the app to production.")},
-			want:  map[string]providerPayload{"deploy": none("deploy", "Deploys the app to production.")},
+			name:    "plain env value",
+			server:  map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
+			secrets: []string{"production"},
+			plain:   []string{"production"},
+			tools:   []inspect.Tool{mkTool("deploy", "Deploys the app to production.")},
+			want:    map[string]providerPayload{"deploy": none("deploy", "Deploys the app to production.")},
 		},
 		{
-			name:    "DSN arg",
-			server:  map[string]any{"command": "psql-mcp", "args": []string{dsn}},
-			fixture: func(*testing.T) ([]string, []string) { return llmArgFixture([]string{"psql-mcp", dsn}) },
+			name:   "DSN arg",
+			server: map[string]any{"command": "psql-mcp", "args": []string{dsn}},
+			// The DSN is no credential: it has no password.
+			secrets: []string{"localhost dbname=production user=postgres", "production", "postgres"},
 			plain:   []string{"production", "postgres"},
 			tools:   []inspect.Tool{mkTool("query", "Runs SQL as postgres on localhost, database production.")},
 			want: map[string]providerPayload{
@@ -842,45 +723,39 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 			},
 		},
 		{
-			name:   "path segment with a space",
-			server: map[string]any{"command": "fs-mcp", "args": []string{"/Users/me/My Documents/notes"}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmArgFixture([]string{"fs-mcp", "/Users/me/My Documents/notes"})
-			},
-			plain: []string{"Documents"},
-			tools: []inspect.Tool{mkTool("list", "Lists the files in Documents.")},
-			want:  map[string]providerPayload{"list": none("list", "Lists the files in Documents.")},
+			name:    "path segment with a space",
+			server:  map[string]any{"command": "fs-mcp", "args": []string{"/Users/me/My Documents/notes"}},
+			secrets: []string{"My Documents", "Documents"},
+			plain:   []string{"Documents"},
+			tools:   []inspect.Tool{mkTool("list", "Lists the files in Documents.")},
+			want:    map[string]providerPayload{"list": none("list", "Lists the files in Documents.")},
 		},
 		{
 			name:    "plain query value",
 			server:  map[string]any{"type": "http", "url": queryURL},
-			fixture: func(t *testing.T) ([]string, []string) { return llmURLFixture(t, queryURL) },
+			secrets: []string{"engineering"},
 			plain:   []string{"engineering"},
 			tools:   []inspect.Tool{mkTool("search", "Searches the engineering workspace.")},
 			want:    map[string]providerPayload{"search": none("search", "Searches the engineering workspace.")},
 		},
 		{
 			// Issue #229: the description is not garbled.
-			name:   "Content-Type header",
-			server: map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Content-Type": "application/json"}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmHeaderFixture(map[string]string{"Content-Type": "application/json"})
-			},
-			plain: []string{"application/json"},
-			tools: []inspect.Tool{mkTool("get", "Fetches a record and returns application/json.")},
-			want:  map[string]providerPayload{"get": none("get", "Fetches a record and returns application/json.")},
+			name:    "Content-Type header",
+			server:  map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Content-Type": "application/json"}},
+			secrets: []string{"application/json"},
+			plain:   []string{"application/json"},
+			tools:   []inspect.Tool{mkTool("get", "Fetches a record and returns application/json.")},
+			want:    map[string]providerPayload{"get": none("get", "Fetches a record and returns application/json.")},
 		},
 		{
 			// The plain value is in the tool name. The provider gets the
 			// name as it is, and the model answer low stays low: no floor.
 			// The Key of the row masks the value (the wide list).
-			name:   "plain value in a tool name",
-			server: map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmEnvFixture(map[string]string{"NODE_ENV": "production"})
-			},
-			plain: []string{"production"},
-			tools: []inspect.Tool{mkTool("deploy_production", "Deploys the app. "+llmMarkLow)},
+			name:    "plain value in a tool name",
+			server:  map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
+			secrets: []string{"production"},
+			plain:   []string{"production"},
+			tools:   []inspect.Tool{mkTool("deploy_production", "Deploys the app. "+llmMarkLow)},
 			want: map[string]providerPayload{
 				"deploy_production": none("deploy_production", "Deploys the app. "+llmMarkLow),
 			},
@@ -889,13 +764,12 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 		{
 			// Issue #229: the value of an auth header is still removed. The
 			// whole value and the token overlap, so they give one Mask.
-			name:   "bearer token",
-			server: map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Authorization": "Bearer " + llmFakeBearer}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmHeaderFixture(map[string]string{"Authorization": "Bearer " + llmFakeBearer})
-			},
-			credential: []string{llmFakeBearer, "Bearer " + llmFakeBearer},
-			tools:      []inspect.Tool{mkTool("auth", "Send Authorization: Bearer "+llmFakeBearer+" with each call.")},
+			name:        "bearer token",
+			server:      map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Authorization": "Bearer " + echoToken}},
+			secrets:     []string{"Bearer " + echoToken, echoToken},
+			credentials: []string{"Bearer " + echoToken, echoToken},
+			credential:  []string{echoToken, "Bearer " + echoToken},
+			tools:       []inspect.Tool{mkTool("auth", "Send Authorization: Bearer "+echoToken+" with each call.")},
 			want: map[string]providerPayload{
 				"auth": {ToolName: "auth", ToolDescription: "Send Authorization: " + mask + " with each call.", Redacted: true},
 			},
@@ -908,15 +782,14 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 			// of each row hides both values.
 			name: "row Key masks the wide list",
 			server: map[string]any{"type": "http", "url": plainURL,
-				"headers": map[string]string{"Authorization": "Bearer " + llmFakeBearer, "X-Workspace": "production"}},
-			fixture: func(*testing.T) ([]string, []string) {
-				return llmHeaderFixture(map[string]string{"Authorization": "Bearer " + llmFakeBearer, "X-Workspace": "production"})
-			},
-			plain:      []string{"production"},
-			credential: []string{llmFakeBearer},
+				"headers": map[string]string{"Authorization": "Bearer " + echoToken, "X-Workspace": "production"}},
+			secrets:     []string{"Bearer " + echoToken, echoToken, "production"},
+			credentials: []string{"Bearer " + echoToken, echoToken},
+			plain:       []string{"production"},
+			credential:  []string{echoToken},
 			tools: []inspect.Tool{
 				mkTool("deploy_production", "Deploys the app. "+llmMarkLow),
-				mkTool("tok_"+llmFakeBearer, "Calls the API."),
+				mkTool("tok_"+echoToken, "Calls the API."),
 			},
 			want: map[string]providerPayload{
 				"deploy_production": none("deploy_production", "Deploys the app. "+llmMarkLow),
@@ -927,18 +800,23 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		// Check the fixture once for each case, before the subtests: the
-		// values of the case must sit in the list that the case is about.
-		secrets, credentials := tt.fixture(t)
+		// Check the lists once for each case, before the subtests: the
+		// values of the case must sit in the list that the case is about, and
+		// Credentials must be a subset of Secrets, as Inspect promises.
 		for _, v := range tt.plain {
-			if !slices.Contains(secrets, v) || slices.Contains(credentials, v) {
+			if !slices.Contains(tt.secrets, v) || slices.Contains(tt.credentials, v) {
 				t.Fatalf("%s: a plain value is not in Secrets only (in Secrets: %v, in Credentials: %v)",
-					tt.name, slices.Contains(secrets, v), slices.Contains(credentials, v))
+					tt.name, slices.Contains(tt.secrets, v), slices.Contains(tt.credentials, v))
 			}
 		}
 		for _, v := range tt.credential {
-			if !slices.Contains(credentials, v) {
+			if !slices.Contains(tt.credentials, v) {
 				t.Fatalf("%s: a credential value is not in Credentials", tt.name)
+			}
+		}
+		for _, v := range tt.credentials {
+			if !slices.Contains(tt.secrets, v) {
+				t.Fatalf("%s: a value of Credentials is not in Secrets", tt.name)
 			}
 		}
 		for _, provider := range []llm.Provider{llm.ProviderAnthropic, llm.ProviderOpenAI} {
@@ -948,9 +826,7 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 					api := newFakeProvider(t, provider)
 					e := newPinEnv(t, map[string]any{"alpha": tt.server})
 					insp := fakeServers(map[string][]inspect.Tool{"alpha": tt.tools})
-					res := insp.Results["alpha"]
-					llmSetSecrets(&res, credentials, secrets)
-					insp.Results["alpha"] = res
+					setFakeSecrets(insp, "alpha", tt.credentials, tt.secrets)
 
 					r := llmRealScan(t, api, e, insp, 0, out.json)
 
@@ -986,7 +862,7 @@ func TestScanLLMCredentialsOnly(t *testing.T) {
 
 					// No config value shows: neither a credential nor a plain
 					// value (the Key masks it).
-					for _, v := range secrets {
+					for _, v := range tt.secrets {
 						llmSecretAssertAbsent(t, v, "stdout", r.stdout)
 						llmSecretAssertAbsent(t, v, "stderr", r.stderr)
 					}

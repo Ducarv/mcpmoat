@@ -40,13 +40,13 @@ func TestPinAcceptEchoSecret(t *testing.T) {
 	}{
 		{
 			name:      "unpinned server",
-			wantDiffs: []string{"+add", "+big_" + mask, "+fetch_" + mask, "+new_" + mask},
+			wantDiffs: []string{"+add", "+big_" + echoMask, "+fetch_" + echoMask, "+new_" + echoMask},
 			accepted:  "accepted srv: 4 new, 0 changed, 0 removed\n",
 		},
 		{
 			name:      "pinned server with a changed tool",
 			pinned:    echoPinned(),
-			wantDiffs: []string{"+big_" + mask, "fetch_" + mask, "+new_" + mask},
+			wantDiffs: []string{"+big_" + echoMask, "fetch_" + echoMask, "+new_" + echoMask},
 			accepted:  "accepted srv: 2 new, 1 changed, 0 removed\n",
 		},
 	}
@@ -55,8 +55,8 @@ func TestPinAcceptEchoSecret(t *testing.T) {
 			t.Parallel()
 			// e gets the secrets. control gets the same tools without them,
 			// so its pins are the pins of a server that echoes nothing.
-			e := newPinEnv(t, echoServer())
-			control := newPinEnv(t, echoServer())
+			e := newPinEnv(t, oneServer("srv"))
+			control := newPinEnv(t, oneServer("srv"))
 			if tt.pinned != nil {
 				echoFirstScan(t, e, tt.pinned...)
 				firstScan(t, control, tt.pinned...)
@@ -71,7 +71,7 @@ func TestPinAcceptEchoSecret(t *testing.T) {
 				t.Fatalf("pin: exit code = %d, want %d\nstderr:\n%s", got.code, exitOK, got.stderr)
 			}
 			assertRunNoEcho(t, got, echoToken, echoToken2)
-			warning := truncationWarning("pin", "big_"+mask, "srv")
+			warning := truncationWarning("pin", "big_"+echoMask, "srv")
 			if n := strings.Count(got.stderr, "was cut at the size limit"); n != 1 || !strings.Contains(got.stderr, warning) {
 				t.Errorf("stderr = %q, want exactly one %q", got.stderr, warning)
 			}
@@ -81,9 +81,9 @@ func TestPinAcceptEchoSecret(t *testing.T) {
 			}
 			assertDiffsOf(t, diffs, "srv", tt.wantDiffs)
 			assertContainsAll(t, "stdout", diffs, []string{
-				"+description: Fetch a page. Send " + mask + " too.",
-				"+description: New. Uses " + mask + ".",
-				"+description: Uses " + mask + ".",
+				"+description: Fetch a page. Send " + echoMask + " too.",
+				"+description: New. Uses " + echoMask + ".",
+				"+description: Uses " + echoMask + ".",
 			})
 
 			// A second accept of the same raw tools, without the secrets, has
@@ -111,7 +111,7 @@ func TestPinAcceptEchoSecret(t *testing.T) {
 			}
 			for _, name := range []string{echoChangedName, echoNewName, big.Name} {
 				if !strings.Contains(pinned[name]["canonical"], echoToken) {
-					t.Errorf("the pin of %q does not hold the raw tool text", strings.ReplaceAll(name, echoToken, mask))
+					t.Errorf("the pin of %q does not hold the raw tool text", strings.ReplaceAll(name, echoToken, echoMask))
 				}
 			}
 		})

@@ -183,7 +183,7 @@ func TestRemoteResultSecrets(t *testing.T) {
 		// url builds the configured URL. nil means fixtureURL.
 		url     func(ts *httptest.Server) string
 		wrap    func(http.Handler) http.Handler
-		secrets []string // RemoteOptions.secrets, the expanded values
+		secrets []string // RemoteOptions.expanded.long, the expanded values
 		want    []string
 	}{
 		{name: "no secrets", want: nil},
@@ -327,7 +327,7 @@ func TestRemoteResultSecrets(t *testing.T) {
 			}
 			srv := rmServer(discover.TransportHTTP, rawURL, tt.headers)
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: tt.secrets})
+			got, err := Remote(t.Context(), srv, RemoteOptions{expanded: secretLists{long: tt.secrets}})
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
@@ -428,7 +428,7 @@ func TestRemoteResultSecretsNilOnFailure(t *testing.T) {
 			srv := rmServer(discover.TransportHTTP, tt.url(t), rmHeaders())
 			srv.Untrusted = tt.untrusted
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: []string{"expanded-value-1"}})
+			got, err := Remote(t.Context(), srv, RemoteOptions{expanded: secretLists{long: []string{"expanded-value-1"}}})
 			if err == nil {
 				t.Fatal("Remote() error = nil, want an error")
 			}
@@ -699,7 +699,7 @@ func TestInnerCredentialsEverySource(t *testing.T) {
 		"expanded variable": func(value string) lists {
 			rec := &lookupRecorder{lookup: func(string) (string, bool) { return value, true }}
 			rec.Lookup("MCPMOAT_TEST_VALUE")
-			return lists{rec.values, rec.credentials, rec.short}
+			return lists{rec.values, rec.credentialList, rec.short}
 		},
 		"header value": func(value string) lists {
 			cfg := discover.SecretMap{"X-Db": discover.NewSecret(value)}
@@ -860,12 +860,12 @@ func TestLookupRecorderCredentials(t *testing.T) {
 			for _, name := range tt.lookups {
 				rec.Lookup(name)
 			}
-			if !slices.Equal(rec.credentials, tt.want) {
-				t.Errorf("credentials = %q, want %q", rec.credentials, tt.want)
+			if !slices.Equal(rec.credentialList, tt.want) {
+				t.Errorf("credentials = %q, want %q", rec.credentialList, tt.want)
 			}
 			// Each credential is also a long value, so resultCredentials can
 			// find it in Result.Secrets.
-			for _, c := range rec.credentials {
+			for _, c := range rec.credentialList {
 				if !slices.Contains(rec.values, c) {
 					t.Errorf("credential %q is not in values %q", c, rec.values)
 				}

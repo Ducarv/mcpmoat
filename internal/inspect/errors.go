@@ -160,14 +160,14 @@ type transportEvents interface {
 // ev tells what the HTTP layer saw for the request behind err: its non-2xx
 // status and the first error that the layer raised on purpose. ev can be nil.
 // If the HTTP layer blocked a request on purpose, that error decides the
-// kind, even when the SDK flattened err into text. secrets are all the secret
-// strings of the server entry: the header values, the credential parts of
-// auth headers and the secrets of the URL user info, query and path (see
-// Remote). classify removes them from any error text. short are the values
-// shorter than discover.MinSecretBytes that the server can echo (configured
-// env values, expanded values, argv pieces). classify removes them only where
-// they stand as whole words (see replaceWords). short can be nil.
-func classify(err error, srv discover.Server, ev transportEvents, secrets, short []string) *ConnectError {
+// kind, even when the SDK flattened err into text.
+//
+// lists holds the values that the server can echo (see secretLists).
+// classify removes lists.long from any error text wherever it stands, and
+// lists.short only where it stands as a whole word (see replaceWords). It
+// does not read lists.credentials. A zero secretLists removes nothing but the
+// parts of the URL.
+func classify(err error, srv discover.Server, ev transportEvents, lists secretLists) *ConnectError {
 	rawURL := srv.URL.Reveal()
 	redacted := srv.URL.String()
 
@@ -201,9 +201,9 @@ func classify(err error, srv discover.Server, ev transportEvents, secrets, short
 		URL:    redacted,
 	}
 	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, connected, func(text string) string {
-		return scrub(text, rawURL, redacted, secrets, short)
+		return scrub(text, rawURL, redacted, lists.long, lists.short)
 	})
-	ce.err = safeCause(cause, rawURL, redacted, secrets, short)
+	ce.err = safeCause(cause, rawURL, redacted, lists.long, lists.short)
 	return ce
 }
 
@@ -421,10 +421,13 @@ func stripURLError(err error) error {
 	}
 }
 
-// safeCause returns cause if its text holds no secret, and a plain error with
-// the scrubbed text otherwise. The plain error does not keep the chain, which
-// is the price for text that is safe to print. A nil cause gives nil. secrets
-// and short are the lists of scrub.
+// safeCause returns cause if its text holds no secret, and an error with the
+// scrubbed text otherwise. That error does not keep the chain of cause, which
+// is the price for text that is safe to print, but it still matches the
+// context error and the sentinel that cause wraps (see withText). So
+// errors.Is(err, context.DeadlineExceeded) still works when the scrub changed
+// the text, as it often does: with a short value "1", "exit status 1" changes.
+// A nil cause gives nil. secrets and short are the lists of scrub.
 func safeCause(cause error, rawURL, redactedURL string, secrets, short []string) error {
 	if cause == nil {
 		return nil
@@ -434,7 +437,7 @@ func safeCause(cause error, rawURL, redactedURL string, secrets, short []string)
 	if replaced == text {
 		return cause
 	}
-	return errors.New(cutWords(replaced, short))
+	return withText(cause, cutWords(replaced, short))
 }
 
 // scrub removes secrets from text and shortens it, so that it is safe to
@@ -482,233 +485,6 @@ func replaceSecrets(text, rawURL, redactedURL string, secrets, short []string) s
 	// The short values last: a short value can be a part of a long one, and
 	// the long one must go as a whole.
 	return replaceWords(text, short)
-}
-
-// replaceWords replaces each value in short, and the form that %q prints for
-// it (see quotedInner), with discover.Mask where it stands as a whole word.
-// A match is a whole word when the byte before it and the byte after it are
-// not word bytes (see isWordByte), or are the edge of text. An escape
-// sequence such as \n or \x01 also counts as a boundary before a match (see
-// endsWithEscape), so that "\n1234" in %q text loses the value 1234.
-//
-// Why whole words only: these values are shorter than
-// discover.MinSecretBytes, and a short value such as "1" or "true" matches
-// too much ordinary text. So a value stays when it is glued to a letter, a
-// digit or "_" ("a1234", "1234x"). The cost is that a common word that is
-// also a configured value is masked: with a value "1", "exit status 1" becomes
-// "exit status ********".
-//
-// At each position the longest value wins, so "ab-c" goes as a whole and does
-// not leave "-c" behind when "ab" is a value too. The checks read text as it
-// was before this call, and a discover.Mask already in text is copied as it
-// is: a value such as "*" must not mask the stars of a mask again and again.
-// But a match that starts inside such a Mask and goes on past its end is a
-// value that the copy would cut in two (see maskedWordAt), so it goes too. A
-// text with no value in it comes back unchanged.
-func replaceWords(text string, short []string) string {
-	forms := wordForms(text, short)
-	if len(forms) == 0 {
-		return text
-	}
-	var b strings.Builder
-	b.Grow(len(text))
-	for i := 0; i < len(text); {
-		if strings.HasPrefix(text[i:], discover.Mask) {
-			j, n := maskedWordAt(text, i, forms)
-			if n == 0 {
-				b.WriteString(discover.Mask)
-				i += len(discover.Mask)
-				continue
-			}
-			// Copy the stars before the match, then mask the match.
-			b.WriteString(text[i:j])
-			b.WriteString(discover.Mask)
-			i = j + n
-			continue
-		}
-		if n := wordAt(text, i, forms); n > 0 {
-			b.WriteString(discover.Mask)
-			i += n
-			continue
-		}
-		b.WriteByte(text[i])
-		i++
-	}
-	return b.String()
-}
-
-// wordForms returns the forms of the values in short that occur in text: each
-// non-empty value and its %q form (see quotedInner), each one time, longest
-// first. Values that do not occur are left out, so a text with none of them
-// costs one search for each form only.
-//
-// The result holds raw values. Never print, log or encode them.
-func wordForms(text string, short []string) []string {
-	var forms []string
-	for _, v := range short {
-		if v == "" {
-			continue
-		}
-		for _, f := range []string{v, quotedInner(v)} {
-			if strings.Contains(text, f) {
-				forms = append(forms, f)
-			}
-		}
-	}
-	// Longest first, then by bytes, so the order does not depend on the
-	// input order. Equal forms are next to each other after the sort, and
-	// slices.Compact removes the copies.
-	slices.SortFunc(forms, func(a, b string) int {
-		if len(a) != len(b) {
-			return len(b) - len(a)
-		}
-		return strings.Compare(a, b)
-	})
-	return slices.Compact(forms)
-}
-
-// wordAt returns the length of the first form in forms that starts at text[i]
-// as a whole word (see replaceWords), or 0 if there is none. forms is sorted
-// longest first, so the first match is the longest one.
-func wordAt(text string, i int, forms []string) int {
-	for _, f := range forms {
-		if !strings.HasPrefix(text[i:], f) {
-			continue
-		}
-		// All forms start at the same i, so one failed start check ends the
-		// search.
-		if !wordStart(text, i) {
-			return 0
-		}
-		end := i + len(f)
-		if end == len(text) || !isWordByte(text[end]) {
-			return len(f)
-		}
-	}
-	return 0
-}
-
-// maskedWordAt looks for a whole-word match (see wordAt) that starts inside
-// the discover.Mask at text[i] and ends after it. It returns the start and
-// the length n of the first such match, or n = 0 if there is none.
-//
-// A value that starts with "*" needs this. For the value "*1234" and the text
-// "*******" + "*1234" (the same bytes as discover.Mask + "1234"), a copy of
-// the Mask as a whole would take the first "*" of the value and leave "1234".
-// A match that ends inside the Mask is only stars (a value such as "*"), so
-// the copy of the Mask keeps the rule that a Mask is not masked again.
-func maskedWordAt(text string, i int, forms []string) (start, n int) {
-	maskEnd := i + len(discover.Mask)
-	for j := i; j < maskEnd; j++ {
-		if m := wordAt(text, j, forms); j+m > maskEnd {
-			return j, m
-		}
-	}
-	return 0, 0
-}
-
-// wordStart reports whether a word can start at text[i]: i is the start of
-// text, the byte before is not a word byte, or text[:i] ends with an escape
-// sequence (see endsWithEscape).
-func wordStart(text string, i int) bool {
-	return i == 0 || !isWordByte(text[i-1]) || endsWithEscape(text[:i])
-}
-
-// isWordByte reports whether c is an ASCII letter, an ASCII digit or "_".
-// Every other byte, also each byte of a multi-byte UTF-8 rune, ends a word.
-func isWordByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
-}
-
-// endsWithEscape reports whether s ends with an escape sequence of the kind
-// that strconv.Quote prints: \a, \b, \f, \n, \r, \t, \v, \xHH, \uHHHH or
-// \UHHHHHHHH. The backslash must not be escaped itself: in `\\n` the "n" is a
-// plain letter after an escaped backslash. An odd number of backslashes in a
-// row before the escape letter means that the last one starts an escape.
-func endsWithEscape(s string) bool {
-	// n is the length of the escape after its backslash.
-	for _, n := range []int{1, 3, 5, 9} {
-		if len(s) < n+1 || !isEscapeBody(s[len(s)-n:]) {
-			continue
-		}
-		before := s[:len(s)-n]
-		backslashes := len(before) - len(strings.TrimRight(before, `\`))
-		if backslashes%2 == 1 {
-			return true
-		}
-	}
-	return false
-}
-
-// isEscapeBody reports whether body is the part of an escape sequence after
-// the backslash: one letter of "abfnrtv", or "x", "u" or "U" followed by 2, 4
-// or 8 hex digits.
-func isEscapeBody(body string) bool {
-	if len(body) == 1 {
-		return strings.IndexByte("abfnrtv", body[0]) >= 0
-	}
-	// size is the length of body for its first letter; 0 for any other
-	// letter, which no body of 3, 5 or 9 bytes matches.
-	size := 0
-	switch body[0] {
-	case 'x':
-		size = 3
-	case 'u':
-		size = 5
-	case 'U':
-		size = 9
-	}
-	if len(body) != size {
-		return false
-	}
-	for i := 1; i < len(body); i++ {
-		if !isHexByte(body[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// isHexByte reports whether c is a hex digit, in either letter case.
-func isHexByte(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
-}
-
-// cutWords cuts text to maxReasonRunes runes and adds "…" if it cut anything,
-// like truncate. A cut can end the text right after a value of short that a
-// word byte followed: "PIN 1234x" cut after "1234" shows "PIN 1234…", and the
-// value now looks like a whole word that replaceWords did not mask. So when
-// the kept text ends with a value of short (or its %q form) that starts as a
-// whole word, cutWords cuts that value off too, and checks again. Each round
-// removes at least one byte, so the loop ends. text must have been through
-// replaceWords with the same short.
-func cutWords(text string, short []string) string {
-	runes := []rune(text)
-	if len(runes) <= maxReasonRunes {
-		return text
-	}
-	kept := string(runes[:maxReasonRunes])
-	forms := wordForms(kept, short)
-	for {
-		n := trailingWord(kept, forms)
-		if n == 0 {
-			break
-		}
-		kept = kept[:len(kept)-n]
-	}
-	return kept + "…"
-}
-
-// trailingWord returns the length of the longest form in forms that ends
-// text and starts as a whole word (see wordStart), or 0 if there is none.
-// forms is sorted longest first.
-func trailingWord(text string, forms []string) int {
-	for _, f := range forms {
-		if strings.HasSuffix(text, f) && wordStart(text, len(text)-len(f)) {
-			return len(f)
-		}
-	}
-	return 0
 }
 
 // replaceForms replaces old with replacement in text. It does the same for
@@ -821,23 +597,15 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 	return text
 }
 
-// truncate cuts text to maxReasonRunes runes and adds "…" if it cut
-// anything. It counts runes, so it never cuts inside a UTF-8 sequence.
-func truncate(text string) string {
-	runes := []rune(text)
-	if len(runes) <= maxReasonRunes {
-		return text
-	}
-	return string(runes[:maxReasonRunes]) + "…"
-}
-
 // showDiscoveredURL makes ce show the URL as discovered, not the expanded one,
 // for a remote server. Remote built ce from the expanded server, so its URL,
 // its Reason and its cause can hold the redacted expanded URL, and that URL can
 // show the values of variables: a host, a port or a path segment that the
 // redaction keeps, and values shorter than discover.MinSecretBytes that no
-// scrub removes. A port in a dial error that prints the resolved IP:port stays:
-// a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL,
+// scrub removes. A dial error that prints the resolved IP:port keeps the port
+// when the port is no value of short. When the port is a value of short, such
+// as the value of ${PORT}, the whole-word scrub masks it, as in
+// "127.0.0.1:********". showDiscoveredURL sets ce.URL to the discovered URL,
 // and replaces the expanded URL in Reason and in the text of the cause with it,
 // also in the form without the query and the fragment, the same forms that
 // scrub replaces. Then it replaces the expanded host (host:port, then the host
@@ -849,14 +617,16 @@ func truncate(text string) string {
 // errors.Is(err, context.DeadlineExceeded) still works. When the two URLs are
 // the same, only ce.URL is set.
 //
-// short are the short expanded values that classify removed as whole words
-// (see replaceWords). classify ran first, so a short value in the expanded
-// URL can already be a mask in the text: "localhost:8080" with the value 8080
-// stands as "localhost:********". So showDiscoveredURL also replaces each
-// expanded form after replaceWords with short. Then it removes short as whole
-// words again, because the new URL text can change the bytes next to a value,
-// and it cuts with cutWords, so that the new cut does not leave a value at the
-// end as a whole word.
+// short are the values that classify removed as whole words (see
+// replaceWords). The caller passes the same list that Remote passed to
+// classify (see remoteShortSecrets): the short expanded values and the short
+// credentials inside the header values. classify ran first, so a short value
+// in the expanded URL can already be a mask in the text: "localhost:8080"
+// with the value 8080 stands as "localhost:********". So showDiscoveredURL
+// also replaces each expanded form after replaceWords with short. Then it
+// removes short as whole words again, because the new URL text can change the
+// bytes next to a value, and it cuts with cutWords, so that the new cut does
+// not leave a value at the end as a whole word.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, short []string) {
 	to := discovered.String()
 	ce.URL = to
@@ -878,17 +648,17 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 				[2]string{expandedURL.Hostname(), toName})
 		}
 	}
-	// The forms as classify left them, after the forms as they are. The
-	// range runs over the pairs above only: append does not change the
-	// length that range read at the start. A form that is masks only, such
-	// as the host "db" with the value "db", is left out: it would replace
-	// the mask of every other secret in the text.
+	// The forms as classify left them, after the forms as they are. A form
+	// that is masks only, such as the host "db" with the value "db", is left
+	// out: it would replace the mask of every other secret in the text.
+	var extra [][2]string
 	for _, p := range pairs {
 		masked := replaceWords(p[0], short)
 		if masked != p[0] && strings.ReplaceAll(masked, discover.Mask, "") != "" {
-			pairs = append(pairs, [2]string{masked, p[1]})
+			extra = append(extra, [2]string{masked, p[1]})
 		}
 	}
+	pairs = append(pairs, extra...)
 	replace := func(text string) string {
 		for _, p := range pairs {
 			text = replaceForms(text, p[0], p[1])

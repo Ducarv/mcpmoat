@@ -2,7 +2,7 @@ package discover
 
 import "strings"
 
-// Length thresholds for LooksLikeCredential. The RedactURL doc comment
+// Length thresholds for looksLikeCredential. The RedactURL doc comment
 // refers to these constants by name, not by value, so a change here needs
 // no change there.
 const (
@@ -17,19 +17,18 @@ const (
 	uuidLen = 36
 )
 
-// LooksLikeCredential reports whether s (a path segment, a query key, an
-// argument or a config value) looks like a token: it starts with a known
-// token prefix (see HasTokenPrefix), it is a UUID, it has minMixedTokenLen
-// or more bytes with at least one ASCII letter and one digit, or it has
-// minTokenLen or more bytes. The RedactURL doc comment lists the rules and
-// their limits.
+// looksLikeCredential reports whether s (a path segment, a query key, an
+// argument or a word of a config value) looks like a token: it starts with a
+// known token prefix (see HasTokenPrefix), it is a UUID, it has
+// minMixedTokenLen or more bytes with at least one ASCII letter and one
+// digit, or it has minTokenLen or more bytes. The RedactURL doc comment lists
+// the rules and their limits.
 //
 // The length rule does not look at the bytes, so a long text with spaces
-// counts too. A caller that checks free text, such as an env value, can
-// split it into words first. It never prints or stores s. It is exported so
-// that the redaction and the credential checks of internal/inspect
-// (Result.Credentials) agree on what looks like a token.
-func LooksLikeCredential(s string) bool {
+// counts too. Code that checks free text, such as an env value, uses
+// TokenLike, which splits the text into words first. It never prints or
+// stores s.
+func looksLikeCredential(s string) bool {
 	if len(s) >= minTokenLen || isUUID(s) || HasTokenPrefix(s) {
 		return true
 	}
@@ -42,35 +41,6 @@ func LooksLikeCredential(s string) bool {
 		hasDigit = hasDigit || isDigit(s[i])
 	}
 	return hasLetter && hasDigit
-}
-
-// TokenLike reports whether s, or one of its words (the parts between
-// spaces), looks like a token: the word looks like a token by the rules of
-// LooksLikeCredential, or a piece of it after ".", "@", ":", "+" or "~"
-// starts with a known token prefix (see HasTokenPrefix). A credential has no
-// space, so free text is checked word by word, and a long sentence does not
-// count by its length alone. "production" and "application/json" are not
-// token-like.
-//
-// It is the same rule that ArgCredentials uses. It is exported so that the
-// credential checks of internal/inspect (Result.Credentials) read env
-// values, header values and the values of expanded variables in the same
-// way. It never prints or stores s.
-func TokenLike(s string) bool {
-	return tokenLike(s)
-}
-
-// IsAuthScheme reports whether word is the scheme of an Authorization
-// header ("Bearer", "Basic", "Token", "Digest" and similar, in any case) or a
-// secret-like name (see IsSecretName), such as "ApiKey". The text after such
-// a scheme is a credential. Any other word is no scheme: "My" in "My
-// Documents" is not.
-//
-// It is the same rule that ArgCredentials uses. It is exported so that the
-// credential checks of internal/inspect (Result.Credentials) read a header
-// value in the same way. It never prints or stores word.
-func IsAuthScheme(word string) bool {
-	return isAuthScheme(word)
 }
 
 // HasTokenPrefix reports whether s starts with the prefix of a well-known

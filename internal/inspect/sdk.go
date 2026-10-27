@@ -193,36 +193,31 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	expanded.ProjectPath = s.ProjectPath
 
 	if s.Transport.IsRemote() {
+		lookedUp := rec.lists()
 		result, err := Remote(ctx, expanded, RemoteOptions{
 			AllowUntrusted: i.opts.AllowUntrusted,
 			AllowDisabled:  i.opts.AllowDisabled,
 			dial:           i.opts.Dial,
-			secrets:        rec.values,
-			shortSecrets:   rec.short,
-			credentials:    rec.credentials,
+			expanded:       lookedUp,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
-			showDiscoveredURL(ce, expanded.URL, s.URL, rec.short)
+			// The same short list as the one that Remote gave classify.
+			showDiscoveredURL(ce, expanded.URL, s.URL, remoteShortSecrets(expanded, lookedUp))
 		}
 		return result, err
 	}
-	return i.inspectStdio(ctx, expanded, parent, rec.values, rec.short, rec.credentials)
+	return i.inspectStdio(ctx, expanded, parent, rec.lists())
 }
 
 // inspectStdio is Inspect for a server that is not remote. s is the expanded
-// server, parent is the environment for buildEnv, lookedUp holds the values
-// of the expanded variables of at least discover.MinSecretBytes bytes, for the
-// scrub of error text and for Result.Secrets, and lookedUpShort holds the
-// shorter ones, for the whole-word scrub of error text only (see
-// replaceWords). The lists also get the configured env values and the argv
-// secrets of s (see envSecrets and argSecrets). lookedUpCredentials holds the
-// values of lookedUp that are credentials (see lookupRecorder), for
-// Result.Credentials, with the env and argv credentials of s (see
-// envCredentials and argCredentials). Inspect checked the gates before, and
-// stdioCommand checks them again.
-func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent, lookedUp, lookedUpShort, lookedUpCredentials []string) (Result, error) {
+// server, parent is the environment for buildEnv, and lookedUp holds the
+// values of the expanded variables (see lookupRecorder.lists). inspectStdio
+// adds the configured env values and the argv secrets of s to them (see
+// stdioSecretLists). Inspect checked the gates before, and stdioCommand checks
+// them again.
+func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent []string, lookedUp secretLists) (Result, error) {
 	if err := ctx.Err(); err != nil {
-		return Result{}, classify(err, s, nil, nil, nil)
+		return Result{}, classify(err, s, nil, secretLists{})
 	}
 
 	// The defers below run in this order: the stop of the process, the
@@ -267,15 +262,8 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	// the defer below stops the process first; stop is idempotent.
 	defer proc.stop()
 
-	// The configured env values, the expanded values, the credentials inside
-	// both (see valueCredentials) and the secrets in the argv (see
-	// argSecrets). The child gets all of them and can echo them.
-	// secrets holds the ones of at least discover.MinSecretBytes bytes, and
-	// short the shorter ones, which the scrub removes as whole words only.
-	envLong, envShort := envSecrets(s.Env)
-	argLong, argShort := argSecrets(s)
-	secrets := slices.Concat(envLong, lookedUp, argLong)
-	short := slices.Concat(envShort, lookedUpShort, argShort)
+	// The child gets all the values of lists and can echo them.
+	lists := stdioSecretLists(s, lookedUp)
 	raw, sizes := &rawLists{}, &rawLimit{limit: limit}
 	// fail turns err into the *ConnectError that Inspect returns. The SDK
 	// formats some errors with %v, which drops the context error from the
@@ -296,7 +284,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 		if ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return Result{}, stdioFailure(s, err, secrets, short, sizes.exceeded())
+		return Result{}, stdioFailure(s, err, lists, sizes.exceeded())
 	}
 
 	client := newStdioClient(clientIdentity(s.Client), raw, sizes)
@@ -323,16 +311,32 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	}
 	// The configured env values, the expanded values and the argv secrets,
 	// for consumers that remove them from the Result text (see
-	// Result.Secrets). All three lists hold only values of at least
-	// discover.MinSecretBytes bytes already. short does not go there: in
-	// ordinary text a short value would garble words.
-	result.Secrets = resultSecrets(secrets)
+	// Result.Secrets). lists.long holds only values of at least
+	// discover.MinSecretBytes bytes already. lists.short does not go there:
+	// in ordinary text a short value would garble words.
+	result.Secrets = resultSecrets(lists.long)
 	// The values of Secrets that look like a credential, for scan --llm (see
 	// Result.Credentials). resultCredentials only filters Secrets, so
 	// Credentials is a subset of it.
-	result.Credentials = resultCredentials(result.Secrets,
-		envCredentials(s.Env), lookedUpCredentials, argCredentials(s))
+	result.Credentials = resultCredentials(result.Secrets, lists.credentials)
 	return result, nil
+}
+
+// stdioSecretLists returns the lists of inspectStdio for s, the expanded
+// stdio server: lookedUp, the values of the expanded variables, plus the
+// configured env values and the credentials inside them (see envSecrets and
+// envCredentials) and the secrets in the argv (see argSecrets and
+// argCredentials).
+//
+// The result holds raw values. Never print, log or encode them.
+func stdioSecretLists(s discover.Server, lookedUp secretLists) secretLists {
+	envLong, envShort := envSecrets(s.Env)
+	argLong, argShort := argSecrets(s)
+	return secretLists{
+		long:        slices.Concat(envLong, lookedUp.long, argLong),
+		short:       slices.Concat(envShort, lookedUp.short, argShort),
+		credentials: slices.Concat(envCredentials(s.Env), lookedUp.credentials, argCredentials(s)),
+	}
 }
 
 // newStdioClient returns a new SDK client for one stdio server, with the
@@ -391,24 +395,34 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 // After each new value, it also records the credentials inside the value
 // (see valueCredentials), such as the password of a connection URL: the
 // server can echo the password alone. A long piece goes to values and to
-// credentials, and a short piece goes to short, by the same length rule as
+// credentialList, and a short piece goes to short, by the same length rule as
 // a whole value.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
 	// values and short hold raw values of the user's environment and the
 	// credentials inside them, each one time, in the order in which they
-	// were recorded. listed holds the strings of both lists, to find one
-	// that is already there. seen holds the values that a lookup returned,
-	// to find a value that was checked already. credentials holds the
-	// strings of values that are credentials, each one time, in the order in
-	// which they became one, and credential holds the same strings, to find
-	// one that is already there. Never print, log or encode them.
-	values      []string
-	short       []string
-	credentials []string
-	seen        map[string]struct{}
-	listed      map[string]struct{}
-	credential  map[string]struct{}
+	// were recorded. credentialList holds the strings of values that are
+	// credentials, each one time, in the order in which they became one.
+	// Never print, log or encode them.
+	values         []string
+	short          []string
+	credentialList []string
+	// lookedUpSet holds the whole values that a lookup returned, to skip
+	// the checks of a value that was checked already.
+	lookedUpSet map[string]struct{}
+	// listedSet holds every string of values and short, whole values and
+	// pieces alike, to keep a string out of the lists the second time.
+	listedSet map[string]struct{}
+	// credentialSet holds the strings of credentialList, to find one that
+	// is already there.
+	credentialSet map[string]struct{}
+}
+
+// lists returns the recorded values as a secretLists: values in long, short
+// in short and credentialList in credentials. The slices are the ones of r,
+// not copies; the callers only read them.
+func (r *lookupRecorder) lists() secretLists {
+	return secretLists{long: r.values, short: r.short, credentials: r.credentialList}
 }
 
 // Lookup returns the value of the variable name and whether it is set, and
@@ -419,8 +433,8 @@ func (r *lookupRecorder) Lookup(name string) (string, bool) {
 	if !ok || value == "" {
 		return value, ok
 	}
-	if _, dup := r.seen[value]; dup {
-		// The value check (looksLikeCredential) and the pieces
+	if _, dup := r.lookedUpSet[value]; dup {
+		// The value check (holdsCredential) and the pieces
 		// (valueCredentials) ran at the first lookup and give the same
 		// answer now. Only a secret-like name can make the value a
 		// credential, and that check is cheap.
@@ -429,10 +443,10 @@ func (r *lookupRecorder) Lookup(name string) (string, bool) {
 		}
 		return value, ok
 	}
-	if r.seen == nil {
-		r.seen = make(map[string]struct{})
+	if r.lookedUpSet == nil {
+		r.lookedUpSet = make(map[string]struct{})
 	}
-	r.seen[value] = struct{}{}
+	r.lookedUpSet[value] = struct{}{}
 	r.record(value)
 	if isCredential(name, value) {
 		r.addCredential(value)
@@ -450,15 +464,15 @@ func (r *lookupRecorder) Lookup(name string) (string, bool) {
 // record keeps s in r.values when it has at least discover.MinSecretBytes
 // bytes, or else in r.short, unless one of the lists has it already. A
 // piece of one value can be the whole of another, so the check is on the
-// lists and not on r.seen.
+// lists (r.listedSet) and not on r.lookedUpSet.
 func (r *lookupRecorder) record(s string) {
-	if _, dup := r.listed[s]; dup {
+	if _, dup := r.listedSet[s]; dup {
 		return
 	}
-	if r.listed == nil {
-		r.listed = make(map[string]struct{})
+	if r.listedSet == nil {
+		r.listedSet = make(map[string]struct{})
 	}
-	r.listed[s] = struct{}{}
+	r.listedSet[s] = struct{}{}
 	if len(s) >= discover.MinSecretBytes {
 		r.values = append(r.values, s)
 	} else {
@@ -466,21 +480,21 @@ func (r *lookupRecorder) record(s string) {
 	}
 }
 
-// addCredential keeps value in r.credentials when it has at least
+// addCredential keeps value in r.credentialList when it has at least
 // discover.MinSecretBytes bytes and is not there yet. A shorter value never
 // goes to Result.Secrets, so it cannot be a credential either.
 func (r *lookupRecorder) addCredential(value string) {
 	if len(value) < discover.MinSecretBytes {
 		return
 	}
-	if _, dup := r.credential[value]; dup {
+	if _, dup := r.credentialSet[value]; dup {
 		return
 	}
-	if r.credential == nil {
-		r.credential = make(map[string]struct{})
+	if r.credentialSet == nil {
+		r.credentialSet = make(map[string]struct{})
 	}
-	r.credential[value] = struct{}{}
-	r.credentials = append(r.credentials, value)
+	r.credentialSet[value] = struct{}{}
+	r.credentialList = append(r.credentialList, value)
 }
 
 // environLookup returns a lookup in env, which has the form of os.Environ:
@@ -699,10 +713,9 @@ func envCredentials(env discover.SecretMap) []string {
 // for a shape violation that only the process knows about, an ended ctx wins
 // too.
 //
-// secrets and short are the lists of classify: the values to remove wherever
-// they stand, and the short values to remove as whole words only.
-func stdioFailure(s discover.Server, err error, secrets, short []string, tooLarge bool) *ConnectError {
-	ce := classify(err, s, nil, secrets, short)
+// lists are the values to remove from the error text (see classify).
+func stdioFailure(s discover.Server, err error, lists secretLists, tooLarge bool) *ConnectError {
+	ce := classify(err, s, nil, lists)
 	switch {
 	case errors.Is(err, errJSONTooComplex):
 		ce.err = errJSONTooComplex
@@ -742,7 +755,7 @@ func commandError(s discover.Server, err error) *ConnectError {
 // ctx is done, the result is a timeout.
 func startError(ctx context.Context, s discover.Server, err error) *ConnectError {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return classify(ctxErr, s, nil, nil, nil)
+		return classify(ctxErr, s, nil, secretLists{})
 	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

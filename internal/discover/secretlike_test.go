@@ -114,6 +114,18 @@ func TestIsSecretName(t *testing.T) {
 		{name: "passwordSalt", want: true},
 		{name: "--salt2", want: true},
 		{name: "PWSALT", want: true},
+		{name: "seed", want: true},
+		{name: "APP_SEED", want: true},
+		{name: "--seed", want: true},
+		{name: "seedPhrase", want: true},
+		{name: "SEED_PHRASE", want: true},
+		{name: "walletSeed", want: true},
+		{name: "SEED2", want: true},
+		{name: "WALLETSEED", want: true},
+		{name: "pepper", want: true},
+		{name: "PASSWORD_PEPPER", want: true},
+		{name: "hashPepper", want: true},
+		{name: "APPPEPPER", want: true},
 
 		// An all-caps word that starts with "PASS" matches.
 		{name: "PASSCODE", want: true},
@@ -124,6 +136,11 @@ func TestIsSecretName(t *testing.T) {
 		{name: "PASSTHROUGH", want: true},
 		{name: "SALT_ROUNDS", want: true},
 		{name: "BASALT", want: true},
+		// Accepted false positives of "seed": a random seed is no secret,
+		// and an all-caps word can end in "SEED".
+		{name: "RANDOM_SEED", want: true},
+		{name: "randomSeed", want: true},
+		{name: "LINSEED", want: true},
 
 		// Not secret names.
 		{name: "LOG_LEVEL", want: false},
@@ -151,7 +168,12 @@ func TestIsSecretName(t *testing.T) {
 		{name: "--assignee", want: false},
 		{name: "--license", want: false},
 		{name: "LICENSE", want: false},
-		{name: "seed", want: false},
+		{name: "seedling", want: false},
+		{name: "linseed", want: false},
+		{name: "--seeds", want: false},
+		{name: "SEEDS", want: false},
+		{name: "peppermint", want: false},
+		{name: "PEPPERONI", want: false},
 		{name: "Content-Type", want: false},
 		{name: "", want: false},
 	}

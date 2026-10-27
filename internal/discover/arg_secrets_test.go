@@ -151,7 +151,8 @@ func TestArgSecrets(t *testing.T) {
 			args: []string{"ghp_abcdef123456=1"},
 			want: []string{"ghp_abcdef123456=1", "1", "ghp_abcdef123456"},
 		},
-		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db", "p@tcp(h)/db"}},
+		// The last value is the password alone (see userPassword).
+		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db", "p@tcp(h)/db", "p"}},
 		{name: "user and password", args: []string{"admin:" + argShort}, want: []string{"admin:" + argShort, argShort, argShort}},
 		{
 			name: "user and long password",

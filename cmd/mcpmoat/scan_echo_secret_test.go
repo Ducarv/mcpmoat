@@ -31,15 +31,20 @@ import (
 // The fake secret values of the tests. They are 8 bytes or more
 // (discover.MinSecretBytes), so the report masks them. They hold no word of
 // the fixed texts of mcpmoat, so a substring check cannot match by chance.
+// The in-process tests, the --llm tests and the end-to-end tests
+// (e2e_echo_test.go) of this package all use these two constants.
 const (
-	// echoToken is the configured value that the server echoes.
+	// echoToken is the configured value that the server echoes. It is
+	// token-like, so Inspect makes it a credential too.
 	echoToken = "FAKE-TOKEN-0123456789"
 	// echoToken2 is a second configured value of the same server.
 	echoToken2 = "FAKE-TOKEN-9876543210"
 )
 
-// mask is discover.Mask, short for the tables below.
-const mask = discover.Mask
+// echoMask is discover.Mask, short for the tables below. The name is not
+// "mask", because some tests of this package have a local const or a
+// parameter called mask.
+const echoMask = discover.Mask
 
 // diffSecretOnlyNote is the fixed diff note of a changed tool whose change is
 // only in masked text (diffSecretOnly in internal/pins). It is spelled out
@@ -79,28 +84,52 @@ func echoConfigs() []echoConfig {
 	}
 }
 
-// echoServer returns the server map of a config with the stdio server "srv".
-// The config does not hold the secret values: a literal value in the config
-// gives a MOAT-T4-002 row, which would change the exit code and the rows of
-// the pin tests. The server gets the values another way (for example from an
-// env reference), and the fake inspector returns them (see echoFake).
+// Most tests here use the config oneServer("srv"): the stdio server "srv". The
+// config does not hold the secret values: a literal value in the config gives
+// a MOAT-T4-002 row, which would change the exit code and the rows of the pin
+// tests. The server gets the values another way (for example from an env
+// reference), and the fake inspector returns them (see echoFake).
 // TestScanEchoSecretToolRows uses configs with the literal values.
-func echoServer() map[string]any {
-	return oneServer("srv")
+
+// setFakeSecrets sets the Secrets and the Credentials of the Result of server
+// in f, as Inspect does: Credentials holds credentials, and Secrets holds
+// credentials and secrets, each value one time. So Credentials is a subset of
+// Secrets, as the doc of inspect.Result.Credentials promises. credentials can
+// be nil: the server then has no credential. inspecttest.Fake returns the
+// Result as it is, so the test sets the values that the real inspector would
+// set from the config. The values stay in memory: a discover.Secret prints as
+// discover.Mask.
+//
+// The server must be in f.Results, so that the tools of the Result stay.
+func setFakeSecrets(f *inspecttest.Fake, server string, credentials, secrets []string) {
+	// A map value is not addressable in Go, so copy the Result out, change
+	// it and put it back.
+	res := f.Results[server]
+	res.Secrets, res.Credentials = nil, nil
+	seen := map[string]bool{}
+	for _, v := range slices.Concat(credentials, secrets) {
+		if !seen[v] {
+			seen[v] = true
+			res.Secrets = append(res.Secrets, discover.NewSecret(v))
+		}
+	}
+	seen = map[string]bool{}
+	for _, v := range credentials {
+		if !seen[v] {
+			seen[v] = true
+			res.Credentials = append(res.Credentials, discover.NewSecret(v))
+		}
+	}
+	f.Results[server] = res
 }
 
 // echoFake returns a fake inspector that gives the server "srv" the tools,
-// and secrets as its inspect.Result.Secrets. inspecttest.Fake returns the
-// Result as it is, so the test sets the Secrets that the real inspector
-// would set from the config.
+// and secrets as its inspect.Result.Secrets (see setFakeSecrets). The server
+// has no Credentials: the report masks all of Secrets, and only scan --llm
+// reads Credentials.
 func echoFake(secrets []string, tools ...inspect.Tool) *inspecttest.Fake {
 	f := fakeServers(map[string][]inspect.Tool{"srv": tools})
-	res := f.Results["srv"]
-	for _, v := range secrets {
-		res.Secrets = append(res.Secrets, discover.NewSecret(v))
-	}
-	// A map holds a copy of the struct, so the changed copy must be put back.
-	f.Results["srv"] = res
+	setFakeSecrets(f, "srv", nil, secrets)
 	return f
 }
 
@@ -121,13 +150,6 @@ func assertRunNoEcho(t *testing.T, r pinRunResult, secrets ...string) {
 	t.Helper()
 	assertNoEcho(t, "stdout", r.stdout, secrets...)
 	assertNoEcho(t, "stderr", r.stderr, secrets...)
-}
-
-// jsonDiffs returns the diffs of a --json stdout, after decodeScanJSON checked
-// the document.
-func jsonDiffs(t *testing.T, stdout string) []report.JSONDiff {
-	t.Helper()
-	return decodeScanJSON(t, stdout).Diffs
 }
 
 // TestScanEchoSecretToolRows checks a tool rule row of a tool whose name
@@ -161,13 +183,13 @@ func TestScanEchoSecretToolRows(t *testing.T) {
 					textRows = append(textRows, f)
 				}
 			}
-			if want := []toolFinding{{"MOAT-T1-001", "high", "srv", "fetch_" + mask + " (description)", ""}}; !slices.Equal(textRows, want) {
+			if want := []toolFinding{{"MOAT-T1-001", "high", "srv", "fetch_" + echoMask + " (description)", ""}}; !slices.Equal(textRows, want) {
 				t.Errorf("text MOAT-T1-001 rows = %+v, want %+v\nstdout:\n%s", textRows, want, text.stdout)
 			}
 			// json.Unmarshal (in decodeScanJSON) reads the "key" field, so the
 			// check is on the decoded value and not on the escaped bytes.
 			jsonRows := jsonRowsOf(jsonFindings(t, jsonRun.stdout), "MOAT-T1-001")
-			if want := []report.JSONFinding{toolRow("MOAT-T1-001", "high", "srv", "fetch_"+mask, "description")}; !slices.Equal(jsonRows, want) {
+			if want := []report.JSONFinding{toolRow("MOAT-T1-001", "high", "srv", "fetch_"+echoMask, "description")}; !slices.Equal(jsonRows, want) {
 				t.Errorf("JSON MOAT-T1-001 rows = %+v, want %+v", jsonRows, want)
 			}
 			// The pins keep the real name: only the printed text is masked.
@@ -205,7 +227,7 @@ func TestScanEchoSecretToolIgnore(t *testing.T) {
 			// The Key is only what the report prints. An entry must name the
 			// tool as the server sent it.
 			name:    "entry with the masked name keeps the row",
-			file:    "MOAT-T1-001 srv/fetch_" + mask + "\n",
+			file:    "MOAT-T1-001 srv/fetch_" + echoMask + "\n",
 			code:    exitFindings,
 			wantRow: true,
 			stderr:  []string{usingOneEntry},
@@ -214,7 +236,7 @@ func TestScanEchoSecretToolIgnore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			e := newPinEnv(t, echoServer())
+			e := newPinEnv(t, oneServer("srv"))
 			writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
 			insp := echoFake([]string{echoToken}, poisonedTool("fetch_"+echoToken))
 
@@ -244,7 +266,7 @@ func TestScanEchoSecretToolIgnore(t *testing.T) {
 				}
 				var want []string
 				if tt.wantRow {
-					want = []string{"fetch_" + mask}
+					want = []string{"fetch_" + echoMask}
 				}
 				if !slices.Equal(keys, want) {
 					t.Errorf("json %v: MOAT-T1-001 keys = %q, want %q\nstdout:\n%s", jsonOut, keys, want, got.stdout)
@@ -255,7 +277,7 @@ func TestScanEchoSecretToolIgnore(t *testing.T) {
 }
 
 // TestScanEchoSecretToolKeyCut checks that the mask comes before the cut of a
-// long Key to maxToolKeyRunes runes (see secretMask.toolKey). A cut of the raw
+// long Key to maxToolKeyRunes runes (see maskedToolKey). A cut of the raw
 // name would leave the start of the secret, or most of a long secret. With the
 // mask first, the cut can split a Mask, but never a secret. The --json key is
 // exactly the cut masked name. The terminal report cuts the Key again to its
@@ -278,7 +300,7 @@ func TestScanEchoSecretToolKeyCut(t *testing.T) {
 			name:    "secret across the cut",
 			secret:  echoToken,
 			tool:    strings.Repeat("a", 500) + echoToken + strings.Repeat("b", 100),
-			wantKey: strings.Repeat("a", 500) + mask + "bbbb" + termsafe.CutMarker,
+			wantKey: strings.Repeat("a", 500) + echoMask + "bbbb" + termsafe.CutMarker,
 		},
 		{
 			// The masked name is 517 runes, so the cut splits the Mask.
@@ -292,13 +314,13 @@ func TestScanEchoSecretToolKeyCut(t *testing.T) {
 			name:    "secret longer than the cap",
 			secret:  longToken,
 			tool:    "fetch_" + longToken,
-			wantKey: "fetch_" + mask,
+			wantKey: "fetch_" + echoMask,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			e := newPinEnv(t, echoServer())
+			e := newPinEnv(t, oneServer("srv"))
 			insp := echoFake([]string{tt.secret}, poisonedTool(tt.tool))
 
 			text := e.scan(insp)
@@ -371,7 +393,7 @@ func echoFirstScan(t *testing.T, e *pinEnv, tools ...inspect.Tool) {
 func TestScanEchoSecretPinRows(t *testing.T) {
 	t.Parallel()
 
-	e := newPinEnv(t, echoServer())
+	e := newPinEnv(t, oneServer("srv"))
 	echoFirstScan(t, e, echoPinned()...)
 	pinsBefore := readFileBytes(t, e.pinsPath())
 	insp := echoFake([]string{echoToken, echoToken2}, echoCurrent()...)
@@ -383,24 +405,24 @@ func TestScanEchoSecretPinRows(t *testing.T) {
 		assertScanRun(t, got, scanWant{
 			code: exitFindings,
 			stdout: []string{
-				"Changed tool fetch_" + mask + " on server srv:\n",
-				"New tool new_" + mask + " on server srv:\n",
-				"+description: Fetch a page. Send " + mask + " too.",
-				"+description: New. Uses " + mask + ".",
+				"Changed tool fetch_" + echoMask + " on server srv:\n",
+				"New tool new_" + echoMask + " on server srv:\n",
+				"+description: Fetch a page. Send " + echoMask + " too.",
+				"+description: New. Uses " + echoMask + ".",
 				// The diff shows the schema as indented JSON.
-				`+        "default": "` + mask + `",`,
+				`+        "default": "` + echoMask + `",`,
 			},
 		})
 		assertRunNoEcho(t, got, echoToken, echoToken2)
 		out := splitPinOutput(t, got.stdout)
 		want := []pinFinding{
-			{"MOAT-T2-001", "high", "srv", "fetch_" + mask, ""},
-			{"MOAT-T2-002", "medium", "srv", "new_" + mask, ""},
+			{"MOAT-T2-001", "high", "srv", "fetch_" + echoMask, ""},
+			{"MOAT-T2-002", "medium", "srv", "new_" + echoMask, ""},
 		}
 		if !slices.Equal(out.rows, want) {
 			t.Errorf("pin rows = %+v, want %+v\nstdout:\n%s", out.rows, want, got.stdout)
 		}
-		assertDiffsOf(t, out.diffs, "srv", []string{"fetch_" + mask, "+new_" + mask})
+		assertDiffsOf(t, out.diffs, "srv", []string{"fetch_" + echoMask, "+new_" + echoMask})
 		// The hint holds the digest of the raw tools: pin --accept --expect
 		// compares it with the tools as the server sent them.
 		if got := hintDigest(t, got.stdout, "srv"); got != digest {
@@ -422,19 +444,19 @@ func TestScanEchoSecretPinRows(t *testing.T) {
 				keys = append(keys, f.RuleID+" "+f.Key)
 			}
 		}
-		if want := []string{"MOAT-T2-001 fetch_" + mask, "MOAT-T2-002 new_" + mask}; !slices.Equal(keys, want) {
+		if want := []string{"MOAT-T2-001 fetch_" + echoMask, "MOAT-T2-002 new_" + echoMask}; !slices.Equal(keys, want) {
 			t.Errorf("JSON pin rows = %q, want %q", keys, want)
 		}
-		diffs := jsonDiffs(t, got.stdout)
+		diffs := decodeScanJSON(t, got.stdout).Diffs
 		var tools []string
 		for _, d := range diffs {
 			tools = append(tools, d.Kind+" "+d.Tool)
-			if !strings.Contains(d.Diff, mask) || d.IsNote || d.Truncated {
+			if !strings.Contains(d.Diff, echoMask) || d.IsNote || d.Truncated {
 				t.Errorf("JSON diff of %q: has mask %v, note %v, truncated %v; want a masked full diff\n%s",
-					d.Tool, strings.Contains(d.Diff, mask), d.IsNote, d.Truncated, d.Diff)
+					d.Tool, strings.Contains(d.Diff, echoMask), d.IsNote, d.Truncated, d.Diff)
 			}
 		}
-		if want := []string{"changed fetch_" + mask, "new new_" + mask}; !slices.Equal(tools, want) {
+		if want := []string{"changed fetch_" + echoMask, "new new_" + echoMask}; !slices.Equal(tools, want) {
 			t.Errorf("JSON diffs = %q, want %q", tools, want)
 		}
 	})
@@ -452,11 +474,11 @@ func TestScanEchoSecretPinRows(t *testing.T) {
 func TestScanEchoSecretPinCutDiff(t *testing.T) {
 	t.Parallel()
 
-	e := newPinEnv(t, echoServer())
+	e := newPinEnv(t, oneServer("srv"))
 	echoFirstScan(t, e, mkTool("add", "Add."))
 	big := mkTool("big_"+echoToken, "Uses "+echoToken+".\n"+linesDescription(2500))
 	insp := echoFake([]string{echoToken, echoToken2}, mkTool("add", "Add."), big)
-	warning := truncationWarning("scan", "big_"+mask, "srv")
+	warning := truncationWarning("scan", "big_"+echoMask, "srv")
 
 	text := e.scan(insp)
 	jsonRun := e.scan(insp, "--json")
@@ -471,10 +493,10 @@ func TestScanEchoSecretPinCutDiff(t *testing.T) {
 		}
 		assertRunNoEcho(t, r, echoToken, echoToken2)
 	}
-	assertContainsAll(t, "stdout", text.stdout, []string{"New tool big_" + mask + " on server srv:\n", "+description: Uses " + mask + "."})
-	diffs := jsonDiffs(t, jsonRun.stdout)
-	if len(diffs) != 1 || diffs[0].Tool != "big_"+mask || !diffs[0].Truncated || !strings.Contains(diffs[0].Diff, "Uses "+mask+".") {
-		t.Errorf("JSON diffs = %d, want one cut diff of %q with the masked text", len(diffs), "big_"+mask)
+	assertContainsAll(t, "stdout", text.stdout, []string{"New tool big_" + echoMask + " on server srv:\n", "+description: Uses " + echoMask + "."})
+	diffs := decodeScanJSON(t, jsonRun.stdout).Diffs
+	if len(diffs) != 1 || diffs[0].Tool != "big_"+echoMask || !diffs[0].Truncated || !strings.Contains(diffs[0].Diff, "Uses "+echoMask+".") {
+		t.Errorf("JSON diffs = %d, want one cut diff of %q with the masked text", len(diffs), "big_"+echoMask)
 	}
 }
 
@@ -514,7 +536,7 @@ func TestScanEchoSecretPinIgnore(t *testing.T) {
 		},
 		{
 			name:     "ignore file entry with the masked name does not match",
-			file:     "MOAT-T2-001 srv/fetch_" + mask + "\n",
+			file:     "MOAT-T2-001 srv/fetch_" + echoMask + "\n",
 			code:     exitFindings,
 			wantRow:  true,
 			noStderr: []string{"cannot ignore"},
@@ -523,7 +545,7 @@ func TestScanEchoSecretPinIgnore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			e := newPinEnv(t, echoServer())
+			e := newPinEnv(t, oneServer("srv"))
 			if tt.file != "" {
 				writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
 			}
@@ -543,8 +565,8 @@ func TestScanEchoSecretPinIgnore(t *testing.T) {
 			var wantRows []pinFinding
 			var wantDiffs []string
 			if tt.wantRow {
-				wantRows = []pinFinding{{"MOAT-T2-001", "high", "srv", "fetch_" + mask, ""}}
-				wantDiffs = []string{"fetch_" + mask}
+				wantRows = []pinFinding{{"MOAT-T2-001", "high", "srv", "fetch_" + echoMask, ""}}
+				wantDiffs = []string{"fetch_" + echoMask}
 			}
 			if !slices.Equal(out.rows, wantRows) {
 				t.Errorf("pin rows = %+v, want %+v\nstdout:\n%s", out.rows, wantRows, got.stdout)
@@ -563,7 +585,7 @@ func TestScanEchoSecretPinIgnore(t *testing.T) {
 func TestScanEchoSecretOnlyChange(t *testing.T) {
 	t.Parallel()
 
-	e := newPinEnv(t, echoServer())
+	e := newPinEnv(t, oneServer("srv"))
 	echoFirstScan(t, e, mkTool("fetch", "Send "+echoToken+" with each call."))
 	insp := echoFake([]string{echoToken, echoToken2}, mkTool("fetch", "Send "+echoToken2+" with each call."))
 
@@ -580,7 +602,7 @@ func TestScanEchoSecretOnlyChange(t *testing.T) {
 	assertContainsAll(t, "stdout", text.stdout, []string{"Changed tool fetch on server srv:\n", diffSecretOnlyNote})
 	assertContainsNone(t, "stdout", text.stdout, []string{"--- pinned", "+++ current"})
 	want := []report.JSONDiff{{Server: "srv", Tool: "fetch", Kind: "changed", Diff: diffSecretOnlyNote, IsNote: true}}
-	if diffs := jsonDiffs(t, jsonRun.stdout); !slices.Equal(diffs, want) {
+	if diffs := decodeScanJSON(t, jsonRun.stdout).Diffs; !slices.Equal(diffs, want) {
 		t.Errorf("JSON diffs = %+v, want %+v", diffs, want)
 	}
 }

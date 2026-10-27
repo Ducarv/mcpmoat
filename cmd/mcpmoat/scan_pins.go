@@ -299,7 +299,7 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 
 	tools := o.Result.Tools
 	if stored, found := p.store.Get(id); found {
-		p.compare(s, id, tools, stored, newSecretMask(o.Result.Secrets))
+		p.compare(s, id, tools, stored, discover.NewTextRedactor(o.Result.Secrets))
 		return
 	}
 	p.firstPin(s, id, tools)
@@ -429,19 +429,19 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // firstPin, so the server fails the default --fail-on high: no change of its
 // tools could ever be accepted.
 //
-// mask is the mask of the secret values of the server (see secretMask). The
-// compare is pins.CompareMasked with it: the Key of each row, the tool name of
-// each diff and the diff text show each secret value as discover.Mask. The
-// verdicts, the hashes, the digest and the ignore lookup (Change.RawTool) use
-// the real text.
-func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, mask secretMask) {
+// redactor holds the secret values of the server (nil when it has none, see
+// compareMask). The compare is pins.CompareMasked with it: the Key of each
+// row, the tool name of each diff and the diff text show each secret value as
+// discover.Mask. The verdicts, the hashes, the digest and the ignore lookup
+// (Change.RawTool) use the real text.
+func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, redactor *discover.TextRedactor) {
 	snap, pinErr := pinnable(id, tools)
 	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
 		p.addUnverified(s, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
 	}
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
-	for _, ch := range pins.CompareMasked(stored, tools, mask.compareMask()) {
+	for _, ch := range pins.CompareMasked(stored, tools, compareMask(redactor)) {
 		// ch.Tool is the masked name, for the report. ch.RawTool is the real
 		// name, for the ignore lookup only.
 		row := pinRow(ch.Kind, s, ch.Tool, ch.Severity)

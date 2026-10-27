@@ -805,16 +805,17 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 
 // TestToolMessageRedactsRandomText builds random descriptions from a small
 // alphabet and the secrets themselves, so occurrences often overlap and touch.
-// The message must match discover.RedactText (which the discover tests check
-// against a plain oracle) and never hold a secret. The seed is fixed, so a
-// failure repeats.
+// The message must match discover.TextRedactor.Text (which the discover tests
+// check against a plain oracle) and never hold a secret. The seed is fixed, so
+// a failure repeats.
 func TestToolMessageRedactsRandomText(t *testing.T) {
 	t.Parallel()
 
-	// The 7-byte value is too short to remove. The reference gets only the
-	// values of 8 bytes or more (the contract), not SecretTextValues.
+	// The 7-byte value is too short to remove. The reference redactor gets
+	// only the values of 8 bytes or more (the contract), so the 7-byte value
+	// is not part of it.
 	secrets := newSecrets("abcabcab", "cabbacab", "bcabcab")
-	values := []string{"abcabcab", "cabbacab"}
+	ref := discover.NewTextRedactor(newSecrets("abcabcab", "cabbacab"))
 	pieces := []string{"a", "b", "c", "*", `"`, "é", " ", "abcabcab", "cabbacab", "bcabcab"}
 
 	rng := rand.New(rand.NewPCG(185, 2026)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
@@ -833,7 +834,10 @@ func TestToolMessageRedactsRandomText(t *testing.T) {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
 		p, hasRedacted := decodeRedactedMessage(t, msg)
-		want, wantRedacted := discover.RedactText(desc, values)
+		// The values hold no "*", so a Mask always changes the text: the
+		// reference text differs from desc exactly when a Mask was written.
+		want := ref.Text(desc)
+		wantRedacted := want != desc
 		if p.ToolDescription != want || hasRedacted != wantRedacted || gotRedacted != wantRedacted {
 			t.Fatalf("case %d: toolMessage(%q) = (%q, redacted %v, returned %v), want (%q, %v)", i, desc, p.ToolDescription, hasRedacted, gotRedacted, want, wantRedacted)
 		}
@@ -1050,11 +1054,12 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 			checkNoSecret(t, msg, p, secrets)
 
 			// The reference: redact all of the text, cut, apply the flag rule.
-			// The discover tests check RedactText and the flag of
+			// The discover tests check TextRedactor.Text and the flag of
 			// RedactTextPrefix against a plain oracle.
 			values := discover.SecretTextValues(secrets)
-			refName, _ := discover.RedactText(tt.toolName, values)
-			refDesc, _ := discover.RedactText(tt.desc, values)
+			ref := discover.NewTextRedactor(secrets)
+			refName := ref.Text(tt.toolName)
+			refDesc := ref.Text(tt.desc)
 			_, nameFlag := discover.RedactTextPrefix(tt.toolName, values, n)
 			_, descFlag := discover.RedactTextPrefix(tt.desc, values, d)
 			wantName, nameCut := cutUTF8(refName, n)
@@ -1107,43 +1112,5 @@ func TestToolMessageLargeText(t *testing.T) {
 				t.Errorf("toolMessage() = (%d bytes, redacted %v), want (%d bytes, %v)", len(p.ToolDescription), hasRedacted, len(tt.wantDesc), tt.wantRedacted)
 			}
 		})
-	}
-}
-
-func TestInputRedactedName(t *testing.T) {
-	t.Parallel()
-	const token = "tok-0123456789"
-	secrets := []discover.Secret{discover.NewSecret(token), discover.NewSecret("short")}
-	tests := []struct {
-		name string
-		in   Input
-		want string
-	}{
-		{"no secret", Input{ToolName: "fetch", Secrets: secrets}, "fetch"},
-		{"no secrets given", Input{ToolName: "fetch_" + token}, "fetch_" + token},
-		{"secret in the name", Input{ToolName: "fetch_" + token, Secrets: secrets}, "fetch_" + discover.Mask},
-		{"whole name is the secret", Input{ToolName: token, Secrets: secrets}, discover.Mask},
-		{"two occurrences", Input{ToolName: token + "-" + token, Secrets: secrets}, discover.Mask + "-" + discover.Mask},
-		{"value under the minimum length stays", Input{ToolName: "a_short_b", Secrets: secrets}, "a_short_b"},
-		{"empty name", Input{Secrets: secrets}, ""},
-		{"the description is not part of it", Input{ToolName: "fetch", Description: token, Secrets: secrets}, "fetch"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tt.in.RedactedName(1 << 10); got != tt.want {
-				t.Errorf("RedactedName() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-	// A long name: the result keeps the start of the whole redaction, with
-	// more than limit bytes, and a value that crosses the window is removed
-	// whole.
-	const limit = 64
-	long := Input{ToolName: strings.Repeat("a", limit-4) + token + strings.Repeat("b", 4*limit), Secrets: secrets}
-	want := strings.Repeat("a", limit-4) + discover.Mask + strings.Repeat("b", 4*limit)
-	got := long.RedactedName(limit)
-	if len(got) <= limit || !strings.HasPrefix(want, got) || strings.Contains(got, "tok-") {
-		t.Errorf("RedactedName(%d) of a long name = %q, want more than %d bytes and a prefix of %q", limit, got, limit, want)
 	}
 }

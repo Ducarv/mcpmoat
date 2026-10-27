@@ -444,21 +444,39 @@ func TestRedactArgsSecretNames(t *testing.T) {
 			want: []string{"DB_PASSWRD=" + discover.Mask, "PASSCODE2=" + discover.Mask, "--PASSKEY", discover.Mask},
 		},
 		{
+			// A wallet seed is a secret like a mnemonic. The values are not
+			// token-like, so only the names mask them.
+			name: "seed and pepper names",
+			args: []string{
+				"APP_SEED=correct horse battery staple", "--seed-phrase", argShort,
+				"--walletSeed=" + argShort, "PASSWORD_PEPPER=" + argShort, "--pepper", argShort,
+			},
+			want: []string{
+				"APP_SEED=" + discover.Mask, "--seed-phrase", discover.Mask,
+				"--walletSeed=" + discover.Mask, "PASSWORD_PEPPER=" + discover.Mask, "--pepper", discover.Mask,
+			},
+		},
+		{
 			// Accepted false positives (fail closed): these names are not
 			// credential names, but their values are masked.
 			name: "names that look secret but are not",
-			args: []string{"PASSIVE_MODE=on", "SIGNATURE_ALGORITHM=x", "SALT_ROUNDS=10"},
-			want: []string{"PASSIVE_MODE=" + discover.Mask, "SIGNATURE_ALGORITHM=" + discover.Mask, "SALT_ROUNDS=" + discover.Mask},
+			args: []string{"PASSIVE_MODE=on", "SIGNATURE_ALGORITHM=x", "SALT_ROUNDS=10", "RANDOM_SEED=42", "--seed", "42"},
+			want: []string{
+				"PASSIVE_MODE=" + discover.Mask, "SIGNATURE_ALGORITHM=" + discover.Mask, "SALT_ROUNDS=" + discover.Mask,
+				"RANDOM_SEED=" + discover.Mask, "--seed", discover.Mask,
+			},
 		},
 		{
-			name: "words that contain salt, signing, access or a license",
+			name: "words that contain salt, seed, pepper, signing, access or a license",
 			args: []string{
 				"SALTY_DOG_ENABLED=on", "--basalt", "x", "--signing-method", "rs256",
 				"ACCESS_LEVEL=read", "--assignee", "bob", "--license", "MIT", "--passive", "on",
+				"--seeds", "h1", "--seedling", "y", "--peppermint", "z",
 			},
 			want: []string{
 				"SALTY_DOG_ENABLED=on", "--basalt", "x", "--signing-method", "rs256",
 				"ACCESS_LEVEL=read", "--assignee", "bob", "--license", "MIT", "--passive", "on",
+				"--seeds", "h1", "--seedling", "y", "--peppermint", "z",
 			},
 		},
 		{

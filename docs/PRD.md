@@ -626,22 +626,16 @@ with `--no-color`).
 - Findings are grouped and ordered by severity (critical first).
 - `--no-color` and the `NO_COLOR` environment variable disable ANSI codes; output to a non-terminal
   has no colour.
-- A server gets the configured env values, header values and args, and it can echo one of them in
-  its tool text. The report (terminal and `--json`, `scan` and `pin`) shows each such value of 8
-  bytes or more as `********` in every tool name and pin diff that it prints, and also each
-  credential piece inside a value that a server can echo alone (the password of a connection URL,
-  each pair and value of a cookie header, the value of a `key=value` URL path segment). The mask
-  comes before any cut. A value shorter than 8 bytes is not masked. Nothing says that a value was
-  masked.
-  `.mcpmoat-ignore` and `--ignore` still match the real tool name. The hashes and `pins.json` keep
-  the raw text. docs/limits.md holds the limits.
-- When a server fails, mcpmoat removes the configured values from the failure text (the reason in
-  the summary, the `pin` error and the stderr warning of `--json`), and the credential pieces inside
-  them (the password of a connection URL, one cookie value). A value of 8 bytes or more and a
-  header value go wherever they stand. A value of 1 to 7 bytes goes only where it stands as a whole
-  word, so a common word that is also a configured value is masked too (with a value `1`, `exit
-  status 1` shows as `exit status ********`). This stops an accidental echo only: a hostile server
-  can glue a letter to the value or split it.
+- A server gets the configured env values, header values and args, and it can echo one of them,
+  or a credential piece inside one, in its tool text. The report (terminal and `--json`, `scan`
+  and `pin`) shows each such value or piece of 8 bytes or more as `********` in every tool name and
+  pin diff that it prints, before any cut. `.mcpmoat-ignore` and `--ignore` still match the real
+  tool name, and the hashes and `pins.json` keep the raw text. [Scan output](scan-output.md) holds
+  the rule and [Limits](limits.md) the limits.
+- When a server fails, mcpmoat removes the same values from the failure text. A value shorter than
+  8 bytes goes only where it stands as a whole word. The accepted trade-off: a common word that is
+  also a short configured value is masked too, and a hostile server can still glue a letter to a
+  short value. [Placeholders](stdio-servers.md#placeholders) holds the rule.
 
 **FR-15: `--json`.** Output with a stable, versioned schema.
 
@@ -701,13 +695,13 @@ the machine**.
 - What is sent: for each tool of each server that was inspected, only the tool name and the tool
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
   message with a fixed system prompt. Credentials from the config are removed from the name and the
-  description first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs, schemas or
-  pins into a request. A cap on the number of tools per scan (500), shared fairly between the
-  servers: a server with few tools keeps all of them, and the part that it does not use goes to the
-  larger servers. Tools over the share of their server are not sent and give exit code 2. Before
+  description first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs,
+  schemas or pins into a request. A cap on the number of tools per scan (500), shared fairly between
+  the servers: a server with few tools keeps all of them, and the part that it does not use goes to
+  the larger servers. Tools over the share of their server are not sent and give exit code 2. Before
   the first request, stderr says how many tools are sent and about how much text (numbers only),
-  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does
-  not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
+  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does not stop a
+  tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
@@ -722,41 +716,13 @@ the machine**.
   The [LLM page](llm.md) holds the full rule.
 - Credentials are removed before the cut. A server that got a token through its env, headers or
   args can put that token into a tool name or description. So mcpmoat replaces each configured
-  value of that server that looks like a credential (`inspect.Result.Credentials`) with `********`
-  in the name and the description of the tools of that server, before it cuts them. A value is a
-  credential when it is: an env value or an expanded placeholder value whose name looks secret, or
-  that looks like a token or holds a credential (`DATABASE_URL=postgres://app:pw@db/prod`); a
-  header value when the header name looks secret or is a cookie header (`Cookie`, `Set-Cookie`),
-  the value is an auth scheme and a credential (`Bearer <token>`), or it looks like a token; the
-  whole URL user info and the password, and a query or path part, or the value inside a
-  `key=value` path segment or matrix parameter, whose key looks secret or that looks like a token;
-  for a stdio server, a part of the expanded command and args that looks like a credential. The
-  credential pieces inside an env value, an expanded value or a header value count too, by the arg
-  rules (the password of `postgres://app:pw@db/prod`), and so do each `name=value` pair and each
-  value of a cookie header, also a plain pair such as `theme=dark` (fail closed). A server can echo
-  such a piece alone. Plain config words, such as
-  `NODE_ENV=production`, `Content-Type: application/json` or `?workspace=engineering`, are not
-  removed. The wide list of every configured value (`inspect.Result.Secrets`) is for local use only,
-  by the report mask (FR-14). The scrub of failure text removes the same values, and the shorter
-  ones as whole words (FR-14). The user message then has the
-  field `redacted: true`, and the system prompt tells the model that `********` is removed text and
-  not an instruction. The limits:
-  - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
-  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed, nor a
-    value with a backslash sequence (`C:\tools\new_dir`) that the server sends as real control
-    characters, which then show as the same escapes. The
-    decoded `name:password` text of a `Basic` header is not removed as a whole: only the password
-    (8 bytes or more) and the base64 forms are.
-  - A plain config value that a server echoes reaches the provider, for example the env value
-    `production`, or a password under a key that does not look secret when the password does not
-    look like a token. This is the trade-off: a plain word of the config no longer hides a part of
-    a benign description from the model.
-  - The check fails closed, so some text that is not secret is removed too: a word of 32 bytes or
-    more, a UUID, or a header value that starts with an auth scheme word (`Token count`). Some
-    secrets in args are not found (for example `--db mypassword`), so they are not removed.
-  - A server can write `********` itself.
-
-  docs/llm.md holds the user text of this rule.
+  value of that server that looks like a credential, and each credential piece inside it
+  (`inspect.Result.Credentials`), with `********` in the name and the description of the tools of
+  that server, before it cuts them. The user message then has `redacted: true`, and the system
+  prompt tells the model that `********` is removed text and not an instruction. The accepted
+  trade-off: a plain config value (`NODE_ENV=production`) that a server echoes reaches the
+  provider, so a plain config word no longer hides a part of a benign description. The
+  [LLM page](llm.md) holds the rule, and [Limits](limits.md) the limits.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule

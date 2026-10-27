@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
@@ -40,13 +41,13 @@ type llmJob struct {
 	// stays in the text that goes to the provider (issues #229 and #235). The
 	// jobs of one server share one Credentials slice: it is read only.
 	in llm.Input
-	// mask hides the secret values of the server (all of
+	// redactor hides the secret values of the server (all of
 	// inspect.Result.Secrets, the wide list) in the Key of the finding row
-	// (see llmRow and secretMask.toolKey). It is separate from in.Secrets,
-	// which only sets what the request to the provider hides: the local report
+	// (see llmRow and maskedToolKey). It is separate from in.Secrets, which
+	// only sets what the request to the provider hides: the local report
 	// hides more values than the request. The jobs of one server share one
-	// mask, made once for the server. A nil mask hides nothing.
-	mask secretMask
+	// redactor, made once for the server. A nil redactor hides nothing.
+	redactor *discover.TextRedactor
 }
 
 // llmPlan is the work of the LLM step, before the first request.
@@ -173,9 +174,9 @@ func fairShare(counts []int, budget int) []int {
 // "production" is not removed, so it does not set the redacted flag and the
 // floor row of a benign tool (issues #229 and #235). The jobs share the slice
 // of the outcome and never change it. Every job of a server also gets the
-// mask of all the secret values of that server (the wide list, see
-// llmJob.mask) for the Key of its finding row. The mask is made once for each
-// server.
+// redactor of all the secret values of that server (the wide list, see
+// llmJob.redactor) for the Key of its finding row. The redactor is made once
+// for each server.
 func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(a, b inspect.Outcome) int {
 		return cmp.Compare(a.Index, b.Index)
@@ -186,7 +187,7 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 			continue
 		}
 		ref := report.NewServerRef(o.Server)
-		mask := newSecretMask(o.Result.Secrets)
+		redactor := discover.NewTextRedactor(o.Result.Secrets)
 		jobs := make([]llmJob, 0, len(o.Result.Tools))
 		for _, t := range o.Result.Tools {
 			jobs = append(jobs, llmJob{
@@ -198,7 +199,7 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 					// Only the credential subset: see the doc comment above.
 					Secrets: o.Result.Credentials,
 				},
-				mask: mask,
+				redactor: redactor,
 			})
 		}
 		servers = append(servers, jobs)

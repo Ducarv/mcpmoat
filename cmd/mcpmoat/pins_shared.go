@@ -210,12 +210,30 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 	return snap, nil
 }
 
+// compareMask returns the mask for pins.CompareMasked that hides the secret
+// values of a server: r.Text, where r is discover.NewTextRedactor of
+// inspect.Result.Secrets. scan and pin both compare with it, so the tool names
+// and the diffs that they print show each secret value as discover.Mask. Only
+// the printed text is masked: the hashes, the verdicts and the lookups by name
+// use the real tool text.
+//
+// For a nil r (a server with no secret value of at least
+// discover.MinSecretBytes bytes) it returns nil, and CompareMasked then works
+// like pins.Compare. The check is needed because a method value such as r.Text
+// is never nil, also when r is nil: it is a func that calls Text on r.
+func compareMask(r *discover.TextRedactor) func(string) string {
+	if r == nil {
+		return nil
+	}
+	return r.Text
+}
+
 // diffOf returns the diff of one change for the report. The change must have a
 // diff (see appendDiff). server is the name that the report shows.
 //
 // The tool name of the diff is ch.Tool and never ch.RawTool. ch must come from
-// pins.CompareMasked with the mask of the server (secretMask.compareMask), so
-// ch.Tool and ch.Diff show each secret value of the server as discover.Mask.
+// pins.CompareMasked with the mask of the server (see compareMask), so ch.Tool
+// and ch.Diff show each secret value of the server as discover.Mask.
 func diffOf(server string, ch pins.Change) report.ToolDiff {
 	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated, IsNote: ch.DiffIsNote()}
 	switch ch.Kind {

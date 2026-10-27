@@ -74,8 +74,9 @@ func TestLookupRecorder(t *testing.T) {
 	}
 }
 
-// TestLookupRecorderZeroValue checks that a lookupRecorder with no seen map
-// works: the first recorded value makes the map.
+// TestLookupRecorderZeroValue checks that a lookupRecorder with nil maps
+// (lookedUpSet, listedSet, credentialSet) works: the first recorded value
+// makes them.
 func TestLookupRecorderZeroValue(t *testing.T) {
 	t.Parallel()
 	const value = "mcpmoat-recorder-canary-5eF6"

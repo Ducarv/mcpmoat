@@ -61,9 +61,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     an auth scheme and a credential (`Bearer <token>`, `Basic <base64>`, `Token <token>`), or when
     the value looks like a token. Then all the parts of that header count: the whole value, the
     credential after the scheme, and the base64 text and the password of a `Basic` value. A
-    `Cookie`, `Set-Cookie` or `Cookie2` header always counts: the whole value, and each
-    `name=value` pair and each value in it, so a server that echoes one cookie value alone is
-    found. Every pair counts, also a plain one such as `theme=dark`, so the check fails closed.
+    `Cookie` or `Cookie2` header always counts: the whole value, and each `name=value` pair and
+    each value in it, so a server that echoes one cookie value alone is found. Every pair counts,
+    also a plain one such as `theme=dark`, so the check fails closed. A `Set-Cookie` header always
+    counts too, but only its first pair is a cookie. The attributes after it (`Path=/`,
+    `Domain=example.com`, `Expires=...`) are not pairs, so they do not count alone.
     `Content-Type: application/json` and a plain `User-Agent` do not count.
   - In the URL: the whole user info and the password, always. A query or path part, or the value
     inside a `key=value` path segment or a matrix parameter (`;token=x`), only when its key looks
@@ -78,6 +80,12 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     each piece that looks like a token, such as `-p<token>` or `<token>=1`. The plain words of a
     DSN (`host=localhost dbname=production user=postgres`), a path segment `My Documents`,
     package names and other plain args do not count.
+  - The password of a DSN with no scheme: in `app:pw@db:5432/prod` and `app:pw@tcp(db:3306)/prod`
+    it is the text between the first `:` and the last `@`. It counts alone, in the args and inside
+    an env value, an expanded value or a header value. The password of the Oracle form
+    `scott/pw@orcl`, and of a positional `admin:pw`, counts only when the whole value counts:
+    after a secret-like flag (`--password scott/pw@orcl`) or when the value looks like a token.
+    `git@github.com:org/repo` and `user@example.com` hold no password.
 
   A word looks like a token when it starts with a known token prefix (`ghp_`, `sk-`), is a UUID,
   has 20 bytes or more with letters and digits, or has 32 bytes or more. A value of one server is

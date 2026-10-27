@@ -299,15 +299,19 @@ type Result struct {
 	//     gets, after the expansion: the text that discover.RedactArgs masks
 	//     (see discover.ArgSecrets), for example the value after "--token"
 	//     or "--api-key=", "x" in -H "Authorization: Bearer x", a token path
-	//     segment, or the user info and the query values of a URL. Plain
+	//     segment, the user info and the query values of a URL, or the
+	//     password of a DSN with no scheme ("u:pw@tcp(h:3306)/db") or of the
+	//     Oracle form "name/pw@tns". Plain
 	//     args that RedactArgs shows, such as package names and paths, are
 	//     not in the list. RedactArgs fails closed, so some text that is not
 	//     a secret (a path segment with a space) is in the list too.
 	//   - remote: each configured header value, and the credential after an
 	//     auth scheme ("Bearer <token>").
-	//   - remote: for a Cookie, Set-Cookie or Cookie2 header, each pair
-	//     ("sid=x") and each value ("x"), also the value without its quotes.
-	//     A server can echo one cookie alone.
+	//   - remote: for a Cookie or Cookie2 header, each pair ("sid=x") and
+	//     each value ("x"), also the value without its quotes. For a
+	//     Set-Cookie header, the same for the first pair only, the cookie:
+	//     the rest are attributes such as "Path=/". A server can echo one
+	//     cookie alone.
 	//   - remote: for a "Basic <base64>" header and for the URL user info, the
 	//     password. The user name too when the password is empty, because the
 	//     name is then the credential, as in https://<token>@host/, or when
@@ -335,8 +339,9 @@ type Result struct {
 	// A server gets these values and can echo them in its tools, prompts or
 	// instructions. Secrets is the wide list, for local use. The local report
 	// shows each value of Secrets that a server echoes in a tool name, title,
-	// description or schema as discover.Mask ("********"): see secretMask in
-	// cmd/mcpmoat and pins.CompareMasked. The scrub of error text removes
+	// description or schema as discover.Mask ("********"): see
+	// discover.TextRedactor, maskedToolKey and compareMask in cmd/mcpmoat,
+	// and pins.CompareMasked. The scrub of error text removes
 	// these values too. A value shorter than discover.MinSecretBytes is not
 	// in the list, so the report does not mask it. scan --llm sends Result
 	// text off the machine and removes from it only the values of
@@ -370,7 +375,13 @@ type Result struct {
 	//     alone.
 	//   - stdio args: discover.ArgCredentials returns it, for example the
 	//     value after a secret-like flag or key, a token-like piece (a UUID
-	//     or a long random segment) or a URL credential.
+	//     or a long random segment) or a URL credential. A DSN with no
+	//     scheme ("u:pw@host", "u:pw@tcp(h:3306)/db") always gives its
+	//     password, the text between the first ":" and the last "@". The
+	//     Oracle form "name/pw@tns" and a positional "admin:pw" give the
+	//     password only when the whole value is a credential (after a
+	//     secret-like flag, or token-like). "git@github.com:org/repo" and
+	//     "user@example.com" give no password.
 	//   - header: the name is secret-like (Authorization, Cookie, X-Api-Key
 	//     and similar) or names a cookie header (Cookie, Set-Cookie,
 	//     Cookie2), the value is the credential after an auth scheme
@@ -378,8 +389,8 @@ type Result struct {
 	//     like a credential as an env value does. Then every value of Secrets
 	//     that the header gives counts: the whole value, the credential
 	//     pieces inside it and, for a cookie header, each pair and each
-	//     value. Every cookie pair counts, also one with a plain name such
-	//     as "theme=dark".
+	//     value (for Set-Cookie, of the first pair only). Every cookie pair
+	//     counts, also one with a plain name such as "theme=dark".
 	//   - URL: the whole user info and the password always; a query or path
 	//     part, or the value inside a "key=value" path segment or a matrix
 	//     parameter, only when its key is secret-like or it looks like a

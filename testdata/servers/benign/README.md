@@ -33,19 +33,11 @@ start a process, so this fixture is not fully passive when you set them.
 | `-mode hang-init` | Never read stdin and never reply. |
 | `-mode hang-list` | Finish the handshake, then block every `tools/list` request. |
 | `-mode flood-list` | Answer the list requests with empty lists. On the last one, send 20000 `ping` requests, then stop reading stdin. |
-| `-mode echo-env -echovar NAME` | **Not benign.** Serve one tool, `fetch_<value>`, where `<value>` is the value of the environment variable `NAME`. The tool description and the description of its input property `text` also hold the value. This is a hostile server that echoes a configured secret (#228, #234). |
-| `-mode fail-echo -echovar NAME` | **Not benign.** Answer `initialize` with a JSON-RPC error whose message holds the value of `NAME`, then exit with code 1 (#180). The echo is on stdout, because mcpmoat sends the child's stderr to `/dev/null`. |
-| `-echovar NAME` | The environment variable that `echo-env` and `fail-echo` read. These modes need it, and `NAME` must be set (an empty value is allowed). Other modes ignore it. |
 | `-pidfile path` | **Writes a file.** Write the process ID to `path`. |
 | `-envfile path` | **Writes a file.** Write the sorted environment to `path`, to check the scrubbed environment (NFR-04). |
 | `-spawn path` | **Starts a process and writes a file.** Start a copy of the fixture in `hang-init` mode and write its process ID to `path`, to check that mcpmoat stops the whole process group. |
 
-Bad flags, an unknown mode, a missing `-echovar` (or an unset variable) or a file write error exit
-with code 2.
-
-Use only fake values with `echo-env` and `fail-echo`, for example
-`MCPMOAT_FAKE_TOKEN=FAKE-TOKEN-0123456789` or the short value `123456`. Use letters, digits and `-`
-only, so that a client accepts the tool name.
+Bad flags, an unknown mode or a file write error exit with code 2.
 
 ## Notes
 

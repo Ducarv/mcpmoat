@@ -145,13 +145,14 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   the tool name in `key`. In a tool rule finding and in an LLM finding, a tool name longer than
   512 characters (runes) is cut to 512 in `key` and ends with `...`. A pin finding
   (`MOAT-T2-001` to `MOAT-T2-003`) is not cut yet: its `key` holds the full tool name. In all
-  these `key` fields, and in the `tool` and `diff` of each entry of `diffs`, a configured value that the server echoes
-  shows as `********` (see **Configured values in tool text** above). The
+  these `key` fields, and in the `tool` and `diff` of each entry of `diffs`, a configured value
+  that the server echoes shows as `********` (see **Configured values in tool text** above). The
   `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
   (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
-- The document never holds env or header values from your config. A finding names the key it is
-  about, for example `GITHUB_TOKEN`, never its value. A value shorter than 8 bytes that a server
-  echoes in its tool text is not masked. See [JSON output](ARCHITECTURE.md#json-output) for the full
+- mcpmoat never writes the env or header values of your config itself. A finding names the key it
+  is about, for example `GITHUB_TOKEN`, never its value. A server can echo a value in its tool
+  text: a value shorter than 8 bytes is then not masked, and neither is a value that the mask does
+  not find (see [Limits](limits.md)). See [JSON output](ARCHITECTURE.md#json-output) for the full
   redaction and escaping rules.
 - Decoded values are raw server text. A tool such as `jq -r` can print terminal control sequences,
   so do not print decoded values (names, diffs) to a terminal without escaping them. Use `jq`

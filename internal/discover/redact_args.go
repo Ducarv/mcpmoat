@@ -20,10 +20,11 @@ import (
 // A name (of a flag or a variable) is secret-like if it contains a word such
 // as "token", "secret", "password", "passphrase", "passcode", "key",
 // "auth", "private", "signature" or "cookie", or if one of its words is a
-// short form such as "pass", "pw", "pin", "otp", "jwt", "pat", "cred" or
-// "salt" ("DB_PASS", "--github-pat", "--pin", "SIGNING_SALT"). An all-caps
-// word that ends in a short form or starts with "PASS" is secret-like too
-// ("PGPASS", "DBPW", "PASSCODE"). A number at the end of a word does not
+// short form such as "pass", "pw", "pin", "otp", "jwt", "pat", "cred",
+// "salt" or "seed" ("DB_PASS", "--github-pat", "--pin", "SIGNING_SALT",
+// "APP_SEED"; also "RANDOM_SEED" and "--seed"). An all-caps word that ends
+// in a short form or starts with "PASS" is secret-like too ("PGPASS",
+// "DBPW", "PASSCODE"). A number at the end of a word does not
 // change this ("--pass2", "REDIS_PASS1"). "bypass", "--path", "--spin",
 // "--option", "--opt2" and "--credit" are not secret-like. IsSecretName
 // holds the full list.
@@ -193,6 +194,9 @@ func RedactArgs(args []string) []string {
 //     "admin:x"): the value after the first "=" of each piece and the text
 //     after a ":" (see innerValues). This over-matches on purpose: it can
 //     return ordinary words of a masked argument.
+//   - for a user and a password ("app:pw@tcp(h:3306)/db", "u:pw@host",
+//     "scott/pw@orcl", "admin:pw"): the password ("pw"; see userPassword).
+//     "git@github.com:org/repo" and "me@example.com" have no password.
 //   - for an argument that is masked whole because a token is glued to a
 //     flag or stands as the flag name ("-p" + token, "--" + token): the text
 //     after the dashes and before "=", and for one dash also that text
@@ -228,22 +232,27 @@ func ArgSecrets(args []string) []string {
 //   - the value of a user flag ("-u", "--user"), whole, and the text after
 //     its ":" (the password in "admin:pw"); the same for text with a ":"
 //     before an "@" ("u:p@tcp(h)/db");
+//   - the password of a piece that is a credential whole by another rule
+//     here: "p" in "u:p@tcp(h)/db" and in "u:p@host", and, when the whole
+//     text looks like a token, the password in "scott/p@orcl" and in
+//     "admin:p". A positional "scott/tiger@orcl" or "admin:pw" that is
+//     not token-like gives no credential;
 //   - in the value of a header flag ("-H", "--header"): the value after a
 //     secret-like header name ("Authorization", "Cookie", "X-Api-Key"), a
 //     value that looks like a token, and the whole line when it has no
 //     "Name:" form;
 //   - in any masked text: the credential after an auth scheme ("x" in
-//     "Bearer x"; see isAuthScheme), the value of a key=value pair or of a
+//     "Bearer x"; see IsAuthScheme), the value of a key=value pair or of a
 //     JSON key when the key is secret-like ("x" in "Password=x" and in
 //     {"token":"x"}), and every word or value that looks like a token (see
-//     tokenLike);
+//     TokenLike);
 //   - for a URL: the user info, the password and, by the rule of
 //     IsSecretUserName, the name, always; a path segment, a matrix
 //     parameter, a query part or the fragment only when it looks like a
 //     token or when its query key is secret-like ("?api_key=x").
 //
 // A token is a word with a known token prefix ("ghp_", "sk-"), a UUID or a
-// long random-looking word (see LooksLikeCredential). Plain words are not
+// long random-looking word (see TokenLike). Plain words are not
 // credentials: "localhost", "production" and "postgres" in
 // "host=localhost dbname=production user=postgres", "Documents" in a path
 // segment "My Documents" ("My" is no auth scheme), "engineering" in
@@ -325,15 +334,16 @@ func (r *argScanner) keepAs(s string, kind pieceKind) {
 // the parts of s, a masked piece of the given kind, that look like a
 // credential: s itself for pieceSecret and pieceUser, for a pieceHeader line
 // with no "Name:" form and for any s that looks like a token (see
-// tokenLike); for pieceUser also each value after a ":" (see innerValues);
-// and for every kind the inner parts that credentialParts returns. Each part
-// is also a part that keep returns for s, so ArgCredentials is a subset of
-// ArgSecrets.
+// TokenLike), and, when it keeps s, also the password in s (see
+// userPassword); for pieceUser also each value after a ":" (see
+// innerValues); and for every kind the inner parts that credentialParts
+// returns. Each part is also a part that keep returns for s, so
+// ArgCredentials is a subset of ArgSecrets.
 func (r *argScanner) keepCredential(s string, kind pieceKind) {
 	if !r.collectCredentials || s == "" {
 		return
 	}
-	whole := tokenLike(s)
+	whole := TokenLike(s)
 	switch kind {
 	case pieceSecret, pieceUser:
 		whole = true
@@ -344,37 +354,58 @@ func (r *argScanner) keepCredential(s string, kind pieceKind) {
 			whole = true
 		}
 	}
-	if whole {
-		r.credentials = append(r.credentials, s)
-	}
+	var inner []string
 	if kind == pieceUser {
 		// innerValues gives the text after each ":", which holds the
 		// password in "admin:pw". It also gives the values of key=value
 		// pairs: the whole text is a credential, so they count too.
-		r.credentials = append(r.credentials, innerValues(s)...)
+		inner = innerValues(s)
 	}
-	r.credentials = append(r.credentials, credentialParts(s)...)
+	parts := credentialParts(s)
+	if whole {
+		r.credentials = append(r.credentials, s)
+		// A server can echo the password alone, so when all of s is a
+		// credential, its password is one too ("pw" in "app:pw@db"). It is
+		// kept one time only: inner or parts can hold it already.
+		if pw, ok := userPassword(s); ok && !slices.Contains(inner, pw) && !slices.Contains(parts, pw) {
+			r.credentials = append(r.credentials, pw)
+		}
+	}
+	r.credentials = append(r.credentials, inner...)
+	r.credentials = append(r.credentials, parts...)
 }
 
-// tokenLike reports whether s, or one of its words (the parts between
-// spaces), looks like a token (see containsToken). A credential has no
-// space, so a text with spaces is checked word by word: the length rule of
-// LooksLikeCredential would else count every long sentence.
-func tokenLike(s string) bool {
+// TokenLike reports whether s, or one of its words (the parts between
+// spaces), looks like a token: the word has a known token prefix (see
+// HasTokenPrefix), is a UUID or is a long random-looking word, or a piece of
+// it after ".", "@", ":", "+" or "~" has a known token prefix (see
+// containsToken). A credential has no space, so free text is checked word by
+// word, and a long sentence does not count by its length alone.
+// "production" and "application/json" are not token-like.
+//
+// ArgCredentials uses this rule. It is exported so that the credential
+// checks of internal/inspect (Result.Credentials) read env values, header
+// values and the values of expanded variables in the same way. It never
+// prints or stores s.
+func TokenLike(s string) bool {
 	return slices.ContainsFunc(strings.Fields(s), containsToken)
 }
 
-// isAuthScheme reports whether word is the scheme of an Authorization
-// header ("Bearer", "Basic", "Token" and similar, in any case) or a
-// secret-like name (see IsSecretName), such as "ApiKey". The credential
-// after such a scheme is a credential. Any other word followed by a space is
-// no scheme: "My" in "My Documents" is not.
-func isAuthScheme(word string) bool {
+// IsAuthScheme reports whether word is the scheme of an Authorization
+// header ("Bearer", "Basic", "Token", "Digest" and similar, in any case) or a
+// secret-like name (see IsSecretName), such as "ApiKey". The text after such
+// a scheme is a credential. Any other word followed by a space is no scheme:
+// "My" in "My Documents" is not.
+//
+// ArgCredentials uses this rule. It is exported so that the credential
+// checks of internal/inspect (Result.Credentials) read a header value in the
+// same way. It never prints or stores word.
+func IsAuthScheme(word string) bool {
 	return isAuthSchemeWord(word) || IsSecretName(word)
 }
 
 // isAuthSchemeWord reports whether word is one of the usual HTTP auth
-// schemes, in any case. Unlike isAuthScheme, it is false for other
+// schemes, in any case. Unlike IsAuthScheme, it is false for other
 // secret-like names, so a password such as "mykey" is not taken for a
 // scheme.
 func isAuthSchemeWord(word string) bool {
@@ -390,9 +421,9 @@ func isAuthSchemeWord(word string) bool {
 // that pass these checks:
 //
 //   - the value after "Name:" when the name is secret-like (see
-//     IsSecretName) or the value looks like a token (see tokenLike);
+//     IsSecretName) or the value looks like a token (see TokenLike);
 //   - the credential after a scheme when the scheme is an auth scheme (see
-//     isAuthScheme) or the credential looks like a token;
+//     IsAuthScheme) or the credential looks like a token;
 //   - a value after a ":" when the text right before the ":" is a
 //     secret-like name (a JSON key or a header name), or when the value
 //     looks like a token. An auth scheme word there (see
@@ -409,13 +440,13 @@ func credentialParts(s string) []string {
 	value := s
 	if name, rest, found := strings.Cut(s, ":"); found && isName(name) {
 		value = strings.TrimSpace(rest)
-		if value != "" && (IsSecretName(name) || tokenLike(value)) {
+		if value != "" && (IsSecretName(name) || TokenLike(value)) {
 			parts = append(parts, value)
 		}
 	}
 	if scheme, rest, found := strings.Cut(value, " "); found && isName(scheme) {
 		cred := strings.TrimSpace(rest)
-		if cred != "" && !strings.ContainsAny(cred, " \t") && (isAuthScheme(scheme) || tokenLike(cred)) {
+		if cred != "" && !strings.ContainsAny(cred, " \t") && (IsAuthScheme(scheme) || TokenLike(cred)) {
 			parts = append(parts, cred)
 		}
 	}
@@ -437,10 +468,10 @@ func innerCredentials(s string) []string {
 			continue
 		}
 		if piece := s[start:i]; piece != "" {
-			if afterColon && !isAuthSchemeWord(piece) && (IsSecretName(label) || tokenLike(piece)) {
+			if afterColon && !isAuthSchemeWord(piece) && (IsSecretName(label) || TokenLike(piece)) {
 				creds = append(creds, piece)
 			}
-			if key, value, found := strings.Cut(piece, "="); found && value != "" && (IsSecretName(key) || tokenLike(value)) {
+			if key, value, found := strings.Cut(piece, "="); found && value != "" && (IsSecretName(key) || TokenLike(value)) {
 				creds = append(creds, value)
 			}
 			afterColon = false
@@ -464,16 +495,59 @@ func innerCredentials(s string) []string {
 }
 
 // keep does nothing unless r collects. Then it keeps s, the inner values of
-// s as a header line or an auth value (see headerLineParts), and the values
-// inside s as key=value pairs or JSON (see innerValues). It keeps nothing for
-// an empty s: there is no secret to remove.
+// s as a header line or an auth value (see headerLineParts), the values
+// inside s as key=value pairs or JSON (see innerValues) and the password of
+// a user and a password in s (see userPassword), when innerValues did not
+// already give it ("pw" in "admin:pw"). It keeps nothing for an empty s:
+// there is no secret to remove.
 func (r *argScanner) keep(s string) {
 	if !r.collect || s == "" {
 		return
 	}
 	r.secrets = append(r.secrets, s)
 	r.secrets = append(r.secrets, headerLineParts(s)...)
-	r.secrets = append(r.secrets, innerValues(s)...)
+	inner := innerValues(s)
+	r.secrets = append(r.secrets, inner...)
+	if pw, ok := userPassword(s); ok && !slices.Contains(inner, pw) {
+		r.secrets = append(r.secrets, pw)
+	}
+}
+
+// userPassword returns the password in s, a masked text that joins a user
+// and a password, in one of these forms:
+//
+//   - "user:password@host" or a DSN ("app:pw@tcp(db:3306)/x"): the text
+//     between the first ":" and the last "@". The text before the ":" has
+//     no "@", so in "git@github.com:org/repo" there is no password.
+//   - Oracle "user/password@tns" ("scott/pw@orcl", "scott/pw@//h:1521/x"):
+//     the text between the first "/" and the first "@" after it, when the
+//     user is a name (see isName) and the password has no "/".
+//   - "user:password" with no "@" ("admin:pw"): the text after the first
+//     ":", when the user is a name and the password has no space.
+//
+// The last "@" ends the password, as in the MySQL driver, so a password with
+// an "@" stays whole. ok is false for other text, for a URL (its user info
+// is found by the URL code) and when the password is empty.
+func userPassword(s string) (password string, ok bool) {
+	if strings.Contains(s, "://") {
+		return "", false
+	}
+	if user, rest, found := strings.Cut(s, "/"); found && isName(user) {
+		if pw, _, found := strings.Cut(rest, "@"); found && pw != "" && !strings.Contains(pw, "/") {
+			return pw, true
+		}
+	}
+	user, rest, found := strings.Cut(s, ":")
+	if !found || strings.Contains(user, "@") {
+		return "", false
+	}
+	if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+		return rest[:at], at > 0
+	}
+	if isName(user) && rest != "" && !strings.ContainsAny(rest, " \t") {
+		return rest, true
+	}
+	return "", false
 }
 
 // innerValues returns the values inside s, a text that RedactArgs masks
@@ -847,9 +921,7 @@ func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
 		}
 		r.keepCredential(info, pieceSecret)
 		name, password, _ := strings.Cut(info, ":")
-		for _, part := range userinfoSecrets(name, password, name, password) {
-			r.keepCredential(part, pieceSecret)
-		}
+		r.keepUserinfoParts(info, userinfoSecrets(name, password, name, password))
 		return
 	}
 	if u.User != nil {
@@ -857,9 +929,7 @@ func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
 		r.keepCredential(info, pieceSecret)
 		name, password, _ := strings.Cut(info, ":")
 		plainPassword, _ := u.User.Password()
-		for _, part := range userinfoSecrets(name, password, u.User.Username(), plainPassword) {
-			r.keepCredential(part, pieceSecret)
-		}
+		r.keepUserinfoParts(info, userinfoSecrets(name, password, u.User.Username(), plainPassword))
 	}
 	// The same loop as SecretPathSegments.
 	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
@@ -900,6 +970,20 @@ func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
 		}
 		for _, form := range appendForms(nil, fragment, u.Fragment) {
 			r.keepCredential(form, kind)
+		}
+	}
+}
+
+// keepUserinfoParts keeps parts, the parts of info (the user info of a URL;
+// see userinfoSecrets), as credentials, after keepCredential(info,
+// pieceSecret). That call already kept the password of info as written (see
+// userPassword), so a part equal to it is skipped: each value is kept one
+// time.
+func (r *argScanner) keepUserinfoParts(info string, parts []string) {
+	written, _ := userPassword(info) // "" when info has no such password
+	for _, part := range parts {
+		if part != written {
+			r.keepCredential(part, pieceSecret)
 		}
 	}
 }
@@ -1076,12 +1160,12 @@ func (r *argScanner) displaySegment(seg string) string {
 }
 
 // containsToken reports whether s looks like a token (see
-// LooksLikeCredential), or whether one of its pieces starts with a known
+// looksLikeCredential), or whether one of its pieces starts with a known
 // token prefix. The pieces are the parts of s between ".", "@", ":", "+" and
 // "~", so a token after one of these bytes ("@ghp_abc", "x.sk-abc") is
 // found too.
 func containsToken(s string) bool {
-	if LooksLikeCredential(s) {
+	if looksLikeCredential(s) {
 		return true
 	}
 	pieces := strings.FieldsFunc(s, func(r rune) bool {
@@ -1132,9 +1216,14 @@ func IsSecretName(name string) bool {
 
 // isShortForm reports whether word is a short form such as "pass", "pin" or
 // "jwt" in any case, or an all-caps word that ends in one ("DBPASS",
-// "PGPASS"). The list also holds "salt", a short word that gives false
-// positives inside other words ("basalt", "salty"). An all-caps word that
-// starts with "PASS" is secret-like too ("PASSCODE", "PASSWRD").
+// "PGPASS"). The list also holds "salt", "pepper" and "seed" (a wallet
+// seed, like "mnemonic"): words that give false positives inside other words
+// ("basalt", "salty", "seedling"). An all-caps word that starts with "PASS"
+// is secret-like too ("PASSCODE", "PASSWRD").
+//
+// "seed" also names a random seed, so "RANDOM_SEED", "--seed 42" and the
+// all-caps "LINSEED" are secret-like. That is a false positive we accept: a
+// missed wallet seed is worse than a masked number.
 //
 // Short forms do not match inside a lower-case or mixed-case word, because
 // there they give false positives: "bypass", "compass", "passthrough"
@@ -1150,7 +1239,10 @@ func isShortForm(word string) bool {
 	if word == "" {
 		return false
 	}
-	shortForms := [...]string{"pass", "pw", "pin", "otp", "jwt", "pat", "cred", "creds", "salt"}
+	shortForms := [...]string{
+		"pass", "pw", "pin", "otp", "jwt", "pat", "cred", "creds",
+		"salt", "pepper", "seed",
+	}
 	lower := strings.ToLower(word)
 	allCaps := word == strings.ToUpper(word)
 	for _, short := range shortForms {

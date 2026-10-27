@@ -9,11 +9,12 @@ import (
 
 // This file removes secret values from untrusted text, such as the name or
 // the description of a tool that a server sends. A server that got a token
-// can echo it in that text. internal/llm uses it for the LLM request (FR-17),
-// and the report layer can use it for the local output, because only
-// cmd/mcpmoat may import internal/llm.
+// can echo it in that text. internal/llm uses it for the LLM request (FR-17).
+// cmd/mcpmoat uses it (through TextRedactor) for the local report: the tool
+// names in the row keys and the pin diffs. The code is here and not in
+// internal/llm because only cmd/mcpmoat may import internal/llm.
 
-// SecretTextValues returns the values that [RedactText] and
+// SecretTextValues returns the values that [TextRedactor] and
 // [RedactTextPrefix] must remove for secrets: each secret value of at least
 // [MinSecretBytes] bytes and, for a value that is not valid UTF-8, also its
 // decoded form (see decodedPerByte). It skips shorter values (see
@@ -22,8 +23,8 @@ import (
 // MinSecretBytes gives no decoded form either, even when that form is
 // longer. The result keeps the order of the first occurrence.
 //
-// The result holds secret values: pass it only to RedactText or
-// RedactTextPrefix, never to fmt, a logger, an error or an encoder.
+// The result holds secret values: pass it only to RedactTextPrefix, never to
+// fmt, a logger, an error or an encoder.
 //
 // The decoded form is necessary because a value from the OS environment can
 // hold bytes that are not valid UTF-8. A server sends its tool text as JSON.
@@ -66,21 +67,21 @@ func SecretTextValues(secrets []Secret) []string {
 	return values
 }
 
-// RedactText replaces each occurrence of each value in values with [Mask] in
+// redactText replaces each occurrence of each value in values with Mask in
 // all of s, and reports whether it wrote a Mask. The values normally come
-// from [SecretTextValues]. See redactWindow for how the occurrences are found
+// from SecretTextValues. See redactWindow for how the occurrences are found
 // and replaced.
 //
-// RedactText reads all of s. For a long text of which only the start is
-// shown, use [RedactTextPrefix], which bounds the work.
+// redactText reads all of s. For a long text of which only the start is
+// shown, use RedactTextPrefix, which bounds the work.
 //
 // The values must not be empty (SecretTextValues gives only values of at
-// least [MinSecretBytes] bytes). An empty value is skipped.
+// least MinSecretBytes bytes). An empty value is skipped.
 //
-// RedactText builds the search tables of the values on each call. To redact
-// many texts with the same values, use a [TextRedactor], which builds them
-// once.
-func RedactText(s string, values []string) (string, bool) {
+// redactText builds the search tables of the values on each call. Only the
+// tests call it, as the reference for the other forms. Code outside the
+// package uses a TextRedactor, which builds the tables once.
+func redactText(s string, values []string) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
 	}
@@ -90,7 +91,9 @@ func RedactText(s string, values []string) (string, bool) {
 // RedactTextPrefix replaces each occurrence of each value in values with
 // [Mask] in s, and returns the start of the result, and whether that start
 // holds a Mask. The values normally come from [SecretTextValues]. "The whole
-// result" below is RedactText(s, values). A negative limit counts as 0.
+// result" below is the redaction of all of s (the text that
+// [TextRedactor.Text] gives for the same values). A negative limit counts as
+// 0.
 //
 // The start is the whole result when the result has at most limit bytes, and
 // otherwise a prefix of the result with more than limit bytes. So a cut of
@@ -153,12 +156,12 @@ var (
 )
 
 // TextRedactor removes the secret values of one set of secrets (for example
-// the secrets of one server) from many texts. It gives the same results as
-// [RedactText] and [RedactTextPrefix] with the values of
-// [SecretTextValues], but it reads the secrets and builds the search table
-// of each value once, in [NewTextRedactor], not once for each text. This
-// matters when the same values go over many short texts, such as each JSON
-// string of a tool schema.
+// the secrets of one server) from many texts. Its Prefix gives the same
+// results as [RedactTextPrefix] with the values of [SecretTextValues], and its
+// Text gives the redaction of all of a text. It reads the secrets and builds
+// the search table of each value once, in [NewTextRedactor], not once for
+// each text. This matters when the same values go over many short texts, such
+// as each JSON string of a tool schema.
 //
 // A nil *TextRedactor and the zero TextRedactor redact nothing: Text and
 // Prefix return their input. A TextRedactor never changes after
@@ -169,14 +172,13 @@ var (
 // receivers, so a *TextRedactor also gives Mask.
 type TextRedactor struct {
 	// redact keeps the values and their tables inside a closure: redact(s,
-	// -1) redacts all of s (RedactText), and redact(s, limit) with limit >= 0
+	// -1) redacts all of s (redactText), and redact(s, limit) with limit >= 0
 	// gives the start that RedactTextPrefix gives.
 	//
 	// It is a func, not a pointer to a struct with the values. fmt prints a
 	// struct in an unexported field by reflection, and for a verb that does
 	// not fit a pointer (such as %q or %s) it even follows a pointer to a
 	// struct and prints its fields. fmt prints a func only as an address.
-	// secretMask in cmd/mcpmoat uses the same idea.
 	redact func(s string, limit int) (string, bool)
 }
 
@@ -208,9 +210,10 @@ func NewTextRedactor(secrets []Secret) *TextRedactor {
 	return &TextRedactor{redact: redact}
 }
 
-// Text returns s with each occurrence of each value replaced with Mask, the
-// same as RedactText(s, SecretTextValues(secrets)) for the secrets of
-// NewTextRedactor.
+// Text returns all of s with each occurrence of each value of
+// SecretTextValues(secrets), for the secrets of NewTextRedactor, replaced
+// with Mask. It reads all of s. For a long text of which only the start is
+// shown, use Prefix, which bounds the work.
 func (r *TextRedactor) Text(s string) string {
 	if r == nil || r.redact == nil || s == "" {
 		return s

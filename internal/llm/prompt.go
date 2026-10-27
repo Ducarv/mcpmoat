@@ -115,25 +115,6 @@ type Input struct {
 	Secrets []discover.Secret
 }
 
-// RedactedName returns the tool name with each value of Secrets (see
-// discover.SecretTextValues) replaced by discover.Mask, as the request has
-// it, but not cut to MaxToolNameBytes. It is the whole redacted name when
-// that has at most limit bytes, and otherwise a prefix of it with more than
-// limit bytes (see discover.RedactTextPrefix), so the work is bounded for a
-// very long name. A negative limit counts as 0. A caller that
-// shows only the start of the name picks a limit that keeps the part it
-// shows.
-//
-// Secrets holds only the credential subset (see Input.Secrets), so
-// RedactedName hides only credentials, not every configured value. The Key
-// of a report row must hide every configured value, so cmd/mcpmoat does not
-// use RedactedName for it: it masks the name with the wide
-// inspect.Result.Secrets list (secretMask in cmd/mcpmoat).
-func (in Input) RedactedName(limit int) string {
-	name, _ := discover.RedactTextPrefix(in.ToolName, discover.SecretTextValues(in.Secrets), limit)
-	return name
-}
-
 // toolPayload is the JSON object of the user message. Redacted has
 // omitempty, so the message of a tool with no secret in its text is the
 // same as before the field existed.

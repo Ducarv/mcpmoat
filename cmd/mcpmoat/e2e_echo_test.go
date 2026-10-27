@@ -2,8 +2,7 @@ package main
 
 // End-to-end tests of the mask of configured values that a hostile server
 // echoes back (issues #228, #234 and #180). They run the real binary with the
-// benign fixture in its two hostile test modes (see
-// testdata/servers/benign/README.md):
+// echo fixture in its two modes (see testdata/servers/echo/README.md):
 //
 //   - echo-env offers one tool, fetch_<value>, with the value also in its
 //     description and in the description of a schema property;
@@ -20,13 +19,6 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
-)
-
-// The fake env values of TestE2EScanEchoedSecret. Each one has 8 bytes or
-// more (discover.MinSecretBytes), so the report masks it wherever it stands.
-const (
-	e2eEchoToken  = "FAKE-TOKEN-0123456789"
-	e2eEchoToken2 = "FAKE-TOKEN-9876543210"
 )
 
 // e2eKeywordRule is an extra rule for --rules that flags the word "token" in a
@@ -52,17 +44,20 @@ const e2eShortPin = "123456"
 
 // TestE2EScanEchoedSecret runs the pin journey with a server that echoes a
 // configured env value in its tool name, description and schema. The config
-// holds two values. The server echoes the first one, then the config switches
-// it to the second one, so its only tool gets a new name: scan reports a new
-// tool and a removed tool, with a diff. An extra rule (--rules) also flags
-// the description of the tool in each scan, so the run has a tool rule row
-// too. No run prints a value: the rows, the diffs and the --json keys show
+// holds two values, the fake tokens echoToken and echoToken2
+// (scan_echo_secret_test.go). Each one has 8 bytes or more
+// (discover.MinSecretBytes), so the report masks it wherever it stands. The
+// server echoes the first one, then the config switches it to the second
+// one, so its only tool gets a new name: scan reports a new tool and a
+// removed tool, with a diff. An extra rule (--rules) also flags the
+// description of the tool in each scan, so the run has a tool rule row too.
+// No run prints a value: the rows, the diffs and the --json keys show
 // discover.Mask. pins.json keeps the real tool names, because the pins and
 // their hashes use the raw text.
 func TestE2EScanEchoedSecret(t *testing.T) {
 	t.Parallel()
 	const server = "echo"
-	tokens := []string{e2eEchoToken, e2eEchoToken2}
+	tokens := []string{echoToken, echoToken2}
 	maskedName := "fetch_" + discover.Mask
 
 	home, work := t.TempDir(), t.TempDir()
@@ -76,9 +71,9 @@ func TestE2EScanEchoedSecret(t *testing.T) {
 	writeConfig := func(echoVar string) {
 		writeServers(t, home, ".claude.json", map[string]any{
 			server: map[string]any{
-				"command": inspecttest.Fixture(t, "benign"),
+				"command": inspecttest.Fixture(t, "echo"),
 				"args":    []string{"-mode", "echo-env", "-echovar", echoVar},
-				"env":     map[string]string{"MCPMOAT_FAKE_TOKEN": e2eEchoToken, "MCPMOAT_FAKE_TOKEN2": e2eEchoToken2},
+				"env":     map[string]string{"MCPMOAT_FAKE_TOKEN": echoToken, "MCPMOAT_FAKE_TOKEN2": echoToken2},
 			},
 		})
 	}
@@ -151,7 +146,7 @@ func TestE2EScanEchoedSecret(t *testing.T) {
 		t.Errorf("step 1 findings = %q, want %q\nstdout:\n%s", got, baseRows, stdout)
 	}
 	assertNoToken(t, stdout, stderr)
-	assertPinnedName(t, e2eEchoToken, e2eEchoToken2)
+	assertPinnedName(t, echoToken, echoToken2)
 
 	// Step 1b: --json of the same state. The pin is saved already, so stderr
 	// is empty.
@@ -209,7 +204,7 @@ func TestE2EScanEchoedSecret(t *testing.T) {
 	}
 	assertDiffsOf(t, diffText, server, []string{"+" + maskedName})
 	assertNoToken(t, stdout, stderr)
-	assertPinnedName(t, e2eEchoToken2, e2eEchoToken)
+	assertPinnedName(t, echoToken2, echoToken)
 
 	// Step 4: the new name is pinned, so the pin rows are gone.
 	stdout, stderr, code = runBin(t, home, work, "scan", "--rules", rulesDir)
@@ -238,7 +233,7 @@ func TestE2EScanShortValueInFailure(t *testing.T) {
 	requirePrivateChain(t, home)
 	writeServers(t, home, ".claude.json", map[string]any{
 		server: map[string]any{
-			"command": inspecttest.Fixture(t, "benign"),
+			"command": inspecttest.Fixture(t, "echo"),
 			"args":    []string{"-mode", "fail-echo", "-echovar", "MCPMOAT_FAKE_PIN"},
 			"env":     map[string]string{"MCPMOAT_FAKE_PIN": e2eShortPin},
 		},

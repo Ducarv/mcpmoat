@@ -286,9 +286,9 @@ func Compare(stored ServerPins, current []inspect.Tool) []Change {
 // CompareMasked is Compare, but it hides secret values in the text that it
 // returns. A server gets the configured env values, header values and argv,
 // and it can echo one of them in a tool name, title, description, schema,
-// _meta or icons. mask returns its input with each secret value replaced, for
-// example discover.RedactText with the secret values of the server. A nil mask
-// changes nothing.
+// _meta or icons. mask returns its input with each secret value replaced with
+// a fixed mask. cmd/mcpmoat passes the Text method of a discover.TextRedactor
+// that holds the secret values of the server. A nil mask changes nothing.
 //
 // mask is applied to the decoded text before the diff is rendered, wrapped
 // and cut (see render). So a wrap or a cut cannot leave a part of a secret,

@@ -3433,6 +3433,7 @@ func TestCookieHeaderSecrets(t *testing.T) {
 
 	const cookie = `sid=abcdef123456; lang=en; theme=darkmode1; pref="quotedvalue1"`
 	const setCookie = "id=abcdef123456; Path=/; HttpOnly"
+	const setCookieDomain = "id=abcdef123456; Path=/; Domain=example.com; HttpOnly"
 	tests := []struct {
 		name        string
 		headers     map[string]string
@@ -3464,12 +3465,28 @@ func TestCookieHeaderSecrets(t *testing.T) {
 			wantShort:   []string{"1", "a=1"},
 		},
 		{
-			// "HttpOnly" has no "=", so it gives nothing. "Path=/" is short.
+			// Only the first pair of Set-Cookie is the cookie. "Path=/" and
+			// "HttpOnly" are attributes and give nothing, not even a short
+			// piece.
 			name:        "set-cookie with attributes",
 			headers:     map[string]string{"Set-Cookie": setCookie},
 			wantSecrets: []string{setCookie, "id=abcdef123456", "abcdef123456"},
 			wantCreds:   []string{setCookie, "id=abcdef123456", "abcdef123456"},
-			wantShort:   []string{"/", "Path=/"},
+		},
+		{
+			// "Domain=example.com" is an attribute: "example.com" must not
+			// become a credential that scan --llm masks.
+			name:        "set-cookie with a domain attribute",
+			headers:     map[string]string{"set-cookie": setCookieDomain},
+			wantSecrets: []string{setCookieDomain, "id=abcdef123456", "abcdef123456"},
+			wantCreds:   []string{setCookieDomain, "id=abcdef123456", "abcdef123456"},
+		},
+		{
+			// Cookie keeps every pair: there, "Domain" is only a cookie name.
+			name:        "cookie with a pair named like an attribute",
+			headers:     map[string]string{"Cookie": "id=abcdef123456; Domain=example.com"},
+			wantSecrets: []string{"id=abcdef123456; Domain=example.com", "Domain=example.com", "id=abcdef123456", "abcdef123456", "example.com"},
+			wantCreds:   []string{"id=abcdef123456; Domain=example.com", "Domain=example.com", "id=abcdef123456", "abcdef123456", "example.com"},
 		},
 		{
 			name:        "cookie2",
@@ -3700,8 +3717,8 @@ func TestRemoteResultCredentials(t *testing.T) {
 		// url builds the configured URL. nil means fixtureURL.
 		url  func(ts *httptest.Server) string
 		wrap func(http.Handler) http.Handler
-		// secrets and credentials are RemoteOptions.secrets and
-		// RemoteOptions.credentials, from the expanded variables.
+		// secrets and credentials are RemoteOptions.expanded.long and
+		// RemoteOptions.expanded.credentials, from the expanded variables.
 		secrets     []string
 		credentials []string
 		wantSecrets []string
@@ -3836,7 +3853,7 @@ func TestRemoteResultCredentials(t *testing.T) {
 			}
 			srv := rmServer(discover.TransportHTTP, rawURL, tt.headers)
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: tt.secrets, credentials: tt.credentials})
+			got, err := Remote(t.Context(), srv, RemoteOptions{expanded: secretLists{long: tt.secrets, credentials: tt.credentials}})
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}

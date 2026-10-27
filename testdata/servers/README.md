@@ -2,8 +2,9 @@
 
 Every folder here is a **test fixture** for mcpmoat. These are fake servers for tests and the demo.
 They are not products. No fixture makes a network call. The malicious fixtures (`poisoned/`,
-`shadowing/`, `mailer/` and `rugpull/`) start no process and write no file. Their malicious text
-is inert data. `benign/` has test-only flags that can write a file or start a copy of itself. See
+`shadowing/`, `mailer/`, `rugpull/` and `echo/`) start no process and write no file. Their malicious
+text is inert data. `echo/` reads one environment variable that a flag names, and puts its value in
+its output. `benign/` has test-only flags that can write a file or start a copy of itself. See
 its [README](benign/README.md). `TestFixtureImports` in
 `internal/rules/fixtures_imports_test.go` checks the imports of every fixture. Do not install any
 fixture in a real client.
@@ -17,6 +18,7 @@ block is repeated in each folder.
 | `benign/` | none (negative baseline) | none; see its [README](benign/README.md) for the test-only flags |
 | `poisoned/` | T1 tool poisoning | MOAT-T1-002, MOAT-T1-003, MOAT-T1-004, MOAT-T1-005, MOAT-T1-006, MOAT-T1-007, MOAT-T1-008, MOAT-T1-009, MOAT-T1-012, MOAT-T1-017, MOAT-T1-019, MOAT-T1-020 (MOAT-T1-007 and MOAT-T1-017 on the `padded_notes` tool); see its README for the marker of each ID |
 | `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (two sources, see the note below) |
+| `echo/` | the server echoes a configured secret (an env value) in a tool name, a description and a schema, or in the error of its `initialize` reply (#228, #234, #180) | none; `TestE2EScanEchoedSecret` and `TestE2EScanShortValueInFailure` in `cmd/mcpmoat/e2e_echo_test.go` check that the report masks the value; see its [README](echo/README.md) |
 | `rugpull/` | T2 rug pull | MOAT-T2-001 on `get_time` with `-variant injected` (high); the injected description also gives MOAT-T1-002, MOAT-T1-003 and MOAT-T1-004; see its [README](rugpull/README.md) |
 
 MOAT-T3-001 comes from two checks. For what `scan` runs today, see

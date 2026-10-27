@@ -461,7 +461,7 @@ func isSecretPathSegment(seg string) bool {
 // is also checked for a token prefix after ".", "@", ":", "+" or "~", as in
 // RedactArgs ("v1.ghp_x").
 func looksLikeEscapedCredential(escaped, plain string) bool {
-	if LooksLikeCredential(escaped) || LooksLikeCredential(plain) {
+	if looksLikeCredential(escaped) || looksLikeCredential(plain) {
 		return true
 	}
 	for piece := range strings.SplitSeq(plain, "/") {

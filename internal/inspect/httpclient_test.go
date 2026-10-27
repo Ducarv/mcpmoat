@@ -907,7 +907,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 			Transport: discover.TransportHTTP,
 			URL:       discover.NewURL("http://example.com/"),
 		}
-		ce := classify(doErr, srv, rec, nil, nil)
+		ce := classify(doErr, srv, rec, secretLists{})
 		if ce.Kind != KindNetwork {
 			t.Errorf("Kind = %q, want %q (error: %v)", ce.Kind, KindNetwork, ce)
 		}
@@ -3555,7 +3555,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 			// the record with a recordedError, and classify finds the blocked
 			// error there.
 			flat := &recordedError{err: errors.New(readErr.Error()), rec: rec}
-			ce := classify(flat, srv, ev, nil, nil)
+			ce := classify(flat, srv, ev, secretLists{})
 			if ce.Kind != KindTooLarge {
 				t.Errorf("classify().Kind = %q, want %q (reason %q)", ce.Kind, KindTooLarge, ce.Reason)
 			}
@@ -3579,7 +3579,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 			t.Fatalf("read body: error = %v, want nil", err)
 		}
 		flat := &recordedError{err: errors.New("Unauthorized"), rec: rec}
-		ce := classify(flat, srv, ev, nil, nil)
+		ce := classify(flat, srv, ev, secretLists{})
 		if ce.Kind != KindHTTP || ce.Status != http.StatusUnauthorized {
 			t.Errorf("classify() = kind %q, status %d, want %q, %d (reason %q)", ce.Kind, ce.Status, KindHTTP, http.StatusUnauthorized, ce.Reason)
 		}
@@ -3599,7 +3599,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 		if got := ev.fallback.blockedErr(); !errors.Is(got, errJSONTooComplex) {
 			t.Errorf("fallback blockedErr() = %v, want errJSONTooComplex", got)
 		}
-		ce := classify(errors.New("flattened by the SDK"), srv, ev, nil, nil)
+		ce := classify(errors.New("flattened by the SDK"), srv, ev, secretLists{})
 		if ce.Kind != KindTooLarge {
 			t.Errorf("classify().Kind = %q, want %q (reason %q)", ce.Kind, KindTooLarge, ce.Reason)
 		}
@@ -3906,7 +3906,7 @@ func TestAddrRefusedSurvivesFlattening(t *testing.T) {
 
 	srv := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL(endpoint)}
 	flat := errors.New("calling initialize: Post " + endpoint + ": " + errAddrRefused.Error())
-	ce := classify(flat, srv, ev, nil, nil)
+	ce := classify(flat, srv, ev, secretLists{})
 	if ce.Kind != KindNetwork {
 		t.Errorf("classify().Kind = %q, want %q", ce.Kind, KindNetwork)
 	}

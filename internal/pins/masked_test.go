@@ -45,7 +45,7 @@ const (
 var fakeTokens = []string{fakeToken, fakeOther, fakeEscToken, fakeNumber}
 
 // fakeMask replaces each fake secret value with maskMarker, as
-// discover.RedactText does with the real values.
+// (*discover.TextRedactor).Text does with the real values.
 func fakeMask(s string) string {
 	for _, tok := range fakeTokens {
 		s = strings.ReplaceAll(s, tok, maskMarker)

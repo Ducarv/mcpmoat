@@ -23,7 +23,7 @@ func TestScanLLMEchoSecretKey(t *testing.T) {
 	t.Parallel()
 
 	tools := map[string][]inspect.Tool{"srv": {mkTool("fetch_"+echoToken, "Read keys. "+llmMarkHigh)}}
-	want := []llmHit{{llm.RuleID, "high", "srv", "fetch_" + mask}}
+	want := []llmHit{{llm.RuleID, "high", "srv", "fetch_" + echoMask}}
 	for _, jsonOut := range []bool{false, true} {
 		name := "terminal"
 		args := []string{"--llm"}

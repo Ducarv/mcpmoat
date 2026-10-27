@@ -234,7 +234,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, res inspe
 		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError
 	}
-	diffs := c.pinChanges(shown, id, server.Name, tools, newSecretMask(res.Secrets))
+	diffs := c.pinChanges(shown, id, server.Name, tools, discover.NewTextRedactor(res.Secrets))
 
 	// Show the diffs before pin saves. Do not use fprintf: a write error (a
 	// closed pipe) must stop pin before the save, because the user did not see
@@ -558,16 +558,16 @@ func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pin
 // change it. It prints a warning on stderr for each diff that was cut at the
 // size limit. It does not count the changes: changeCounts does that.
 //
-// mask is the mask of the secret values of the server (see secretMask). The
-// compare is pins.CompareMasked with it, so the tool names and the text of the
-// diffs, and the tool names in the warnings, show each secret value as
-// discover.Mask.
-func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool, mask secretMask) []report.ToolDiff {
+// redactor holds the secret values of the server (nil when it has none, see
+// compareMask). The compare is pins.CompareMasked with it, so the tool names
+// and the text of the diffs, and the tool names in the warnings, show each
+// secret value as discover.Mask.
+func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool, redactor *discover.TextRedactor) []report.ToolDiff {
 	var diffs []report.ToolDiff
 	// An unpinned server gives nil pins, and pins.CompareMasked then reports
 	// every valid tool as new.
 	stored, _ := store.Get(id)
-	for _, ch := range pins.CompareMasked(stored, tools, mask.compareMask()) {
+	for _, ch := range pins.CompareMasked(stored, tools, compareMask(redactor)) {
 		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
 	return diffs

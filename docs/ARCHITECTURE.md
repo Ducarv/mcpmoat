@@ -23,7 +23,7 @@ cmd/mcpmoat/            CLI entry (standard library flag); runWithContext() retu
 internal/
   termsafe/             escapes untrusted text for the terminal
   safefile/             hardened bounded read of untrusted files
-  discover/             config readers: Claude Code, Cursor, Codex
+  discover/             config readers (Claude Code, Cursor, Codex), secret and credential checks
     discovertest/       test helpers for discover
   inspect/              connects to servers, reads tools, prompts and resources
     inspecttest/        test helpers for inspect, including Fake
@@ -57,7 +57,8 @@ docs/                   PRD and other documentation
   `scan_llm_flags.go` holds the flags, `checkLLMFlags` and the setup warning. `scan_llm_plan.go`
   builds the jobs (`llmPlan`, `planLLMJobs`, `fairShare`, `llmServerJobs`, `maxLLMTools`): it maps
   each `inspect.Tool` and the `inspect.Result.Credentials` of its server to an `llm.Input`, and
-  gives each job the `secretMask` of the wide `inspect.Result.Secrets` for the row key.
+  gives each job a `*discover.TextRedactor` of the wide `inspect.Result.Secrets`
+  (`llmJob.redactor`) for the row key.
   `scan_llm.go` runs the step (`llmStep`, `classifyPlan`, `runLLMJobs`, `sortAnswer`,
   `rejectedFailure` and the failure lines), and `scan_llm_rows.go` turns the answers into rows
   (`llmRow`, `invalidRow`, `llmSeverity`). The step calls a `toolClassifier`, a small interface
@@ -72,6 +73,9 @@ docs/                   PRD and other documentation
   `OpenIfExistsInRoot` in the same root, so the checked directory is the one that it reads from.
   `pins.Load` and `pins.LoadLocked` do this.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
+  It also holds the shared redaction of tool text (`redact_text.go`: `TextRedactor`,
+  `SecretTextValues`, `RedactTextPrefix`) and the credential checks (`ArgCredentials`, `TokenLike`,
+  `IsAuthScheme`) that `inspect`, `llm` and `cmd/mcpmoat` use.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
 - `internal/rules`: loads and checks the YAML rules, applies the description and schema rules to
@@ -280,10 +284,11 @@ step 5 and step 6:
     version` or `pinned text does not match its hash`. The reason
     never holds server text. For the last two reasons the pin cannot be trusted, so the change also
     has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
-    server and real tool name (`Change.RawTool`, not the masked `key`). The `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a
-    server that is in the store. When the tools of a pinned server no longer fit the size limit of
-    pins.json (`pins.ValidateServer`), `pins.Compare` has no reason for it, so `pinner.compare`
-    adds the high MOAT-T2-004 finding `the tools cannot be pinned` that a first run gives.
+    server and real tool name (`Change.RawTool`, not the masked `key`). The `.mcpmoat-ignore` file
+    does not (see step 3). `scan` never re-pins a server that is in the store. When the tools of a
+    pinned server no longer fit the size limit of pins.json (`pins.ValidateServer`), `pins.Compare`
+    has no reason for it, so `pinner.compare` adds the high MOAT-T2-004 finding `the tools cannot be
+    pinned` that a first run gives.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
@@ -370,12 +375,12 @@ step 5 and step 6:
   credential values of that server (`inspect.Result.Credentials` goes to `llm.Input.Secrets`, and
   `internal/llm` replaces them before the request). For a stdio server, these values include the
   credentials in its expanded argv. The wide `inspect.Result.Secrets` stays for the local report:
-  it masks the `key` of each LLM row (see [Secret values](#the---llm-classifier)). It adds one advisory row for each tool that the model rates as
-  risky, for each tool with an unusable answer or a refusal of the provider, and for each cut tool
-  (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It only adds rows:
-  it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
-  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step
-  3). The ignored count includes the dropped LLM rows.
+  it masks the `key` of each LLM row (see [Secret values](#the---llm-classifier)). It adds one
+  advisory row for each tool that the model rates as risky, for each tool with an unusable answer or
+  a refusal of the provider, and for each cut tool (see the verdict rules in [The `--llm`
+  classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a rule finding,
+  and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for the pin rows.
+  The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
   tool and a new tool also get a diff, so the user can review the content of a new tool before
   they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
@@ -450,13 +455,13 @@ change the exit codes.
    fails, times out or is refused exits with 2, and nothing is written. The inspection warnings go
    to stderr, like in `scan`.
 4. It makes the pins of the tools (`pins.Snapshot`) and compares them with the pins of the read
-   without the lock (`pins.CompareMasked` with the mask of the server). It prints the diff of each changed tool and of each new tool
-   on stdout (`report.WriteDiffs`). When the pins file existed at the first read of the command
-   but this read does not find it, the file was removed while the server ran. Then `pin` prints no
-   diff (every tool would look new), saves nothing, prints `pinsRemovedText` and exits with 2
-   (`pinsRemovedWhileRunning`).
-   A server that is not pinned yet has no pins, so `pin` shows every tool as a new tool, with only
-   added lines. A diff that was cut at the size limit gives the same stderr warning as in `scan`.
+   without the lock (`pins.CompareMasked` with the mask of the server). It prints the diff of each
+   changed tool and of each new tool on stdout (`report.WriteDiffs`). When the pins file existed at
+   the first read of the command but this read does not find it, the file was removed while the
+   server ran. Then `pin` prints no diff (every tool would look new), saves nothing, prints
+   `pinsRemovedText` and exits with 2 (`pinsRemovedWhileRunning`). A server that is not pinned yet
+   has no pins, so `pin` shows every tool as a new tool, with only added lines. A diff that was cut
+   at the size limit gives the same stderr warning as in `scan`.
 5. With `--expect`, it computes `pins.Digest` of the snapshot and compares it with the flag value
    before `Store.Set` and `Save`. If they differ, it prints
    `mcpmoat pin: the tools of <server> differ from what scan showed (digest ..., expected ...);
@@ -540,26 +545,26 @@ text is raw in the diff, apart from the mask below. The report layer escapes it 
 untrusted text is escaped](#where-untrusted-text-is-escaped)).
 
 Masked diffs: `scan` and `pin` call `pins.CompareMasked(stored, current, mask)`. `pins.Compare` is
-the same call with a nil mask. The mask comes from `cmd/mcpmoat` (`secretMask` in `scan_tools.go`,
-one for each server, built from `inspect.Result.Secrets`), so `internal/pins` needs no list of
-secrets. `newSecretMask` builds one `discover.TextRedactor` for each server: it reads the values
-and builds the border table of the search for each value once, and every string of a pin diff
-reuses them. The search still runs once for each configured value, so a hostile config with very
-many values makes a large diff slower. A multi-pattern search would fix that (a follow-up).
-`render` applies the mask to the decoded text of both sides before the 200-rune wrap, the trim and
-the 64 KiB cut: to the name, the title, the description, and every JSON string value, key and
-number of the annotations, `_meta`, icons and schemas (`maskJSON`). So a wrap or a cut cannot
-leave a part of a value, and a JSON escape in the server text (`\"`, `\u0041`) cannot hide one.
-This holds for how the server writes the value, not for the value itself: the mask compares the
+the same call with a nil mask. The mask comes from `cmd/mcpmoat` (`compareMask` in
+`pins_shared.go`, over one `discover.TextRedactor` for each server, built from
+`inspect.Result.Secrets`), so `internal/pins` needs no list of secrets. `discover.NewTextRedactor`
+reads the values and builds the border table of the search for each value once, and every string of
+a pin diff reuses them. The search still runs once for each configured value, so a hostile config
+with very many values makes a large diff slower. A multi-pattern search would fix that (a
+follow-up). `render` applies the mask to the decoded text of both sides before the 200-rune wrap,
+the trim and the 64 KiB cut: to the name, the title, the description, and every JSON string value,
+key and number of the annotations, `_meta`, icons and schemas (`maskJSON`). So a wrap or a cut
+cannot leave a part of a value, and a JSON escape in the server text (`\"`, `\u0041`) cannot hide
+one. This holds for how the server writes the value, not for the value itself: the mask compares the
 decoded bytes, so a configured value that holds a backslash sequence (the Windows path
 `C:\tools\new_dir` holds `\t` and `\n`) is not found when the server sends a real tab and newline
-there, and the escaped output then shows the value again. `CompareMasked` also masks
-`Change.Tool` and keeps the real name in `Change.RawTool`, which only the ignore lookup reads and
-which is never printed. The verdicts, the hashes, the digest and `pins.json` use the raw text.
-When the hashes differ but the masked texts are equal, the diff is the fixed note `the tool
-changed only in text that holds a secret value from the config, so the diff is hidden`. Limits: a
-value split over two JSON strings, or over the name and the description, is not found, and a value
-that is no longer configured (a rotated token) can still show on the pinned side.
+there, and the escaped output then shows the value again. `CompareMasked` also masks `Change.Tool`
+and keeps the real name in `Change.RawTool`, which only the ignore lookup reads and which is never
+printed. The verdicts, the hashes, the digest and `pins.json` use the raw text. When the hashes
+differ but the masked texts are equal, the diff is the fixed note `the tool changed only in text
+that holds a secret value from the config, so the diff is hidden`. Limits: a value split over two
+JSON strings, or over the name and the description, is not found, and a value that is no longer
+configured (a rotated token) can still show on the pinned side.
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
@@ -889,7 +894,7 @@ do not change the exit code, which counts findings only (FR-16).
 The failure reason of a server in the summary can hold error text from the server. `scan` prints it
 on stdout, and `pin` prints it on stderr. So the known gap of `internal/inspect` applies to stdout
 too: a configured value shorter than 8 bytes is removed from error text only where it stands as a
-whole word (see `replaceWords` in `internal/inspect/errors.go` and "Known limits" in
+whole word (see `replaceWords` in `internal/inspect/scrub_words.go` and "Known limits" in
 `internal/inspect/doc.go`), so a hostile server that glues a letter to the value can still show
 it. `termsafe` makes the text safe for a terminal, but it does not remove a secret.
 
@@ -979,10 +984,10 @@ names the key it is about in `key` (and `related`): the key name only, never its
 terminal table. `ScanReport` has no field for the rest. The `argv` and the `url` are redacted when
 the JSON types are built. A tool name in `key` (tool rule, pin and LLM findings) and the `tool` and
 `diff` of each `diffs` entry show each value of `inspect.Result.Secrets` (8 bytes or more) that the
-server echoes as `********`. `cmd/mcpmoat` masks them before it builds the rows (`secretMask` in
-`scan_tools.go`, and `pins.CompareMasked` for the pin rows and diffs), so the terminal and the JSON
-output get the same text. No field says that a value was masked. A shorter value is not masked. The
-ignore lookup uses the real tool name.
+server echoes as `********`. `cmd/mcpmoat` masks them before it builds the rows (`maskedToolKey`
+in `scan_tools.go`, and `pins.CompareMasked` with `compareMask` for the pin rows and diffs), so the
+terminal and the JSON output get the same text. No field says that a value was masked. A shorter
+value is not masked. The ignore lookup uses the real tool name.
 
 Escaping: names, paths and diffs come from untrusted servers and configs. Valid UTF-8 text stays
 exact, so a JSON parser gets the original back. `encoding/json` writes invalid UTF-8 as U+FFFD.
@@ -1210,76 +1215,53 @@ report, and its subset `Result.Credentials` for the request. So the path is:
 1. On success, `inspect` puts these values in `inspect.Result.Secrets` (`resultSecrets` in
    `internal/inspect/secrets.go`). For a stdio server, `argSecrets` adds the secrets in the
    expanded command and args: the text that `discover.RedactArgs` masks, from
-   `discover.ArgSecrets`, which runs the same code. That is the value of a secret-like flag, the
-   value in `-e NAME=V`, a header line and its credential, an arg masked whole (a DSN,
-   `user:pass`, a token-like value), the secret URL parts and the masked path segments.
-   `ArgSecrets` also returns the smaller parts that a server can echo alone: each value after `=`
-   (or after `:` in JSON-like text) in a masked text, the query values and the password of a URL
-   masked whole (such as a JDBC URL), the bare token in `-p<token>`, `--<token>` and `<token>=1`,
-   and a user name next to a password in a URL when `discover.IsSecretUserName` says so (a
-   token-like name, or 8 bytes or more with a digit). Package names and plain args are not in the
-   list. `RedactArgs` fails closed, so some text that is not secret is in the list too (a long
-   random-looking path segment, a nix hash, a UUID, a name with spaces), and the report masks it
-   in the tool text. The inner values over-match on purpose: they can add a plain word of 8 bytes
-   or more from a masked arg, such as `Negotiate` after a header colon. The limits of `RedactArgs`
-   (such as `--db mypassword` or a positional value) are in its doc comment in `internal/discover`.
-   For the env values, the expanded values and the header values, `valueCredentials` (in
-   `secrets.go`) adds the credential pieces that `discover.ArgCredentials` finds inside each
-   value, such as the password of `postgres://app:pw@db/app`, because a server can echo a piece
-   alone. A piece under 8 bytes goes only to the whole-word scrub list of the failure text. For a
-   `Cookie`, `Set-Cookie` or `Cookie2` header, `cookieSecrets` (in `remote.go`) adds each
-   `name=value` pair and each value. For the URL, `urlCredentials` adds the whole user info and
-   the value inside a `key=value` path segment or a matrix parameter, not only the whole segment.
+   `discover.ArgSecrets`, which runs the same code, and the smaller parts of it that a server can
+   echo alone. For the env values, the expanded values and the header values, `valueCredentials`
+   (in `secrets.go`) adds the credential pieces that `discover.ArgCredentials` finds inside each
+   value. `cookieSecrets` (in `remote.go`) adds the cookie pieces, and `urlCredentials` the URL
+   credentials. A piece under 8 bytes goes only to the whole-word scrub list of the failure text.
    Each value has at least 8 bytes and is in the list one time, longest first. The values are
-   `discover.Secret`, so they print and encode only as the mask.
+   `discover.Secret`, so they print and encode only as the mask. The doc comment of
+   `inspect.Result.Secrets` lists every value and piece, and the doc comment of `RedactArgs` holds
+   its limits (such as `--db mypassword` or a positional value).
 2. `inspect` also puts the values of `Result.Secrets` that look like a credential in
    `inspect.Result.Credentials` (`resultCredentials` in `internal/inspect/secrets.go`), in the
-   same order. A value is a credential when: an env value or an expanded variable has a
-   secret-like name (`discover.IsSecretName`) or a token-like value, or holds a credential that
-   `discover.ArgCredentials` finds (`DATABASE_URL=postgres://app:pw@db/prod`); a header has a
-   secret-like name, a cookie header name, a value `<auth scheme> <credential>` or a token-like
-   value, and then every part of that header counts (`headerCredentials` in
-   `internal/inspect/remote.go`), also each cookie pair and value, even a plain one such as
-   `theme=dark` (fail closed); a URL part is the whole user info or the password, or has a
-   secret-like key or a token-like value (also the value inside a `key=value` path segment); an
-   argv piece is in `discover.ArgCredentials`; a credential piece inside an env, expanded or
-   header value (`valueCredentials`) is a credential too. Plain words such as
-   `NODE_ENV=production`, the plain words of a DSN, `My Documents`, `?workspace=engineering` and
-   `Content-Type: application/json` are not credentials. The check fails closed: a word of 32
-   bytes or more counts as token-like, and an auth-scheme word at the start of a header value
-   (`Token count`) counts as a scheme.
+   same order. `isCredential`, `holdsCredential`, `headerCredentials` and `urlCredentials` decide,
+   with `discover.IsSecretName`, `discover.TokenLike`, `discover.IsAuthScheme` and
+   `discover.ArgCredentials`. The doc comment of `inspect.Result.Credentials` holds the rule for the
+   code, and [What is sent](llm.md) holds it for users. Plain words such as `NODE_ENV=production`
+   are not credentials, and the check fails closed.
 3. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the `Result.Credentials` slice of
    each server into `llm.Input.Secrets` of each tool of that server. So a value of one server is
    removed only from the tools of that server, and a plain config value that the server echoes
-   reaches the provider (issues #229 and #235). Each job also gets the `secretMask` of the wide
-   `Result.Secrets` of its server, for the `key` of its row.
-4. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`discover.MinSecretBytes`) with
-   `discover.Mask` (`********`) in the name and the description, before the cut, so a cut cannot
-   leave a part of a secret. The code is in `internal/discover/redact_text.go`, so that the local
-   report (`secretMask` in `cmd/mcpmoat`) uses the same code without a dependency on the LLM
-   package, and `internal/report` and `internal/pins` cannot import `internal/llm` (the
-   `llm-only-in-cmd` rule of depguard). `internal/llm` and `cmd/mcpmoat` already import
-   `internal/discover`, and `internal/pins` gets only a mask function, so the import table does
-   not change.
-   `discover.SecretTextValues` adds, for a value that is not valid UTF-8, the form
-   that the JSON decoder of the SDK gives (one U+FFFD for each invalid byte), because a server
-   that echoes the value sends that form. `redactWindow` marks every byte of every match first,
-   also of matches that overlap, then writes one mask for each run of marked bytes. The search for
-   each value is a Knuth-Morris-Pratt search, linear in the length of the text and of the value,
-   also for a periodic value (issue #231). To bound the
-   work, `discover.RedactTextPrefix` redacts only a window of the first limit+1 bytes (the limit is
-   `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and doubles it while the masks make the
-   result too short. Its result is always a prefix of the full redaction, so the text and the cut
-   are the same. The message has `redacted: true` when a mask starts in the first limit+1 bytes of
-   the redacted name or description, also when the cut then removes it. The field is omitted
-   otherwise. A secret that starts or ends with `*`, or holds a whole mask, can show again across
-   a mask (a documented limit). The system prompt tells the model that the mask is removed text,
-   not an instruction.
+   reaches the provider (issues #229 and #235). Each job also gets a `discover.TextRedactor` of
+   the wide `Result.Secrets` of its server (`llmJob.redactor`), for the `key` of its row.
+4. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes
+   (`discover.MinSecretBytes`) with `discover.Mask` (`********`) in the name and the description,
+   before the cut, so a cut cannot leave a part of a secret. The code is in
+   `internal/discover/redact_text.go`, so that the local report (`maskedToolKey` and `compareMask`
+   in `cmd/mcpmoat`) uses the same code without a dependency on the LLM package, and
+   `internal/report` and `internal/pins` cannot import `internal/llm` (the `llm-only-in-cmd` rule of
+   depguard). `internal/llm` and `cmd/mcpmoat` already import `internal/discover`, and
+   `internal/pins` gets only a mask function, so the import table does not change.
+   `discover.SecretTextValues` adds, for a value that is not valid UTF-8, the form that the JSON
+   decoder of the SDK gives (one U+FFFD for each invalid byte), because a server that echoes the
+   value sends that form. `redactWindow` marks every byte of every match first, also of matches that
+   overlap, then writes one mask for each run of marked bytes. The search for each value is a
+   Knuth-Morris-Pratt search, linear in the length of the text and of the value, also for a periodic
+   value (issue #231). To bound the work, `discover.RedactTextPrefix` redacts only a window of the
+   first limit+1 bytes (the limit is `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and
+   doubles it while the masks make the result too short. Its result is always a prefix of the full
+   redaction, so the text and the cut are the same. The message has `redacted: true` when a mask
+   starts in the first limit+1 bytes of the redacted name or description, also when the cut then
+   removes it. The field is omitted otherwise. A secret that starts or ends with `*`, or holds a
+   whole mask, can show again across a mask (a documented limit). The system prompt tells the model
+   that the mask is removed text, not an instruction.
 
 The report and the JSON output mask the wide `Result.Secrets` in the tool names and the pin diffs
 (see Redaction in [JSON output](#json-output)). The `key` of an LLM row also uses that mask
-(`llmJob.mask`), not `llm.Input.RedactedName`, because the request hides fewer values than the
-report must. docs/llm.md lists the limits of the replacement.
+(`llmJob.redactor`), because the request hides fewer values than the report must. docs/llm.md
+lists the limits of the replacement.
 
 The cuts are made at a rune boundary: `llm.MaxToolNameBytes`, `llm.MaxDescriptionBytes` and, for
 the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
@@ -1308,14 +1290,15 @@ builders in `cmd/mcpmoat/scan_llm_rows.go`:
   and a hostile config can choose which text mcpmoat removes (through a value under a secret-like
   key; a phrase under a plain key is not removed, so the model reads it). docs/llm.md owns the
   rule that the user sees: see [`--llm`](llm.md).
-- An answer that cannot be used for a tool that was not cut and had no credential removed gives `MOAT-LLM-002` (medium). That is
-  an invalid answer, a refusal of the model or an answer cut at the token limit
-  (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider refused
-  (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
+- An answer that cannot be used for a tool that was not cut and had no credential removed gives
+  `MOAT-LLM-002` (medium). That is an invalid answer, a refusal of the model or an answer cut at the
+  token limit (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider
+  refused (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
   `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so an unrated tool (cut or
-  redacted) gets the floor row in both cases. Only these two errors give this finding. So a
-  hostile server that makes the provider refuse its own tool description, or makes the answer
-  unusable, keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule findings still apply.
+  redacted) gets the floor row in both cases. Only these two errors give this finding. So a hostile
+  server that makes the provider refuse its own tool description, or makes the answer unusable,
+  keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule
+  findings still apply.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 

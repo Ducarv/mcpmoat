@@ -77,12 +77,10 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   the provider refuse its tool descriptions can keep their LLM rating from reaching `high`. When
   the provider refuses every tool that it answers, the LLM step fails and the scan exits with 2.
 - The report on the terminal and the `--json` output show each configured value that a server
-  echoes in its tool text as `********`: the env values, the header values and the secrets in the
-  args (see [Scan output](scan-output.md)). It also masks the credential pieces inside these
-  values, so a server that echoes one piece alone does not show it: the password of
-  `postgres://app:pw@db/app`, each `name=value` pair and each value of a `Cookie` or `Set-Cookie`
-  header, the user info of a URL, and the value inside a `key=value` path segment or a matrix
-  parameter (`;token=x`). This mask has limits:
+  echoes in its tool text as `********`: the env values, the header values, the expanded
+  placeholder values, the secrets in the args and the secret URL parts, and the credential pieces
+  inside them, such as one cookie (see [Scan output](scan-output.md), and
+  [What is sent](llm.md) for the pieces). This mask has limits:
   - A value shorter than 8 bytes is not masked.
   - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
     masked.
@@ -93,6 +91,10 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
     quoted tool name then shows those characters as escapes, so the value can show again.
   - A value that a server splits over two JSON strings (for example a key and its value) or over
     the tool name and the description is not found.
+  - The password of the Oracle form `scott/pw@orcl` in an env value, an expanded value or a header
+    value is not masked alone. Only the whole value is.
+  - The decoded text `name:password` of a `Basic` header value is not masked as a whole. Only the
+    password (8 bytes or more) and the base64 forms are, so the name can show.
   - The mask uses the values that are configured now. A value that is no longer configured (for
     example a rotated token) can still show on the pinned side of a pin diff.
   - A secret that starts or ends with `*`, or holds a whole `********`, can show again across a
@@ -105,7 +107,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   - A plain config value that a server echoes reaches the provider, for example the env value
     `production` of `NODE_ENV`, or a password under a key that does not look secret.
   - A secret in an arg that mcpmoat does not recognise is not removed, for example
-    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`.
+    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`. The password
+    of a positional `admin:pw` or `scott/pw@orcl` is removed only when the whole value looks like
+    a token.
   - The check fails closed, so some text that is not secret is removed too: a word of 32 bytes or
     more (also a readable path segment), a UUID, or a header value that starts with an auth scheme
     word, such as `Token count`.
@@ -115,18 +119,13 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
     `high`, so the default `--fail-on high` does not fail on it. A phrase under a key that does
     not look secret is not removed, so the model reads it. The rule findings still read the full
     text.
-- When a server fails, mcpmoat removes the configured values from the failure text (the reason in
-  the summary, the `pin` error and the stderr warning of `--json`). The credential pieces inside
-  the values (such as the password of a connection URL or one cookie value) are removed too. A
-  value of 8 bytes or more and a header value are removed wherever they stand. A shorter value or
-  piece is removed only as a whole word
-  (see [Placeholders](stdio-servers.md#placeholders)). This stops an accidental echo only:
-  - A hostile server can glue a letter to the value (`1234x`) or split it (`1_2_3_4`), and then
-    the value shows.
-  - A common word that is also a configured value is masked. With a configured value `1`,
-    `exit status 1` shows as `exit status ********`. Words such as `unknown` or `2.0` from JSON or
-    `key=value` args can be masked too, because the arg check finds more text than the secrets on
-    purpose.
+- When a server fails, mcpmoat removes the configured values and their credential pieces from the
+  failure text. A value or piece shorter than 8 bytes is removed only where it stands as a whole
+  word (see [Placeholders](stdio-servers.md#placeholders)). The limits:
+  - A hostile server can glue a letter to a short value (`1234x`) or split it (`1_2_3_4`), and
+    then the value shows.
+  - A common word that is also a short configured value is masked too (with the value `1`,
+    `exit status 1` shows as `exit status ********`).
 - When you give a wrong argument, every command hides the user info of each URL in the error text
   (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
   `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors
