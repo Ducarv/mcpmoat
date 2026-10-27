@@ -538,9 +538,7 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 			assertContainsNone(t, "stdout", stdout, []string{bodyCanary, pinEnvCanary})
 			assertContainsNone(t, "stderr", stderr, []string{bodyCanary, pinEnvCanary})
 			if tt.args == nil {
-				if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{server}) {
-					t.Errorf("server names = %v, want [%s]\nstdout:\n%s", got, server, stdout)
-				}
+				assertServerNames(t, stdout, server)
 			} else {
 				doc := decodeScanJSON(t, stdout)
 				if doc.Complete {

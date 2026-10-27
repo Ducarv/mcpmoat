@@ -154,10 +154,7 @@ func TestE2EScanAllClients(t *testing.T) {
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
-	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
-		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
-	}
+	assertServerNames(t, stdout, "cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global")
 }
 
 // TestE2EScanServerState runs the real binary and checks the STATE column for
@@ -195,10 +192,7 @@ func TestE2EScanPartialFailure(t *testing.T) {
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitError})
-	want := []string{"cc-project", "cursor-global", "cursor-project", "codex-global"}
-	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
-		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
-	}
+	assertServerNames(t, stdout, "cc-project", "cursor-global", "cursor-project", "codex-global")
 
 	assertPartialFailureStderr(t, stderr)
 }
@@ -220,9 +214,7 @@ func TestE2EScanUntrustedProjectFile(t *testing.T) {
 		code:   exitError,
 		stderr: []string{".mcp.json: file is outside the project", configErrorHint},
 	})
-	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
-		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
-	}
+	assertServerNames(t, stdout, "global-srv")
 }
 
 func TestE2EScanEmpty(t *testing.T) {
@@ -798,10 +790,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		if strings.Contains(stderr, "onlytool") {
 			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)
 		}
-		want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
-		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
-			t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
-		}
+		assertServerNames(t, stdout, "cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global")
 		assertNoLeakBoth(t, stdout, stderr)
 		assertNoEscape(t, stdout, stderr)
 	})

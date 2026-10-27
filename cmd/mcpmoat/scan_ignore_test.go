@@ -360,9 +360,7 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, out, errOut)
 				}
 				// The server table never changes: both servers stay in it.
-				if got := column(tableRows(t, out), 0); !slices.Equal(got, []string{"leaky-a", "leaky-b"}) {
-					t.Errorf("table servers = %v, want both\nstdout:\n%s", got, out)
-				}
+				assertServerNames(t, out, "leaky-a", "leaky-b")
 				rows := findingRows(t, out)
 				var gotServers []string
 				for _, row := range rows {
