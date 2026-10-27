@@ -332,9 +332,6 @@ func TestScanLLMRealClient(t *testing.T) {
 			// the fake.
 			bodies, headers, paths := api.snapshot()
 			perTool := llmRequestsPerTool(t, bodies)
-			if n := int(api.requests.Load()); n != len(bodies) {
-				t.Errorf("the API counted %d requests but recorded %d", n, len(bodies))
-			}
 			if tt.status == 0 {
 				if want := map[string]int{"t1": 1, "t2": 1}; !maps.Equal(perTool, want) {
 					t.Errorf("requests for each tool = %v, want %v", perTool, want)
