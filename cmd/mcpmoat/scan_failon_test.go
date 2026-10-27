@@ -213,10 +213,12 @@ func TestScanFailOnIgnored(t *testing.T) {
 				t.Parallel()
 				servers := failOnMixedServers()
 				e := newPinEnv(t, servers)
+				args := append(slices.Clone(mode.args), "--fail-on", "low")
 				if tt.file != "" {
 					writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
+					// scan reads the file only with --use-ignore-file.
+					args = append(args, useIgnoreFileFlag)
 				}
-				args := append(slices.Clone(mode.args), "--fail-on", "low")
 				args = append(args, tt.flags...)
 
 				got := e.scan(failOnFake(servers), args...)

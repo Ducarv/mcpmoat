@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,13 +19,30 @@ import (
 // notice and the warnings for the file, and the effect of the ignore list on
 // the findings block and on the exit code (TestScanIgnoreDropsFindings). An
 // ignore entry for a rule that the config does not trigger changes nothing.
+//
+// scan reads .mcpmoat-ignore only with --use-ignore-file (issues #138, #172,
+// #208). The tests that expect the file to be read give that flag. Without the
+// flag scan never opens the file and only prints ignoreNoteLine when the file
+// is there (TestScanIgnoreFileOptIn, TestScanIgnoreFileNote).
 
 // ignoreUsageMsg is the end of the flag error for a bad --ignore value. The
 // flag package writes it as `invalid value "<v>" for flag -ignore: <msg>`.
 const ignoreUsageMsg = "for flag -ignore: --ignore needs a rule ID"
 
-// ignoreCwdWarning is the warning of --config mode when getwd fails.
+// ignoreCwdWarning is the warning of --config mode with --use-ignore-file when
+// getwd fails.
 const ignoreCwdWarning = "mcpmoat scan: warning: cannot read the working directory; .mcpmoat-ignore is not read"
+
+// useIgnoreFileFlag is the flag that makes scan read .mcpmoat-ignore. The
+// tests of this package use it as a scan argument.
+const useIgnoreFileFlag = "--use-ignore-file"
+
+// ignoreNoteLine is the stderr line of scan without --use-ignore-file when the
+// working directory holds an entry named .mcpmoat-ignore. The tests keep their
+// own copy of the text (not ignoreFileNote of scan.go), so a change of the text
+// in scan.go fails the tests. Every test of this package that checks the note
+// uses this constant.
+const ignoreNoteLine = "mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it"
 
 // ignoreMarker is a marker inside the bad lines of the ignore files of these
 // tests. stderr must never contain it.
@@ -226,7 +245,8 @@ func TestScanIgnoreFlag(t *testing.T) {
 // findings from stdout and, when no finding of severity high or above is left,
 // turn exit code 1 into exit code 0. Both servers hold a plaintext secret in
 // an env entry, so each has one MOAT-T4-002 finding (high). Every case runs in
-// auto-discovery and with --config.
+// auto-discovery and with --config, and with --use-ignore-file, so scan reads
+// the file when there is one.
 func TestScanIgnoreDropsFindings(t *testing.T) {
 	t.Parallel()
 
@@ -351,6 +371,7 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 				if tt.file != "" {
 					writeTestFile(t, work, rules.IgnoreFileName, tt.file)
 				}
+				args = append(args, useIgnoreFileFlag)
 				args = append(args, tt.flags...)
 				c, stdout, stderr := dirsCLI(t, home, work)
 
@@ -414,11 +435,13 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 	}
 }
 
-// TestScanIgnoreHiddenHighFinding is the security case of FR-10: a project
-// .mcpmoat-ignore file in the scanned folder (which can be untrusted) hides a
-// high finding. The exit code stays 0, so the file does change the verdict.
-// Then scan must not be silent about it: the ignored line is on stderr. The
-// line names only the rule ID and a count, never a server name or a key.
+// TestScanIgnoreHiddenHighFinding is the security case of FR-10: with
+// --use-ignore-file, a project .mcpmoat-ignore file in the scanned folder
+// (which can be untrusted) hides a high finding. The exit code stays 0, so the
+// file does change the verdict. Then scan must not be silent about it: the
+// ignored line is on stderr. The line names only the rule ID and a count,
+// never a server name or a key. TestScanIgnoreFileOptIn checks that the file
+// hides nothing without the flag.
 func TestScanIgnoreHiddenHighFinding(t *testing.T) {
 	t.Parallel()
 
@@ -437,7 +460,7 @@ func TestScanIgnoreHiddenHighFinding(t *testing.T) {
 			t.Parallel()
 
 			home, work := t.TempDir(), t.TempDir()
-			args := scanServersArgs(t, mode, home, servers)
+			args := append(scanServersArgs(t, mode, home, servers), useIgnoreFileFlag)
 
 			// Control run: without the file the high finding fails the scan.
 			c, stdout, stderr := dirsCLI(t, home, work)
@@ -475,10 +498,10 @@ func TestScanIgnoreHiddenHighFinding(t *testing.T) {
 }
 
 // TestScanIgnoreFile checks the .mcpmoat-ignore file in the working directory
-// in auto-discovery mode. Valid entries give one notice with their number. A
-// malformed line or a file that scan cannot read gives a warning. The exit
-// code and stdout stay the same as without the file, and no warning shows
-// file content.
+// in auto-discovery mode, with --use-ignore-file. Valid entries give one
+// notice with their number. A malformed line or a file that scan cannot read
+// gives a warning. The exit code and stdout stay the same as without the file,
+// and no warning shows file content.
 func TestScanIgnoreFile(t *testing.T) {
 	t.Parallel()
 
@@ -647,7 +670,7 @@ func TestScanIgnoreFile(t *testing.T) {
 
 			// The baseline: the same home and an empty work dir.
 			base, baseOut, baseErr := dirsCLI(t, home, t.TempDir())
-			baseCode, wantOut, _ := runScanArgs(base, baseOut, baseErr, "scan", "--no-connect")
+			baseCode, wantOut, _ := runScanArgs(base, baseOut, baseErr, "scan", "--no-connect", useIgnoreFileFlag)
 			if baseCode != exitOK {
 				t.Fatalf("baseline exit code = %d, want %d\nstderr:\n%s", baseCode, exitOK, baseErr)
 			}
@@ -656,7 +679,7 @@ func TestScanIgnoreFile(t *testing.T) {
 			tt.setup(t, work)
 			c, stdout, stderr := dirsCLI(t, home, work)
 
-			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect")
+			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", useIgnoreFileFlag)
 
 			if code != exitOK {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, out, errOut)
@@ -686,7 +709,7 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 	writeTestFile(t, work, rules.IgnoreFileName, strings.Repeat(ignoreMarker+"/bad\n", bad)+"MOAT-T1-003\n")
 	c, stdout, stderr := dirsCLI(t, home, work)
 
-	code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect")
+	code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", useIgnoreFileFlag)
 
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
@@ -726,7 +749,7 @@ func TestScanIgnoreFileNoticeCountsOnlyFileEntries(t *testing.T) {
 	c, stdout, stderr := dirsCLI(t, home, work)
 
 	code, out, errOut := runScanArgs(c, stdout, stderr,
-		"scan", "--no-connect", "--ignore", "MOAT-T2-001", "--ignore", "MOAT-T3-001")
+		"scan", "--no-connect", useIgnoreFileFlag, "--ignore", "MOAT-T2-001", "--ignore", "MOAT-T3-001")
 
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
@@ -749,7 +772,7 @@ func TestScanIgnoreFileDoesNotChangeErrorExit(t *testing.T) {
 	writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\nMOAT-T1-004\n")
 	c, stdout, stderr := dirsCLI(t, home, work)
 
-	code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--ignore", "MOAT-T2-001")
+	code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", useIgnoreFileFlag, "--ignore", "MOAT-T2-001")
 
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, out, errOut)
@@ -763,9 +786,9 @@ func TestScanIgnoreFileDoesNotChangeErrorExit(t *testing.T) {
 	assertNoEscape(t, out, errOut)
 }
 
-// TestScanIgnoreFileConfigMode checks that --config mode also reads
-// .mcpmoat-ignore from the working directory, also when the config file is
-// in another directory.
+// TestScanIgnoreFileConfigMode checks that --config mode with
+// --use-ignore-file also reads .mcpmoat-ignore from the working directory,
+// also when the config file is in another directory.
 func TestScanIgnoreFileConfigMode(t *testing.T) {
 	t.Parallel()
 
@@ -815,7 +838,7 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			writeTestFile(t, work, rules.IgnoreFileName, tt.ignore)
 			c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
 
-			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config)
+			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config, useIgnoreFileFlag)
 
 			if code != exitOK {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
@@ -829,8 +852,9 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 }
 
 // TestScanIgnoreConfigModeWithoutWorkDir checks --config mode when getwd
-// fails: scan prints one warning, reads no ignore file and goes on. The exit
-// code is the same as without the warning.
+// fails. With --use-ignore-file scan prints one warning, reads no ignore file
+// and goes on. Without the flag scan does not look for the file, so it prints
+// no warning and no note. The exit code is the same as without the warning.
 func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 	t.Parallel()
 
@@ -844,6 +868,7 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 	}{
 		{
 			name:     "valid config",
+			extra:    []string{useIgnoreFileFlag},
 			wantCode: exitOK,
 			wantLines: []lineWant{
 				exactLine(ignoreCwdWarning),
@@ -851,7 +876,7 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 		},
 		{
 			name:     "valid config with --ignore",
-			extra:    []string{"--ignore", "MOAT-T1-003"},
+			extra:    []string{useIgnoreFileFlag, "--ignore", "MOAT-T1-003"},
 			wantCode: exitOK,
 			wantLines: []lineWant{
 				exactLine(ignoreCwdWarning),
@@ -860,9 +885,29 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 		{
 			name:     "missing config file",
 			missing:  true,
+			extra:    []string{useIgnoreFileFlag},
 			wantCode: exitError,
 			wantLines: []lineWant{
 				exactLine(ignoreCwdWarning),
+				prefixLine("mcpmoat scan: "),
+			},
+		},
+
+		// Without --use-ignore-file: no warning and no note.
+		{
+			name:     "valid config without the flag",
+			wantCode: exitOK,
+		},
+		{
+			name:     "valid config with --ignore without the flag",
+			extra:    []string{"--ignore", "MOAT-T1-003"},
+			wantCode: exitOK,
+		},
+		{
+			name:     "missing config file without the flag",
+			missing:  true,
+			wantCode: exitError,
+			wantLines: []lineWant{
 				prefixLine("mcpmoat scan: "),
 			},
 		},
@@ -892,17 +937,23 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 				assertContainsAll(t, "stdout", out, []string{"ok-srv"})
 			}
 			assertStderrLines(t, errOut, tt.wantLines)
+			if !slices.Contains(tt.extra, useIgnoreFileFlag) {
+				assertContainsNone(t, "stderr", errOut, []string{".mcpmoat-ignore", "working directory"})
+			}
 			assertNoEscape(t, out, errOut)
 		})
 	}
 }
 
 // TestScanIgnoreHelp checks that "scan -h" and "mcpmoat help" describe the
-// --ignore flag and the .mcpmoat-ignore file.
+// --ignore flag, the --use-ignore-file flag and the .mcpmoat-ignore file.
 func TestScanIgnoreHelp(t *testing.T) {
 	t.Parallel()
 
-	wants := []string{"--ignore <rule-id>", "repeatable", ".mcpmoat-ignore"}
+	wants := []string{
+		"--ignore <rule-id>", "repeatable", ".mcpmoat-ignore",
+		useIgnoreFileFlag, "Off by default", "Without this flag scan does not read the file",
+	}
 
 	for _, args := range [][]string{{"scan", "-h"}, {"help"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -920,5 +971,331 @@ func TestScanIgnoreHelp(t *testing.T) {
 				t.Errorf("stderr = %q, want empty", errOut)
 			}
 		})
+	}
+}
+
+// TestScanIgnoreFileOptIn checks that scan applies .mcpmoat-ignore only with
+// --use-ignore-file (issues #138, #172, #208). It runs every combination of:
+//   - the config mode: auto-discovery, or --config on the project .mcp.json;
+//   - a .mcpmoat-ignore file that lists MOAT-T4-002, or no file;
+//   - --use-ignore-file, or not;
+//   - --ignore MOAT-T4-002, or not.
+//
+// The working directory is a cloned project: its .mcp.json has proj-leak, a
+// server with a plaintext secret in env (MOAT-T4-002, high). The fake home has
+// global-leak in ~/.claude.json with the same finding. Auto-discovery scans
+// both. --config scans only the project file.
+//
+// This is #138: without the flag, the project file must not hide the findings
+// of the project or of the global server. Both findings stay, scan exits with
+// 1, stderr has only the note, and the JSON "ignored" object counts nothing.
+// If scan read the file without the flag again (for example if scanConfigs
+// called loadIgnore with true), the cases "file/no flag" would get exit code
+// 0, no findings, the "using 1 entry" line and file_entries 1, and they fail.
+// If scan did not print the note, the same cases fail on the stderr lines.
+func TestScanIgnoreFileOptIn(t *testing.T) {
+	t.Parallel()
+
+	const rule = "MOAT-T4-002"
+	leaky := func() map[string]any {
+		return map[string]any{"command": "run", "env": map[string]string{"API_KEY": discovertest.CanaryEnv}}
+	}
+
+	type optInCase struct {
+		mode       string // "auto" or "config"
+		file       bool   // the work dir holds .mcpmoat-ignore
+		useFile    bool   // --use-ignore-file
+		ignoreFlag bool   // --ignore MOAT-T4-002
+	}
+	var tests []optInCase
+	for _, mode := range configModes {
+		for _, file := range []bool{false, true} {
+			for _, useFile := range []bool{false, true} {
+				for _, ignoreFlag := range []bool{false, true} {
+					tests = append(tests, optInCase{mode: mode, file: file, useFile: useFile, ignoreFlag: ignoreFlag})
+				}
+			}
+		}
+	}
+	onOff := func(on bool, yes, no string) string {
+		if on {
+			return yes
+		}
+		return no
+	}
+
+	for _, tt := range tests {
+		name := tt.mode + "/" + onOff(tt.file, "file", "no file") + "/" +
+			onOff(tt.useFile, "with flag", "no flag") + "/" + onOff(tt.ignoreFlag, "with --ignore", "no --ignore")
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			home, work := t.TempDir(), t.TempDir()
+			writeServers(t, home, ".claude.json", map[string]any{"global-leak": leaky()})
+			project := writeServers(t, work, ".mcp.json", map[string]any{"proj-leak": leaky()})
+			if tt.file {
+				writeTestFile(t, work, rules.IgnoreFileName, rule+"\n")
+			}
+
+			args := []string{"scan", "--no-connect"}
+			// allServers are the servers that scan sees, sorted.
+			allServers := []string{"global-leak", "proj-leak"}
+			if tt.mode == "config" {
+				args = append(args, "--config", project)
+				allServers = []string{"proj-leak"}
+			}
+			if tt.useFile {
+				args = append(args, useIgnoreFileFlag)
+			}
+			if tt.ignoreFlag {
+				args = append(args, "--ignore", rule)
+			}
+
+			// The expected result. The file applies only with the flag.
+			applied := tt.file && tt.useFile
+			dropped := applied || tt.ignoreFlag
+			wantServers := allServers
+			wantCode := exitFindings
+			wantTotal := 0
+			if dropped {
+				wantServers = nil
+				wantCode = exitOK
+				wantTotal = len(allServers)
+			}
+			wantEntries := 0
+			var wantLines []lineWant
+			if tt.file && !tt.useFile {
+				wantLines = append(wantLines, exactLine(ignoreNoteLine))
+			}
+			if applied {
+				wantEntries = 1
+				wantLines = append(wantLines, exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"))
+			}
+			if dropped {
+				n := len(allServers)
+				wantLines = append(wantLines, exactLine("mcpmoat scan: "+strconv.Itoa(n)+" "+
+					plural(n, "finding", "findings")+" ignored: "+rule+" ("+strconv.Itoa(n)+")"))
+			}
+
+			c, stdout, stderr := dirsCLI(t, home, work)
+			code, out, errOut := runScanArgs(c, stdout, stderr, args...)
+
+			if code != wantCode {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, wantCode, out, errOut)
+			}
+			// The server table never changes.
+			assertServerNames(t, out, allServers...)
+			var gotServers []string
+			for _, row := range findingRows(t, out) {
+				if row[0] == rule {
+					gotServers = append(gotServers, row[2])
+				}
+			}
+			slices.Sort(gotServers)
+			if !slices.Equal(gotServers, wantServers) {
+				t.Errorf("%s findings for servers %v, want %v\nstdout:\n%s", rule, gotServers, wantServers, out)
+			}
+			assertStderrLines(t, errOut, wantLines)
+			if !applied {
+				assertContainsNone(t, "stderr", errOut, []string{"from .mcpmoat-ignore", "cannot read the working directory"})
+			}
+			assertNoLeakBoth(t, out, errOut)
+			assertNoEscape(t, out, errOut)
+
+			// The same scan with --json: the same exit code and stderr, and an
+			// "ignored" object that counts the dropped findings and the file
+			// entries that scan used.
+			jc, jStdout, jStderr := dirsCLI(t, home, work)
+			jCode, jOut, jErrOut := runScanArgs(jc, jStdout, jStderr, append(slices.Clone(args), "--json")...)
+
+			if jCode != wantCode {
+				t.Errorf("--json exit code = %d, want %d\nstderr:\n%s", jCode, wantCode, jErrOut)
+			}
+			if jErrOut != errOut {
+				t.Errorf("--json stderr differs from the terminal run\n--- terminal ---\n%s--- json ---\n%s", errOut, jErrOut)
+			}
+			doc := decodeScanJSON(t, jOut)
+			if doc.Ignored.FileEntries != wantEntries {
+				t.Errorf("ignored.file_entries = %d, want %d", doc.Ignored.FileEntries, wantEntries)
+			}
+			if doc.Ignored.Total != wantTotal {
+				t.Errorf("ignored.total = %d, want %d", doc.Ignored.Total, wantTotal)
+			}
+			if got := doc.Ignored.Rules[rule]; got != wantTotal {
+				t.Errorf("ignored.rules[%s] = %d, want %d", rule, got, wantTotal)
+			}
+			jFindings := 0
+			for _, f := range doc.Findings {
+				if f.RuleID == rule {
+					jFindings++
+				}
+			}
+			if jFindings != len(wantServers) {
+				t.Errorf("--json has %d %s findings, want %d\nstdout:\n%s", jFindings, rule, len(wantServers), jOut)
+			}
+			assertIgnoredMatchesStderr(t, doc, jErrOut)
+			assertNoLeakBoth(t, jOut, jErrOut)
+		})
+	}
+}
+
+// TestScanIgnoreFileNote checks the note of scan without --use-ignore-file. An
+// entry named .mcpmoat-ignore of any type in the working directory gives the
+// note and nothing else: scan does not open the file, so a bad line, a
+// directory, a symlink or a named pipe gives no warning. stdout and the exit
+// code are the same as with an empty working directory. No entry gives no
+// note.
+//
+// The named pipe has no writer, so a plain blocking open of it would wait for
+// ever. The case ends, so scan does no such open. If scan read the file
+// without the flag (rules.ReadIgnoreFile does not block on a pipe), the cases
+// would get the "using N entries" line or a warning, and assertStderrLines
+// fails. A check with scanConfigs changed to read the file always, and one
+// with no note, made these cases and the "file/no flag" cases of
+// TestScanIgnoreFileOptIn fail.
+func TestScanIgnoreFileNote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// setup creates the ignore file (or something else with its name)
+		// in the work dir.
+		setup    func(t *testing.T, work string)
+		wantNote bool
+	}{
+		{
+			name:  "no file",
+			setup: func(*testing.T, string) {},
+		},
+		{
+			name: "other file names only",
+			setup: func(t *testing.T, work string) {
+				writeTestFile(t, work, ".mcpmoat-ignore.bak", "MOAT-T1-003\n")
+				writeTestFile(t, work, "mcpmoat-ignore", "MOAT-T1-003\n")
+			},
+		},
+		{
+			name: "file with entries and bad lines",
+			setup: func(t *testing.T, work string) {
+				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n"+ignoreMarker+"/bad\n")
+			},
+			wantNote: true,
+		},
+		{
+			name: "empty file",
+			setup: func(t *testing.T, work string) {
+				writeTestFile(t, work, rules.IgnoreFileName, "")
+			},
+			wantNote: true,
+		},
+		{
+			name: "file larger than 1 MiB",
+			setup: func(t *testing.T, work string) {
+				writeTestFile(t, work, rules.IgnoreFileName, ignoreFileOfSize(rules.MaxIgnoreFileBytes+1))
+			},
+			wantNote: true,
+		},
+		{
+			name: "file that nobody can read",
+			setup: func(t *testing.T, work string) {
+				path := writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n")
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				// Give the mode back, so the clean-up of t.TempDir can remove
+				// the file on every OS.
+				t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+			},
+			wantNote: true,
+		},
+		{
+			name: "directory with the file name",
+			setup: func(t *testing.T, work string) {
+				if err := os.Mkdir(filepath.Join(work, rules.IgnoreFileName), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantNote: true,
+		},
+		{
+			name: "symlink to a file outside the working directory",
+			setup: func(t *testing.T, work string) {
+				target := writeTestFile(t, t.TempDir(), "outside-ignore", "MOAT-T1-003\n"+ignoreMarker+"/bad\n")
+				symlink(t, target, filepath.Join(work, rules.IgnoreFileName))
+			},
+			wantNote: true,
+		},
+		{
+			// Lstat does not follow the link, so a dangling link is there too.
+			name: "symlink to nothing",
+			setup: func(t *testing.T, work string) {
+				symlink(t, filepath.Join(t.TempDir(), "missing"), filepath.Join(work, rules.IgnoreFileName))
+			},
+			wantNote: true,
+		},
+		{
+			name: "named pipe",
+			setup: func(t *testing.T, work string) {
+				ignoreFIFO(t, filepath.Join(work, rules.IgnoreFileName))
+			},
+			wantNote: true,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, mode := range configModes {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+
+				home := t.TempDir()
+				args := scanServersArgs(t, mode, home, okServer)
+
+				// The baseline: the same scan with an empty work dir.
+				base, baseOut, baseErr := dirsCLI(t, home, t.TempDir())
+				baseCode, wantOut, baseErrOut := runScanArgs(base, baseOut, baseErr, args...)
+				if baseCode != exitOK {
+					t.Fatalf("baseline exit code = %d, want %d\nstderr:\n%s", baseCode, exitOK, baseErrOut)
+				}
+				assertCleanStderr(t, baseErrOut)
+
+				work := t.TempDir()
+				tt.setup(t, work)
+				c, stdout, stderr := dirsCLI(t, home, work)
+
+				code, out, errOut := runScanArgs(c, stdout, stderr, args...)
+
+				if code != exitOK {
+					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, out, errOut)
+				}
+				if out != wantOut {
+					t.Errorf("the ignore file changes stdout\n--- without ---\n%s--- with ---\n%s", wantOut, out)
+				}
+				var wantLines []lineWant
+				if tt.wantNote {
+					wantLines = []lineWant{exactLine(ignoreNoteLine)}
+				}
+				assertStderrLines(t, errOut, wantLines)
+				assertNoIgnoreContent(t, errOut)
+				assertNoEscape(t, out, errOut)
+			})
+		}
+	}
+}
+
+// ignoreFIFO creates a named pipe at path, or skips the test if it cannot.
+// Windows has no named pipes in the file system, so the test skips there.
+func ignoreFIFO(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no named pipes in the file system on Windows")
+	}
+	// The mkfifo program is used because syscall.Mkfifo does not exist on
+	// every OS, and a call to it would stop the package from compiling there.
+	mkfifo, err := exec.LookPath("mkfifo")
+	if err != nil {
+		t.Skip("mkfifo not available")
+	}
+	if out, err := exec.CommandContext(t.Context(), mkfifo, path).CombinedOutput(); err != nil { //nolint:gosec // G204: mkfifo is found by LookPath, path is under t.TempDir()
+		t.Skipf("mkfifo failed: %v: %s", err, out)
 	}
 }

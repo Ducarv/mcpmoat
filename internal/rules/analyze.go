@@ -151,6 +151,12 @@ func checkTarget(ctx context.Context, rs []analyzerRule, target Target, text str
 	if len(rs) == 0 {
 		return out, nil
 	}
+	// prepareText cannot stop in the middle (issue #146), so check ctx
+	// before it. A target that starts after ctx ended then costs nothing.
+	// The error names the first rule, like the check in the loop does.
+	if err := ctx.Err(); err != nil {
+		return out, fmt.Errorf("check rule %q: %w", rs[0].id, err)
+	}
 	p := prepareText(text)
 	for _, r := range rs {
 		if err := ctx.Err(); err != nil {

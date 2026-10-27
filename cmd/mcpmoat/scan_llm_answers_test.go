@@ -460,10 +460,13 @@ func TestScanLLMNoToolName(t *testing.T) {
 		t.Run("ignore/"+tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := llmEnv(t, tools)
+			args := append([]string{"--llm", "--json"}, tt.args...)
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ignoreFile)
+				// scan reads the file only with --use-ignore-file.
+				args = append(args, useIgnoreFileFlag)
 			}
-			r := llmScan(t, e, tools, &llmFake{}, append([]string{"--llm", "--json"}, tt.args...)...)
+			r := llmScan(t, e, tools, &llmFake{}, args...)
 
 			if r.code != exitFindings {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
