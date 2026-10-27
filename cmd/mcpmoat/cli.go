@@ -315,7 +315,7 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
 	fprintf(w, "  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n")
-	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n")
+	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut or a configured value was removed from it), and the scan goes on.\n")
 	fprintf(w, "  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools)
 	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
 	fprintf(w, "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries)

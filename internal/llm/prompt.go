@@ -273,15 +273,14 @@ func cutUTF8(s string, limit int) (string, bool) {
 	return s[:limit], true
 }
 
-// secretValues returns the values that redactPrefix must remove for
-// secrets: each secret value of at least discover.MinSecretBytes bytes and, for a
-// value that is not valid UTF-8, also its decoded form (see
-// decodedPerByte). It skips shorter values (see discover.MinSecretBytes) and a value
-// that is in the result already. The minimum applies to the raw configured
-// value, so a raw value shorter than discover.MinSecretBytes gives no decoded form
-// either, even when that form is longer. The result holds secret values:
-// pass it only to redactPrefix or redactWindow, never to fmt, a logger, an
-// error or an encoder.
+// secretValues returns the values that redactPrefix must remove for secrets:
+// each secret value of at least discover.MinSecretBytes bytes and, for a value
+// that is not valid UTF-8, also its decoded form (see decodedPerByte). It skips
+// shorter values (see discover.MinSecretBytes) and a value that is in the
+// result already. The minimum applies to the raw configured value, so a raw
+// value shorter than discover.MinSecretBytes gives no decoded form either, even
+// when that form is longer. The result holds secret values: pass it only to
+// redactPrefix or redactWindow, never to fmt, a logger, an error or an encoder.
 //
 // The decoded form is necessary because a value from the OS environment can
 // hold bytes that are not valid UTF-8. A server sends its tool text as JSON.
@@ -399,8 +398,8 @@ func redactPrefix(s string, values []string, limit int) (string, bool) {
 // values. This is accepted: the window is bounded (see redactPrefix).
 //
 // The values must not be empty (secretValues gives only values of at least
-// discover.MinSecretBytes bytes). An empty value is skipped: strings.Index finds it
-// at every byte, and it marks nothing.
+// discover.MinSecretBytes bytes). An empty value is skipped: strings.Index
+// finds it at every byte, and it marks nothing.
 func redactWindow(s string, values []string, end, limit int) (string, bool) {
 	var marked []bool // nil until the first match
 	for _, v := range values {

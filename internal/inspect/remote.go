@@ -125,8 +125,8 @@ type RemoteOptions struct {
 // when the inspection fails after the connect started.
 //
 // On success, Result.Secrets holds the header values, the URL user info, the
-// secret URL parts and opts.secrets that have at least discover.MinSecretBytes bytes
-// (see resultSecrets).
+// secret URL parts and opts.secrets that have at least discover.MinSecretBytes
+// bytes (see resultSecrets).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -370,10 +370,10 @@ func splitUserinfo(u *url.URL) (endpoint url.URL, user *url.Userinfo) {
 }
 
 // urlSecrets returns the secrets in rawQuery and in the path of raw, the
-// configured URL, for classify to remove wherever they stand in error text:
-// the parts that discover.RedactURL masks (discover.SecretQueryParts and
-// discover.SecretPathSegments), with at least discover.MinSecretBytes bytes. In URL
-// form, classify removes the whole query and every secret segment anyway
+// configured URL, for classify to remove wherever they stand in error text: the
+// parts that discover.RedactURL masks (discover.SecretQueryParts and
+// discover.SecretPathSegments), with at least discover.MinSecretBytes bytes. In
+// URL form, classify removes the whole query and every secret segment anyway
 // (replaceURLParts); this list is for a server that echoes a part alone.
 func urlSecrets(rawQuery, raw string) []string {
 	var secrets []string
@@ -422,10 +422,10 @@ func basicSecrets(value string) []string {
 	return userinfoSecrets(url.UserPassword(name, password))
 }
 
-// credentialPart returns the part of value after an auth scheme, as in
-// "Bearer <token>" or "Token <token>", when it has at least discover.MinSecretBytes
-// bytes. It returns "" when value has no scheme prefix. A scheme is one word
-// of ASCII letters, digits, "-", "_" or ".", followed by a space.
+// credentialPart returns the part of value after an auth scheme, as in "Bearer
+// <token>" or "Token <token>", when it has at least discover.MinSecretBytes
+// bytes. It returns "" when value has no scheme prefix. A scheme is one word of
+// ASCII letters, digits, "-", "_" or ".", followed by a space.
 func credentialPart(value string) string {
 	scheme, rest, found := strings.Cut(value, " ")
 	if !found || !isAuthScheme(scheme) {
@@ -463,9 +463,9 @@ func resultFromInit(initRes *mcp.InitializeResult) Result {
 // built from the name and the password. classify removes them from error
 // text everywhere.
 //
-// The user name is in the list only when it has at least discover.MinSecretBytes
-// bytes and discover.IsSecretUserName reports true for it: when there is no
-// password, because then the name is the credential, as in
+// The user name is in the list only when it has at least
+// discover.MinSecretBytes bytes and discover.IsSecretUserName reports true for
+// it: when there is no password, because then the name is the credential, as in
 // https://<token>@host/, or when the name looks like a token next to a
 // password, as in https://<token>:x-oauth-basic@github.com/. Otherwise
 // replaceUserinfo removes the name only where it stands in a URL, so that a

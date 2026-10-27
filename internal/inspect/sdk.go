@@ -110,13 +110,13 @@ func New(opts SDKOptions) *SDKInspector {
 //
 // Every non-nil error is a *ConnectError; use errors.As to get it. Its text
 // never holds a configured env value: mcpmoat puts none there, and Inspect
-// removes from text that the server sent the configured values, the values
-// of the expanded variables and, for a stdio server, the secrets in the argv
-// (see argSecrets) that have at least discover.MinSecretBytes bytes (a server gets
-// them and can echo them). Its URL is the redacted URL as discovered, not
-// the expanded one. It can hold other text that the server controls, so
-// callers must escape it with internal/termsafe before they print it.
-// errors.Is(err, context.DeadlineExceeded) works for timeouts.
+// removes from text that the server sent the configured values, the values of
+// the expanded variables and, for a stdio server, the secrets in the argv (see
+// argSecrets) that have at least discover.MinSecretBytes bytes (a server gets
+// them and can echo them). Its URL is the redacted URL as discovered, not the
+// expanded one. It can hold other text that the server controls, so callers
+// must escape it with internal/termsafe before they print it. errors.Is(err,
+// context.DeadlineExceeded) works for timeouts.
 //
 // On success, Result.Secrets holds the configured values, the expanded
 // values and, for a stdio server, the argv secrets that have at least
@@ -350,10 +350,10 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 }
 
 // lookupRecorder wraps a variable lookup for discover.Expand. It keeps each
-// value that the lookup returns with at least discover.MinSecretBytes bytes, for
-// classify to remove from error text. A shorter value is too likely to match
-// ordinary words. It keeps each value one time only, so a config that reads
-// the same variable many times does not make the scrub list long. It is
+// value that the lookup returns with at least discover.MinSecretBytes bytes,
+// for classify to remove from error text. A shorter value is too likely to
+// match ordinary words. It keeps each value one time only, so a config that
+// reads the same variable many times does not make the scrub list long. It is
 // used by one goroutine only.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
@@ -522,10 +522,10 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 	return configErrorWithCause(s, reason, err)
 }
 
-// envSecrets returns the configured env values of at least discover.MinSecretBytes
-// bytes, for classify to remove from error text and for Result.Secrets (see
-// resultSecrets). A shorter value is too likely to match ordinary words ("1",
-// "true", "info"), and too short to be a token.
+// envSecrets returns the configured env values of at least
+// discover.MinSecretBytes bytes, for classify to remove from error text and for
+// Result.Secrets (see resultSecrets). A shorter value is too likely to match
+// ordinary words ("1", "true", "info"), and too short to be a token.
 func envSecrets(env discover.SecretMap) []string {
 	var secrets []string
 	for _, key := range env.Keys() {

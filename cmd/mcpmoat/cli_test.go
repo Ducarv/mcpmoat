@@ -433,7 +433,7 @@ func TestUsageContent(t *testing.T) {
 		// A refused tool is a per-tool finding, not a step failure (issue
 		// #184). The cap is shared between the servers.
 		"  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n",
-		"  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n",
+		"  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut or a configured value was removed from it), and the scan goes on.\n",
 		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
 		"  every tool, or another provider error gives exit 2; the report still prints.\n",
 		// The retries of a busy provider and the time limit of the whole

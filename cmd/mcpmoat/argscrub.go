@@ -52,6 +52,10 @@ func argErrorText(args []string, text string) string {
 // A raw '/', '?' or '#' in a password ends the authority early, so the text
 // after it can show. A URL must percent-encode them in the user info.
 //
+// It follows the same authority and user info rule as discover.RawUserinfo
+// (internal/discover/redact_url.go), which does it for one URL. A change of
+// that rule must be made in both places.
+//
 // It uses no regular expression. The loop reads each byte of s at most three
 // times, so the time is linear in the length of s, also for a long argument.
 func hideUserinfo(s string) string {

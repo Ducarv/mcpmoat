@@ -146,10 +146,10 @@ type StatusError struct {
 	// Code is the HTTP status code.
 	Code int
 
-	// retryAfter is the wait from a valid Retry-After header, and
-	// hasRetryAfter tells whether the answer had one (see parseRetryAfter).
-	retryAfter    time.Duration
-	hasRetryAfter bool
+	// retryAfterRaw is the value of the Retry-After header, as the server
+	// sent it, or "" when the answer had none. decide reads the wait from
+	// it (see parseRetryAfter). It is never printed.
+	retryAfterRaw string
 }
 
 // statusClass is the class of a status code that is not 2xx. The class
@@ -216,6 +216,8 @@ func (e *StatusError) Error() string {
 	}
 	switch statusClassOf(e.Code) {
 	case classAuth, classRejected:
+		// Keep the plain text that dev had for these codes. The hint is only in
+		// reason, which Reason uses for the stderr line.
 		return fmt.Sprintf("%s: HTTP %d", ErrProvider.Error(), e.Code)
 	default:
 		return ErrProvider.Error() + ": " + e.reason()
@@ -600,11 +602,10 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 
 // send sends one request with the tool message message and returns the
 // verdict of the model, without Truncated. It builds a new request and body
-// on each call, so sendWithRetry can call it again. now gives the current
-// time, to turn a Retry-After date into a wait; sendWithRetry gives the now
-// of its retry policy. send calls now only after a non-2xx answer came, and
-// at most one time. Every error has fixed text (see Classify).
-func (c *Client) send(ctx context.Context, message string, now func() time.Time) (Verdict, error) {
+// on each call, so sendWithRetry can call it again. For a non-2xx answer it
+// returns a *StatusError that keeps the Retry-After header text. Every error
+// has fixed text (see Classify).
+func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 	body, err := encodeJSON(c.api.requestBody(c.model, message))
 	if err != nil {
 		return Verdict{}, err
@@ -637,9 +638,10 @@ func (c *Client) send(ctx context.Context, message string, now func() time.Time)
 		// The body is never read: it can echo the request or hold text
 		// that must not reach the terminal. Only the Retry-After header is
 		// read, for the retry policy. It is never printed.
-		status := &StatusError{Code: resp.StatusCode}
-		status.retryAfter, status.hasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), now())
-		return Verdict{}, status
+		return Verdict{}, &StatusError{
+			Code:          resp.StatusCode,
+			retryAfterRaw: resp.Header.Get("Retry-After"),
+		}
 	}
 	if resp.ContentLength > MaxResponseBodyBytes {
 		return Verdict{}, errTooLarge

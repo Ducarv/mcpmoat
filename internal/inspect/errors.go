@@ -595,23 +595,23 @@ func truncate(text string) string {
 	return string(runes[:maxReasonRunes]) + "…"
 }
 
-// showDiscoveredURL makes ce show the URL as discovered, not the expanded
-// one, for a remote server. Remote built ce from the expanded server, so its
-// URL, its Reason and its cause can hold the redacted expanded URL, and that
-// URL can show the values of variables: a host, a port or a path segment
-// that the redaction keeps, and values shorter than discover.MinSecretBytes that no
-// scrub removes. A port in a dial error that prints the resolved IP:port
-// stays: a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL, and
-// replaces the expanded URL in Reason and in the text of the cause with it,
+// showDiscoveredURL makes ce show the URL as discovered, not the expanded one,
+// for a remote server. Remote built ce from the expanded server, so its URL,
+// its Reason and its cause can hold the redacted expanded URL, and that URL can
+// show the values of variables: a host, a port or a path segment that the
+// redaction keeps, and values shorter than discover.MinSecretBytes that no
+// scrub removes. A port in a dial error that prints the resolved IP:port stays:
+// a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL,
+// and replaces the expanded URL in Reason and in the text of the cause with it,
 // also in the form without the query and the fragment, the same forms that
-// scrub replaces. Then it replaces the expanded host (host:port, then the
-// host name alone) with the discovered one, because a DNS or dial error
-// names the host without the URL. A host can be a short word, so this can
-// garble other text of the error: a leak is worse than a garbled word. A
-// cause whose text changes becomes a new error with that text (see
-// withText), which still matches the context error and the sentinel of the
-// old cause, so errors.Is(err, context.DeadlineExceeded) still works. When
-// the two URLs are the same, only ce.URL is set.
+// scrub replaces. Then it replaces the expanded host (host:port, then the host
+// name alone) with the discovered one, because a DNS or dial error names the
+// host without the URL. A host can be a short word, so this can garble other
+// text of the error: a leak is worse than a garbled word. A cause whose text
+// changes becomes a new error with that text (see withText), which still
+// matches the context error and the sentinel of the old cause, so
+// errors.Is(err, context.DeadlineExceeded) still works. When the two URLs are
+// the same, only ce.URL is set.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	to := discovered.String()
 	ce.URL = to

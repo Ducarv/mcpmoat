@@ -169,8 +169,8 @@ func TestRetryableStatus(t *testing.T) {
 func TestRetryPolicyDecide(t *testing.T) {
 	t.Parallel()
 	p := retryPolicy{}.withDefaults()
-	after := func(code int, d time.Duration) *StatusError {
-		return &StatusError{Code: code, retryAfter: d, hasRetryAfter: true}
+	after := func(code int, header string) *StatusError {
+		return &StatusError{Code: code, retryAfterRaw: header}
 	}
 	var typedNil *StatusError
 	tests := []struct {
@@ -194,8 +194,8 @@ func TestRetryPolicyDecide(t *testing.T) {
 		{name: "404", err: &StatusError{Code: 404}, want: noRetry},
 		{name: "500", err: &StatusError{Code: 500}, want: noRetry},
 		{name: "302", err: &StatusError{Code: 302}, want: noRetry},
-		{name: "400 with Retry-After", err: after(400, 0), want: noRetry},
-		{name: "500 with Retry-After", err: after(500, time.Second), want: noRetry},
+		{name: "400 with Retry-After", err: after(400, "0"), want: noRetry},
+		{name: "500 with Retry-After", err: after(500, "1"), want: noRetry},
 		{name: "typed nil", err: typedNil, want: noRetry},
 		{name: "timeout", err: errTimeout, want: noRetry},
 		{name: "transport", err: errTransport, want: noRetry},
@@ -206,11 +206,11 @@ func TestRetryPolicyDecide(t *testing.T) {
 		{name: "rejected", err: ErrRejected, want: noRetry},
 		{name: "provider", err: ErrProvider, want: noRetry},
 		{name: "stopped", err: stopped(context.Canceled), want: noRetry},
-		{name: "Retry-After zero", err: after(429, 0), want: retryWait, wantWait: 0},
-		{name: "Retry-After 7s", err: after(503, 7*time.Second), want: retryWait, wantWait: 7 * time.Second},
-		{name: "Retry-After at the cap", err: after(529, RetryAfterCap), want: retryWait, wantWait: RetryAfterCap},
-		{name: "Retry-After above the cap", err: after(429, RetryAfterCap+time.Nanosecond), want: noRetry},
-		{name: "Retry-After max", err: after(429, time.Duration(math.MaxInt64)), want: noRetry},
+		{name: "Retry-After zero", err: after(429, "0"), want: retryWait, wantWait: 0},
+		{name: "Retry-After 7s", err: after(503, "7"), want: retryWait, wantWait: 7 * time.Second},
+		{name: "Retry-After at the cap", err: after(529, "30"), want: retryWait, wantWait: RetryAfterCap},
+		{name: "Retry-After above the cap", err: after(429, "31"), want: noRetry},
+		{name: "Retry-After max", err: after(429, "9223372036854775807"), want: noRetry},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -225,10 +225,10 @@ func TestRetryPolicyDecide(t *testing.T) {
 	t.Run("small cap", func(t *testing.T) {
 		t.Parallel()
 		small := retryPolicy{afterCap: time.Second}.withDefaults()
-		if got, _ := small.decide(after(429, 2*time.Second)); got != noRetry {
+		if got, _ := small.decide(after(429, "2")); got != noRetry {
 			t.Errorf("decide(2s) with a 1s cap = %v, want noRetry", got)
 		}
-		if got, wait := small.decide(after(429, time.Second)); got != retryWait || wait != time.Second {
+		if got, wait := small.decide(after(429, "1")); got != retryWait || wait != time.Second {
 			t.Errorf("decide(1s) with a 1s cap = %v, %v, want retryWait, 1s", got, wait)
 		}
 	})
@@ -724,13 +724,17 @@ func TestSendReadsRetryAfter(t *testing.T) {
 			t.Parallel()
 			srv := startServer(t, failThen(ProviderAnthropic, http.StatusServiceUnavailable, always, tt.header))
 			c := newRetryClient(t, ProviderAnthropic, srv.URL, retryPolicy{now: func() time.Time { return retryBase }})
-			_, err := c.send(t.Context(), "m", c.retry.withDefaults().now)
+			_, err := c.send(t.Context(), "m")
 			var se *StatusError
 			if !errors.As(err, &se) || se.Code != http.StatusServiceUnavailable {
 				t.Fatalf("send() error = %v, want *StatusError{Code: 503}", err)
 			}
-			if se.retryAfter != tt.want || se.hasRetryAfter != tt.wantHas {
-				t.Errorf("send() retryAfter = %v, %v, want %v, %v", se.retryAfter, se.hasRetryAfter, tt.want, tt.wantHas)
+			if se.retryAfterRaw != tt.header {
+				t.Errorf("send() retryAfterRaw = %q, want %q", se.retryAfterRaw, tt.header)
+			}
+			got, ok := parseRetryAfter(se.retryAfterRaw, retryBase)
+			if got != tt.want || ok != tt.wantHas {
+				t.Errorf("parseRetryAfter(send() header) = %v, %v, want %v, %v", got, ok, tt.want, tt.wantHas)
 			}
 			if n := srv.hits.Load(); n != 1 {
 				t.Errorf("server requests = %d, want 1 (send does not retry)", n)
@@ -749,7 +753,7 @@ func TestClassifyRetryCanceledDuringWait(t *testing.T) {
 		t.Run(string(p)+"/canceled", func(t *testing.T) {
 			t.Parallel()
 			srv := startServer(t, failThen(p, http.StatusTooManyRequests, always, ""))
-			// send calls now after the answer came, so the close of answered
+			// decide calls now after the answer came, so the close of answered
 			// means: the first try is over and the wait is next.
 			answered := make(chan struct{})
 			var once sync.Once

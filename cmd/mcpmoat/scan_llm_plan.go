@@ -15,9 +15,10 @@ import (
 
 // maxLLMTools is the largest number of tools that one scan sends to the
 // provider. It bounds the cost of a scan, and defaultLLMStepTimeout bounds its
-// time. The client of package llm sends at most 3 requests for one tool
-// (the first request and 2 retries), so one scan sends at most 1500
-// requests. The servers share the cap fairly (see fairShare), so one
+// time. The client of package llm sends at most llm.RetryMaxTries requests
+// for one tool (the first request and the retries), so one scan sends at
+// most maxLLMTools * llm.RetryMaxTries requests. The servers share the cap
+// fairly (see fairShare), so one
 // server with many tools cannot use it all and leave the other servers
 // without a rating.
 const maxLLMTools = 500
@@ -87,7 +88,6 @@ func planLLMJobs(outcomes []inspect.Outcome) llmPlan {
 func (p llmPlan) sendingNotice() string {
 	size := 0
 	for _, job := range p.jobs {
-		// min is a built-in function since Go 1.21.
 		size += min(len(job.in.ToolName), llm.MaxToolNameBytes)
 		size += min(len(job.in.Description), llm.MaxDescriptionBytes)
 	}

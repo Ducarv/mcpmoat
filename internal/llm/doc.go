@@ -19,11 +19,11 @@
 // has its own time limit (requestTimeout); the time limit of the whole LLM
 // step is in cmd/mcpmoat.
 //
-// The model output is capped: at anthropicMaxTokens tokens for Anthropic,
-// and by max_completion_tokens (openAIMaxCompletionTokens) for the default
-// OpenAI base URL only (see newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
-// verdict schema (verdictSchema) and one user message that toolMessage
-// builds. That message holds only:
+// The model output is capped: at anthropicMaxTokens tokens for Anthropic, and
+// by max_completion_tokens (openAIMaxCompletionTokens) for the default OpenAI
+// base URL only (see newOpenAIAPI). The request holds the fixed [SystemPrompt],
+// the fixed verdict schema (verdictSchema) and one user message that
+// toolMessage builds. That message holds only:
 //
 //   - the tool name, cut to [MaxToolNameBytes];
 //   - the tool description, cut to [MaxDescriptionBytes] (or less, so the

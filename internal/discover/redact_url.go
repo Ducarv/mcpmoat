@@ -419,7 +419,8 @@ func IsSecretUserName(name, password string) bool {
 // scheme has no "/"), up to the first "/", "?" or "#". It works on text that
 // does not parse too. The result can hold a raw secret: never print, log or
 // store it. It is exported so that the redaction and the error scrub of
-// internal/inspect read the user info in the same way.
+// internal/inspect read the user info in the same way. hideUserinfo in
+// cmd/mcpmoat/argscrub.go applies the same rule to text inside an argument.
 func RawUserinfo(raw string) string {
 	_, authority, found := strings.Cut(raw, "//")
 	if !found {

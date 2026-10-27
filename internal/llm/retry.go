@@ -43,13 +43,14 @@ const statusOverloaded = 529
 // other transport error give no retry.
 //
 // The client sends at most maxTries requests for one tool (RetryMaxTries by
-// default: the first request and 2 retries). So a scan sends at most 3 times
-// the number of tools that it rates. That is the cost bound of --llm.
+// default: the first request and 2 retries). So a scan sends at most
+// RetryMaxTries times the number of tools that it rates. That is the cost
+// bound of --llm.
 //
 // Between two tries the client waits for an exponential backoff with jitter:
 // the base wait starts at initialWait (1 s) and doubles up to maxWait (8 s),
-// and the jitter makes each wait 0.5 to 1.5 times the base wait. With 3
-// tries there are 2 waits, of about 1 s and 2 s. When the answer has a valid
+// and the jitter makes each wait 0.5 to 1.5 times the base wait. With the
+// default RetryMaxTries tries there are 2 waits, of about 1 s and 2 s. When the answer has a valid
 // Retry-After header, the client waits for that time instead. A Retry-After
 // that is longer than afterCap (RetryAfterCap, 30 s) means no retry: the
 // error comes back at once. All waits end when the context of the caller
@@ -115,13 +116,14 @@ func (p retryPolicy) decide(err error) (retryDecision, time.Duration) {
 	if !errors.As(err, &status) || status == nil || !retryableStatus(status.Code) {
 		return noRetry, 0
 	}
-	if !status.hasRetryAfter {
+	wait, ok := parseRetryAfter(status.retryAfterRaw, p.now())
+	if !ok {
 		return retryBackoff, 0
 	}
-	if status.retryAfter > p.afterCap {
+	if wait > p.afterCap {
 		return noRetry, 0
 	}
-	return retryWait, status.retryAfter
+	return retryWait, wait
 }
 
 // retryableStatus reports whether code means that the provider is busy or
@@ -198,7 +200,7 @@ func (c *Client) sendWithRetry(ctx context.Context, message string) (Verdict, er
 	// backoff.Permanent stops at once, backoff.RetryAfter waits for the given
 	// time, and a plain error waits for the backoff time.
 	op := func() (Verdict, error) {
-		v, err := c.send(ctx, message, p.now)
+		v, err := c.send(ctx, message)
 		if err == nil {
 			return v, nil
 		}
@@ -206,6 +208,7 @@ func (c *Client) sendWithRetry(ctx context.Context, message string) (Verdict, er
 		case retryWait:
 			// A retry after the deadline of ctx can never happen. Fail now
 			// with the provider error, so the worker is free at once.
+			// The ctx deadline is real time, not p.now, so this uses time.Until.
 			if deadline, ok := ctx.Deadline(); ok && wait > time.Until(deadline) {
 				return Verdict{}, backoff.Permanent(err)
 			}
