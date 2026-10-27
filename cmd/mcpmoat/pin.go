@@ -27,13 +27,17 @@ import (
 //  2. findPinServer: find the one server that has the --accept name.
 //  3. readPins: check that pins.json can be read. This comes before the next
 //     step, so a corrupt or newer file stops pin before it starts a stdio
-//     server.
+//     server. This is the first read of the command. Whether the file existed
+//     here goes to acceptTools.
 //  4. inspectOne: inspect only that server.
 //  5. acceptTools: read pins.json again, show the diffs, check --expect, then
 //     read the file once more with the lock on the pins directory, set the
 //     pins of this server only and save the file.
 //
-// Nothing is written unless every step before the save worked. The server runs
+// When the pins file existed at the first read of the command and a later read
+// does not find it, acceptTools saves nothing and gives exit code 2 (see
+// pinsRemovedWhileRunning). Nothing is written unless every step before the
+// save worked. The server runs
 // in its own session, so the terminal does not signal it. When the process gets
 // SIGINT, SIGTERM or SIGHUP (see main), the context ends and inspect.Run stops
 // the server. The usage text (pinUsage and usage in cli.go) lists the flags and
@@ -51,14 +55,15 @@ func (c *cli) runPin(_ options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	if _, ok := c.readPins("pin"); !ok {
+	first, ok := c.readPins("pin")
+	if !ok {
 		return exitError
 	}
 	tools, ok := c.inspectOne(ctx, server, a.connOpts)
 	if !ok {
 		return exitError
 	}
-	return c.acceptTools(ctx, server, tools, a.expect)
+	return c.acceptTools(ctx, server, tools, a.expect, first.Existed())
 }
 
 // pinArgs holds the checked flags of "pin".
@@ -165,10 +170,16 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // that the save replaces. If another run changed that entry after the
 // diffs printed, a warning says that the diffs are against the older pins.
 //
-// When the file existed at the read for the diffs but not at the locked read,
-// it was removed while pin ran. A save would drop every older pin, so
-// acceptTools saves nothing and gives exit code 2 (see
-// pinsRemovedWhileRunning).
+// firstExisted tells whether pins.json existed at the first read of the
+// command (in runPin, before the server started). When the file existed at the
+// first read of the command, or at the read for the diffs, and a later read
+// does not find it, it was removed while pin ran. A save would drop every
+// older pin, so acceptTools saves nothing and gives exit code 2 (see
+// pinsRemovedWhileRunning). It checks this twice. The first check comes right
+// after the read for the diffs and covers the inspection: it stops pin before
+// it prints a diff in which every tool looks new. The second check comes at the
+// locked read and covers the time that pin showed the diffs. A file that is
+// missing at every read is a real first run: the save creates it.
 //
 // A Set that would make pins.json larger than its size limit
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
@@ -183,7 +194,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
 // before it saves.
-func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string) int {
+func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string, firstExisted bool) int {
 	name := cutName(server.Name)
 	id := serverIdentity(server)
 	// A relative path gives another identity than the one in the store, so
@@ -206,6 +217,11 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	// another run must not wait for that.
 	shown, ok := c.readPins("pin")
 	if !ok {
+		return exitError
+	}
+	// The file can go away while the server is inspected. Then every tool
+	// would look new in the diffs, so stop before they print.
+	if c.pinsRemovedWhileRunning("pin", firstExisted, shown) {
 		return exitError
 	}
 	diffs := c.pinChanges(shown, id, server.Name, tools)
@@ -236,7 +252,9 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	if !ok {
 		return exitError
 	}
-	if c.pinsRemovedWhileRunning("pin", shown.Existed(), store) {
+	// A file that existed at either read before this one and is gone now was
+	// removed while pin showed the diffs.
+	if c.pinsRemovedWhileRunning("pin", firstExisted || shown.Existed(), store) {
 		return exitError
 	}
 	if pinsChanged(shown, store, id) {

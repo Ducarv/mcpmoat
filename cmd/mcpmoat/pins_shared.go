@@ -135,14 +135,18 @@ func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store
 }
 
 // pinsRemovedWhileRunning reports whether the pins file was removed while the
-// command ran: the first read, without the lock, found the file (firstExisted),
-// but the read with the lock (locked) did not. A save would then write a new
-// file with only the pins of this run, and drop every older pin without a
-// word: a later rug pull would then look like a first run. So the caller saves
-// nothing. When it returns true, it has printed pinsRemovedText on stderr for
-// the command cmd, and the caller exits with 2.
-func (c *cli) pinsRemovedWhileRunning(cmd string, firstExisted bool, locked *pins.Store) bool {
-	if !firstExisted || locked.Existed() {
+// command ran. firstExisted tells whether the file existed at an earlier read
+// of the command. later is the store of a later read. For scan, and for the
+// check of pin that holds the lock, that is the read with the lock. For the
+// early check of pin, it is the read for the diffs, which takes no lock. When
+// the earlier read found the file and the later read did not, the file was
+// removed. A save would then write a new file with only the pins of this run,
+// and drop every older pin without a word. A later rug pull would then look
+// like a first run. So the caller saves nothing. When it returns true, it has
+// printed pinsRemovedText on stderr for the command cmd, and the caller exits
+// with 2.
+func (c *cli) pinsRemovedWhileRunning(cmd string, firstExisted bool, later *pins.Store) bool {
+	if !firstExisted || later.Existed() {
 		return false
 	}
 	c.cmdPrintf(cmd, "%s", pinsRemovedText)

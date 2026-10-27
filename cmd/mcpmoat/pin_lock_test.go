@@ -489,3 +489,86 @@ func TestPinAcceptPinsRemovedDuringDiff(t *testing.T) {
 	assertDiffsOf(t, got.stdout, "srv", []string{"a"})
 	e.assertNoPinsFile(t, "a pin whose pins file was removed while it ran")
 }
+
+// TestPinAcceptPinsRemovedDuringInspection checks a pins.json that was on disk
+// at the first read of pin but is gone when pin reads it again for the diff:
+// another process removed it while pin inspected the server. srv and other
+// are pinned. A save would write a new file with only srv and drop the pins of
+// other, and the diff would show every tool of srv as new. So pin stops before
+// the diff: exit code 2, exactly the pinsRemovedText line on stderr, nothing on
+// stdout (no diff and no "accepted" line), no new pins file notice, and no
+// pins.json. The removal runs in the inspector (hookInspector), like in
+// TestScanPinsFileRemovedDuringScan.
+//
+// The control runs the same flow without the removal: pin saves, and pins.json
+// keeps other. The real first run, with no file at every read, is
+// TestPinAcceptNewPinsFileNotice.
+func TestPinAcceptPinsRemovedDuringInspection(t *testing.T) {
+	t.Parallel()
+
+	servers := map[string]any{
+		"srv":   map[string]any{"command": "npx"},
+		"other": map[string]any{"command": "npx"},
+	}
+	pinned := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}, "other": {mkTool("o", "Other.")}}
+	current := map[string][]inspect.Tool{"srv": {mkTool("a", "Add. Changed.")}, "other": {mkTool("o", "Other.")}}
+
+	tests := []struct {
+		name string
+		// remove is true when the inspector removes pins.json while it
+		// inspects srv.
+		remove bool
+	}{
+		{name: "removed while the server is inspected", remove: true},
+		{name: "control: not removed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, servers)
+			if r := e.scan(fakeServers(pinned)); r.code != exitOK {
+				t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+			}
+			if names := e.readPins().serverNames(); !slices.Equal(names, []string{"other", "srv"}) {
+				t.Fatalf("pinned servers before pin = %v, want [other srv]", names)
+			}
+			insp := hookInspector{
+				inner: fakeServers(current),
+				hook: onceFor("srv", func(discover.Server) {
+					if !tt.remove {
+						return
+					}
+					// t.Errorf, not t.Fatalf: this runs in a goroutine of
+					// inspect.Run.
+					if err := os.Remove(e.pinsPath()); err != nil {
+						t.Errorf("remove pins.json while pin inspects: %v", err)
+					}
+				}),
+			}
+
+			got := e.pin(insp, "--accept", "srv")
+
+			if !tt.remove {
+				assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 0 new, 1 changed, 0 removed\n"}, stderr: []string{noExpectNote}})
+				if got.stderr != noExpectNote {
+					t.Errorf("stderr = %q, want only the note %q", got.stderr, noExpectNote)
+				}
+				diffs, _ := splitAcceptedLine(got.stdout)
+				assertDiffsOf(t, diffs, "srv", []string{"a"})
+				if names := e.readPins().serverNames(); !slices.Equal(names, []string{"other", "srv"}) {
+					t.Errorf("pinned servers after pin = %v, want [other srv]", names)
+				}
+				return
+			}
+			removed := pinPrefix + pinsRemovedText + "\n"
+			assertPinRun(t, got, scanWant{code: exitError, stderr: []string{removed}})
+			if got.stderr != removed {
+				t.Errorf("stderr = %q, want exactly %q", got.stderr, removed)
+			}
+			if got.stdout != "" {
+				t.Errorf("stdout = %q, want nothing: no diff and no accepted line", got.stdout)
+			}
+			e.assertNoPinsFile(t, "a pin whose pins file was removed while it inspected the server")
+		})
+	}
+}
