@@ -301,17 +301,6 @@ func scanFormFlags(s string) formFlags {
 	return f
 }
 
-// isCSIC0 reports whether r is a C0 control rune of csiC0: U+0000 to U+0017,
-// U+0019, U+001C to U+001F, or DEL (U+007F). It is the regex class csiC0 as a
-// plain rune check, so scanFormFlags needs no regex.
-func isCSIC0(r rune) bool {
-	switch {
-	case r >= 0x00 && r <= 0x17, r == 0x19, r >= 0x1c && r <= 0x1f, r == 0x7f:
-		return true
-	}
-	return false
-}
-
 // appendNew appends f to forms when forms does not hold it yet.
 func appendNew(forms []string, f string) []string {
 	if slices.Contains(forms, f) {
@@ -772,18 +761,6 @@ func writeRun(b *strings.Builder, run string, keep func(rune) bool, repl rune, p
 	if space && !before {
 		b.WriteRune(repl)
 	}
-}
-
-// startsSeq reports whether r is ESC, U+009B (CSI) or U+009D (OSC), a rune
-// that starts an ANSI escape sequence in ansiSeq and ansiSeqC0.
-func startsSeq(r rune) bool {
-	return startsCSI(r) || r == '\u009d'
-}
-
-// startsCSI reports whether r is ESC or U+009B, a rune that starts a CSI in
-// ansiSeq and ansiSeqC0.
-func startsCSI(r rune) bool {
-	return r == '\x1b' || r == '\u009b'
 }
 
 // cutAtRune returns at most the first n bytes of s. It never splits a
