@@ -900,7 +900,7 @@ func TestScanLLMNoTool(t *testing.T) {
 // TestScanLLMMarking checks how the report marks an LLM finding (FR-17): in
 // the terminal, the title ends with [LLM] and a Source line follows the
 // Server line; in the JSON document, the source is "llm" and the document
-// follows schema version 2. A rule finding keeps no marker and the source
+// follows report.SchemaVersion. A rule finding keeps no marker and the source
 // "rule". The summary counts include the LLM findings.
 func TestScanLLMMarking(t *testing.T) {
 	t.Parallel()
@@ -983,8 +983,8 @@ func TestScanLLMMarking(t *testing.T) {
 			t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
 		}
 		doc := decodeScanJSON(t, r.stdout)
-		if doc.SchemaVersion != 2 {
-			t.Errorf("schema_version = %d, want 2", doc.SchemaVersion)
+		if doc.SchemaVersion != report.SchemaVersion {
+			t.Errorf("schema_version = %d, want %d", doc.SchemaVersion, report.SchemaVersion)
 		}
 		if !doc.Complete {
 			t.Errorf("complete = false, want true")
@@ -1235,7 +1235,7 @@ func TestScanLLMTruncatedUnusable(t *testing.T) {
 // .mcpmoat-ignore entry matches a finding of the LLM rule id but is not
 // applied. It is the line of the pin rules (see ignoreFileWarning).
 func llmFileWarning(id string) string {
-	return "mcpmoat scan: warning: .mcpmoat-ignore cannot ignore " + id + "; use --ignore on the command line\n"
+	return fileCannotIgnoreWarning(id) + "\n"
 }
 
 // TestScanLLMIgnore checks that only --ignore drops LLM findings (FR-10,

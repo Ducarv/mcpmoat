@@ -1343,9 +1343,7 @@ func TestScanFindingsExitCodes(t *testing.T) {
 			code:   exitError,
 			stderr: []string{"mcpmoat scan: cannot write output"},
 		})
-		if got := column(tableRows(t, table.String()), 0); !slices.Equal(got, []string{"leaky"}) {
-			t.Errorf("table servers = %v, want [leaky]\ntable:\n%s", got, table.String())
-		}
+		assertServerNames(t, table.String(), "leaky")
 		// The summary came before the findings, so it was written.
 		if got := summaryRows(t, table.String()); len(got) != 1 || got[0].Name != "leaky" || got[0].Findings != 1 {
 			t.Errorf("summary = %+v, want one row for leaky with 1 finding\ntable:\n%s", got, table.String())

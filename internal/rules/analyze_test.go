@@ -603,6 +603,9 @@ func TestAnalyzerBudgetRuleID(t *testing.T) {
 	if !ValidRuleID(RuleAnalysisBudget) {
 		t.Errorf("ValidRuleID(%q) = false, want true", RuleAnalysisBudget)
 	}
+	if !ValidRuleID(RuleToolFindingCap) {
+		t.Errorf("ValidRuleID(%q) = false, want true", RuleToolFindingCap)
+	}
 }
 
 // TestAnalyzerCheckToolContextDone checks CheckTool with a context that is

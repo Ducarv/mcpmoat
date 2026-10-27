@@ -1,11 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "tool": {
     "name": "mcpmoat",
     "version": "1.2.3"
   },
   "mode": "connect",
   "complete": true,
+  "fields_truncated": false,
   "servers": [
     {
       "name": "alpha",
@@ -21,6 +22,10 @@
       ],
       "inspection": {
         "status": "ok"
+      },
+      "accept": {
+        "digest": "pd1:3260f842e42dd149ebcec6fe9c9b1cd5e078d423a5a8b7daac00c6dab298327e",
+        "command": "mcpmoat pin --accept alpha --config $CONFIG/mcp.json --expect pd1:3260f842e42dd149ebcec6fe9c9b1cd5e078d423a5a8b7daac00c6dab298327e"
       }
     },
     {
@@ -78,5 +83,10 @@
       "diff_is_note": false
     }
   ],
-  "errors": []
+  "errors": [],
+  "ignored": {
+    "total": 0,
+    "rules": {},
+    "file_entries": 0
+  }
 }

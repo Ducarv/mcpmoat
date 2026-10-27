@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -227,6 +228,122 @@ func TestWriteJSONEmptyReport(t *testing.T) {
 		if !ok || len(list) != 0 {
 			t.Errorf("%s = %#v, want an empty list", key, raw[key])
 		}
+	}
+
+	// ignored is always there, with zero counts and an empty object (never null).
+	wantIgnored := map[string]any{"total": float64(0), "rules": map[string]any{}, "file_entries": float64(0)}
+	if !reflect.DeepEqual(raw["ignored"], wantIgnored) {
+		t.Errorf("ignored = %#v, want %#v", raw["ignored"], wantIgnored)
+	}
+	if !strings.Contains(string(out), `"rules": {}`) {
+		t.Errorf("output does not hold \"rules\": {}:\n%s", out)
+	}
+	if raw["fields_truncated"] != false {
+		t.Errorf("fields_truncated = %#v, want false", raw["fields_truncated"])
+	}
+	if raw["schema_version"] != float64(3) {
+		t.Errorf("schema_version = %#v, want 3", raw["schema_version"])
+	}
+}
+
+func TestWriteJSONIgnoredKeepsCounts(t *testing.T) {
+	t.Parallel()
+	r := newReport(nil, nil)
+	r.Ignored = report.JSONIgnored{Total: 5, Rules: map[string]int{"MOAT-T2-004": 3, "MOAT-T4-001": 2}, FileEntries: 2}
+	got := decodeJSON(t, writeJSON(t, r)).Ignored
+	if got.Total != 5 || got.FileEntries != 2 || !reflect.DeepEqual(got.Rules, r.Ignored.Rules) {
+		t.Errorf("ignored = %+v, want %+v", got, r.Ignored)
+	}
+}
+
+func TestWriteJSONAccept(t *testing.T) {
+	t.Parallel()
+	digest := testDigest
+	srv := func(name string, a *report.JSONAccept) report.JSONServer {
+		js := report.NewJSONServer(discover.Server{Name: name, Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
+		js.Accept = a
+		return js
+	}
+	out := writeJSON(t, newReport([]report.JSONServer{
+		srv("none", nil),
+		srv("with-command", &report.JSONAccept{Digest: digest, Command: "mcpmoat pin --accept s --expect " + digest}),
+		srv("digest-only", &report.JSONAccept{Digest: digest}),
+	}, nil))
+
+	var raw struct {
+		Servers []map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw.Servers[0]["accept"]; ok {
+		t.Errorf("server without Accept has an accept key: %v", raw.Servers[0]["accept"])
+	}
+	wantCmd := map[string]any{"digest": digest, "command": "mcpmoat pin --accept s --expect " + digest}
+	if got := raw.Servers[1]["accept"]; !reflect.DeepEqual(got, wantCmd) {
+		t.Errorf("accept with command = %#v, want %#v", got, wantCmd)
+	}
+	// An empty Command is left out, not written as "".
+	wantDigest := map[string]any{"digest": digest}
+	if got := raw.Servers[2]["accept"]; !reflect.DeepEqual(got, wantDigest) {
+		t.Errorf("accept with digest only = %#v, want %#v", got, wantDigest)
+	}
+}
+
+// TestWriteJSONFieldsTruncatedFalse checks that a report with nothing over the
+// cap says fields_truncated false, as a key with a value (not left out). The
+// cuts themselves, and the flag set by the caller, are tested in
+// json_bound_test.go.
+func TestWriteJSONFieldsTruncatedFalse(t *testing.T) {
+	t.Parallel()
+	out := writeJSON(t, richReport())
+	if got := decodeJSON(t, out); got.FieldsTruncated {
+		t.Error("fields_truncated = true, want false")
+	}
+	if !strings.Contains(string(out), `"fields_truncated": false`) {
+		t.Errorf("output has no \"fields_truncated\": false:\n%s", out)
+	}
+}
+
+// cutTestReport builds the same report each time, so a test can compare the
+// report of the caller with a twin. It has a field over the cap.
+func cutTestReport(rules map[string]int) report.ScanReport {
+	js := report.NewJSONServer(discover.Server{Name: strings.Repeat("n", 600), Source: "/s", Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
+	js.Accept = &report.JSONAccept{Digest: testDigest, Command: "cmd"}
+	r := newReport([]report.JSONServer{js}, []report.JSONDiff{{Server: strings.Repeat("d", 600), Tool: "t", Kind: "new"}})
+	r.Findings = []report.JSONFinding{{RuleID: "X", Severity: "low", Key: strings.Repeat("k", 600), Source: report.SourceRule}}
+	r.Errors = []report.JSONFileError{{Path: strings.Repeat("p", 5000), Reason: "invalid JSON"}}
+	r.Ignored = report.JSONIgnored{Total: 2, Rules: rules, FileEntries: 1}
+	return r
+}
+
+func TestWriteJSONDoesNotChangeCaller(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rules func() map[string]int
+	}{
+		{"nil rules map", func() map[string]int { return nil }},
+		{"filled rules map", func() map[string]int { return map[string]int{"MOAT-T2-004": 2} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r, twin := cutTestReport(tt.rules()), cutTestReport(tt.rules())
+			out := writeJSON(t, r)
+			if got := decodeJSON(t, out); !got.FieldsTruncated {
+				t.Fatal("fields_truncated = false, want true: the test report has fields over the cap")
+			}
+			if !reflect.DeepEqual(r, twin) {
+				t.Errorf("WriteJSON changed the report of the caller:\n got %+v\nwant %+v", r, twin)
+			}
+			if (r.Ignored.Rules == nil) != (tt.rules() == nil) {
+				t.Errorf("Ignored.Rules nil = %v after WriteJSON, want %v", r.Ignored.Rules == nil, tt.rules() == nil)
+			}
+			if r.FieldsTruncated {
+				t.Error("FieldsTruncated of the caller is true, want false")
+			}
+		})
 	}
 }
 

@@ -712,6 +712,59 @@ func TestScanToolsInterrupted(t *testing.T) {
 	}
 }
 
+// nativeIgnoreCase is one case of the ignore tests of the native server-level
+// rules (rules.RuleAnalysisBudget and rules.RuleToolFindingCap): the same
+// ignore entries must give the same result for both rules.
+type nativeIgnoreCase struct {
+	name string
+	// file is the content of .mcpmoat-ignore in the working directory, or ""
+	// for no file.
+	file  string
+	flags []string
+	// dropped is true when --ignore drops the row. Then scan counts it as
+	// ignored.
+	dropped bool
+	// fileWarns is true when a file entry matches the row but is not applied:
+	// scan keeps the row and prints the "cannot ignore" warning.
+	fileWarns bool
+}
+
+// nativeIgnoreCases returns the cases for the rule id. tool is the name of a
+// tool of the server "srv". An entry for that tool, or for another server,
+// does not match the row of the whole server, so it gives no warning.
+func nativeIgnoreCases(id, tool string) []nativeIgnoreCase {
+	return []nativeIgnoreCase{
+		{name: "no ignore keeps the row"},
+		{name: "--ignore drops the row", flags: []string{"--ignore", id}, dropped: true},
+		{name: ".mcpmoat-ignore entry for the rule keeps the row", file: id + "\n", fileWarns: true},
+		{name: ".mcpmoat-ignore entry for the rule and the server keeps the row", file: id + " srv\n", fileWarns: true},
+		{
+			name: "--ignore drops the row also when the file has an entry for it",
+			file: id + "\n", flags: []string{"--ignore", id}, dropped: true,
+		},
+		{name: ".mcpmoat-ignore entry for a tool of the server keeps the row", file: id + " srv/" + tool + "\n"},
+		{name: ".mcpmoat-ignore entry for another server keeps the row", file: id + " other\n"},
+	}
+}
+
+// stderr returns the exact stderr lines of the case, in order: the notice of
+// the file, the warning of the rule, then the "ignored" line or the "cannot
+// ignore" warning, then pinned.
+func (tc nativeIgnoreCase) stderr(warning, ignoredLine, fileWarning, pinned string) []string {
+	var out []string
+	if tc.file != "" {
+		out = append(out, scanPrefix+"using 1 entry from "+rules.IgnoreFileName)
+	}
+	out = append(out, warning)
+	switch {
+	case tc.dropped:
+		out = append(out, ignoredLine)
+	case tc.fileWarns:
+		out = append(out, fileWarning)
+	}
+	return append(out, pinned)
+}
+
 // TestScanToolsBudgetIgnore checks that only --ignore drops a
 // rules.RuleAnalysisBudget row. A .mcpmoat-ignore file can come from a cloned
 // repository, so an entry for the rule, or for the rule and the server, keeps
@@ -724,92 +777,35 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 	t.Parallel()
 
 	const budget = usedUpBudget
-	const usingOneEntry = scanPrefix + "using 1 entry from " + rules.IgnoreFileName
 	warning := budgetWarning("srv", budget, 2, 2)
 	ignoredLine := scanPrefix + "1 finding ignored: " + rules.RuleAnalysisBudget + " (1)"
 	budgetFinding := toolFinding{rules.RuleAnalysisBudget, "high", "srv", "", quotedCell(budgetReason(2, 2))}
-	fileWarning := scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + rules.RuleAnalysisBudget +
-		"; use --ignore on the command line"
+	fileWarning := fileCannotIgnoreWarning(rules.RuleAnalysisBudget)
 
-	tests := []struct {
-		name string
-		// file is the content of .mcpmoat-ignore in the working directory,
-		// or "" for no file.
-		file  string
-		flags []string
-		code  int
-		want  []toolFinding
-		// stderr are the exact stderr lines, in order, without the new
-		// pins file notice (the test adds it, see withNewPinsLine).
-		stderr []string
-	}{
-		{
-			name:   "no ignore keeps the row",
-			code:   exitFindings,
-			want:   []toolFinding{budgetFinding},
-			stderr: []string{warning, pinnedLine("srv", 2)},
-		},
-		{
-			name:   "--ignore drops the row",
-			flags:  []string{"--ignore", rules.RuleAnalysisBudget},
-			code:   exitOK,
-			stderr: []string{warning, ignoredLine, pinnedLine("srv", 2)},
-		},
-		{
-			name:   ".mcpmoat-ignore entry for the rule keeps the row",
-			file:   rules.RuleAnalysisBudget + "\n",
-			code:   exitFindings,
-			want:   []toolFinding{budgetFinding},
-			stderr: []string{usingOneEntry, warning, fileWarning, pinnedLine("srv", 2)},
-		},
-		{
-			name:   ".mcpmoat-ignore entry for the rule and the server keeps the row",
-			file:   rules.RuleAnalysisBudget + " srv\n",
-			code:   exitFindings,
-			want:   []toolFinding{budgetFinding},
-			stderr: []string{usingOneEntry, warning, fileWarning, pinnedLine("srv", 2)},
-		},
-		{
-			name:   "--ignore drops the row also when the file has an entry for it",
-			file:   rules.RuleAnalysisBudget + "\n",
-			flags:  []string{"--ignore", rules.RuleAnalysisBudget},
-			code:   exitOK,
-			stderr: []string{usingOneEntry, warning, ignoredLine, pinnedLine("srv", 2)},
-		},
-		{
-			name:   ".mcpmoat-ignore entry for a tool of the server keeps the row",
-			file:   rules.RuleAnalysisBudget + " srv/read_file\n",
-			code:   exitFindings,
-			want:   []toolFinding{budgetFinding},
-			stderr: []string{usingOneEntry, warning, pinnedLine("srv", 2)},
-		},
-		{
-			name:   ".mcpmoat-ignore entry for another server keeps the row",
-			file:   rules.RuleAnalysisBudget + " other\n",
-			code:   exitFindings,
-			want:   []toolFinding{budgetFinding},
-			stderr: []string{usingOneEntry, warning, pinnedLine("srv", 2)},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range nativeIgnoreCases(rules.RuleAnalysisBudget, "read_file") {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			want, code := []toolFinding{budgetFinding}, exitFindings
+			if tc.dropped {
+				want, code = nil, exitOK
+			}
+			stderr := tc.stderr(warning, ignoredLine, fileWarning, pinnedLine("srv", 2))
 			e := newPinEnv(t, oneServer("srv"))
-			if tt.file != "" {
-				writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
+			if tc.file != "" {
+				writeTestFile(t, e.work, rules.IgnoreFileName, tc.file)
 			}
 			insp := fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), mkTool("add_numbers", "Add.")}})
 
-			got := scanWithBudget(e, insp, budget, tt.flags...)
+			got := scanWithBudget(e, insp, budget, tc.flags...)
 
-			wantStderr := withNewPinsLine(t, e, tt.stderr)
-			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
-			assertToolFindings(t, got.stdout, tt.want...)
+			wantStderr := withNewPinsLine(t, e, stderr)
+			assertScanRun(t, got, scanWant{code: code, stderr: wantStderr})
+			assertToolFindings(t, got.stdout, want...)
 			assertStderrLines(t, got.stderr, exactLines(wantStderr))
 			assertNoToolText(t, got.stderr, "read_file", "add_numbers")
-			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(tt.want) {
-				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(tt.want))
+			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(want) {
+				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(want))
 			}
 		})
 	}
@@ -840,8 +836,7 @@ func TestScanToolsBudgetFileWarningOnce(t *testing.T) {
 		exactLine(scanPrefix + "using 1 entry from " + rules.IgnoreFileName),
 		exactLine(budgetWarning("srv-a", budget, 2, 2)),
 		exactLine(budgetWarning("srv-b", budget, 2, 2)),
-		exactLine(scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + rules.RuleAnalysisBudget +
-			"; use --ignore on the command line"),
+		exactLine(fileCannotIgnoreWarning(rules.RuleAnalysisBudget)),
 		exactLine(newPinsLine(e)),
 		exactLine(pinnedLine("srv-a", 2)),
 		exactLine(pinnedLine("srv-b", 2)),
@@ -864,7 +859,7 @@ func criticalRulesDir(t *testing.T) string {
 }
 
 // TestScanToolsBudgetSeverity checks the severity of the
-// rules.RuleAnalysisBudget row (see budgetSeverity). With the built-in rules
+// rules.RuleAnalysisBudget row (see failClosedSeverity). With the built-in rules
 // only, the highest rule severity is high, so the row is high and
 // "--fail-on critical" gives exit code 0. With a critical description rule
 // from --rules, the row is critical: a hostile server that uses up the
@@ -977,4 +972,596 @@ func keyLens(rows []report.JSONFinding) []int {
 		out[i] = len(r.Key)
 	}
 	return out
+}
+
+// The tests below check the cap on the tool rows of one server (issue #170,
+// rules.RuleToolFindingCap, see toolRulesRun.flushTools): a server keeps at most
+// maxRows tool rows, counted after the ignore list, and gets one MOAT-T1-024
+// row for the rest. They set cli.maxToolRows to a small number, so a test does
+// not need a thousand tools.
+
+// numberedTools returns n poisoned tools named tool_0001, tool_0002, and so
+// on. Each gives one MOAT-T1-001 row, and the names sort in the order of the
+// list.
+func numberedTools(n int) []inspect.Tool {
+	tools := make([]inspect.Tool, n)
+	for i := range tools {
+		tools[i] = poisonedTool(fmt.Sprintf("tool_%04d", i+1))
+	}
+	return tools
+}
+
+// scanWithCap runs "mcpmoat scan --config <file> args..." in e with insp, and
+// with maxRows as the largest number of tool rows for one server. Zero keeps
+// the default, maxToolRowsPerServer.
+func scanWithCap(e *pinEnv, insp inspect.Inspector, maxRows int, args ...string) pinRunResult {
+	e.t.Helper()
+	return scanWithLimits(e, insp, 0, maxRows, args...)
+}
+
+// scanWithLimits is scanWithCap with a tool budget too. Zero keeps the default
+// budget, toolRulesBudget.
+func scanWithLimits(e *pinEnv, insp inspect.Inspector, budget time.Duration, maxRows int, args ...string) pinRunResult {
+	e.t.Helper()
+	c, stdout, stderr := e.cli(insp)
+	c.toolBudget = budget
+	c.maxToolRows = maxRows
+	code := c.dispatch(append([]string{"scan", "--config", e.config}, args...))
+	return pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// capReason is the text of a cap row and of its warning, when omitted tool
+// findings are not listed over limit. It is written out here, not taken from
+// capText, so a change of the words fails the test.
+func capReason(omitted, limit int) string {
+	if omitted == 1 {
+		return fmt.Sprintf("1 more tool finding is not listed; limit %d", limit)
+	}
+	return fmt.Sprintf("%d more tool findings are not listed; limit %d", omitted, limit)
+}
+
+// capWarning is the stderr line of a server with omitted tool findings. server
+// is the name as the line shows it (quoted when it needs it).
+func capWarning(server string, omitted, limit int) string {
+	return fmt.Sprintf("%sserver %s: %s", scanWarnPrefix, server, capReason(omitted, limit))
+}
+
+// capFinding is the terminal view of the rules.RuleToolFindingCap row of
+// server: about the whole server, so with no tool.
+func capFinding(server, severity string, omitted, limit int) toolFinding {
+	return toolFinding{rules.RuleToolFindingCap, severity, server, "", quotedCell(capReason(omitted, limit))}
+}
+
+// capJSONRow is the JSON finding of the rules.RuleToolFindingCap row of server.
+func capJSONRow(server, severity string, omitted, limit int) report.JSONFinding {
+	return report.JSONFinding{
+		RuleID: rules.RuleToolFindingCap, Severity: severity, Server: server,
+		Field: rules.FieldTool, Related: capReason(omitted, limit), Source: report.SourceRule,
+	}
+}
+
+// keptFindings returns the terminal view of the MOAT-T1-001 rows of the first n
+// tools of numberedTools, on server.
+func keptFindings(server string, n int) []toolFinding {
+	out := make([]toolFinding, n)
+	for i := range out {
+		out[i] = toolFinding{"MOAT-T1-001", "high", server, fmt.Sprintf("tool_%04d (description)", i+1), ""}
+	}
+	return out
+}
+
+// keptJSONRows returns the JSON view of keptFindings.
+func keptJSONRows(server string, n int) []report.JSONFinding {
+	out := make([]report.JSONFinding, n)
+	for i := range out {
+		out[i] = toolRow("MOAT-T1-001", "high", server, fmt.Sprintf("tool_%04d", i+1), "description")
+	}
+	return out
+}
+
+// TestScanToolsCapRows checks the cap row: a server with more tool findings
+// than the limit keeps the first rows (in the order that the server lists its
+// tools), and gets one MOAT-T1-024 row with the exact number of the rows that
+// are not listed. At the limit, or under it, there is no cap row and no
+// warning. One over the limit says "1 more tool finding is not listed". The
+// cap row counts in the SUMMARY, the exit code is 1, the warning is on stderr
+// only, the --json document stays complete, and no tool name reaches stderr.
+func TestScanToolsCapRows(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	tests := []struct {
+		name  string
+		tools int
+		kept  int
+		// omitted is the number of the rows that are not listed. Zero means
+		// no cap row.
+		omitted int
+	}{
+		{name: "many over the limit", tools: 7, kept: limit, omitted: 4},
+		{name: "two over the limit", tools: 5, kept: limit, omitted: 2},
+		{name: "one over the limit", tools: 4, kept: limit, omitted: 1},
+		{name: "exactly at the limit", tools: 3, kept: 3},
+		{name: "under the limit", tools: 2, kept: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := newPinEnv(t, oneServer("srv"))
+			insp := fakeServers(map[string][]inspect.Tool{"srv": numberedTools(tt.tools)})
+			wantRows := keptFindings("srv", tt.kept)
+			wantJSON := keptJSONRows("srv", tt.kept)
+			wantStderr := []string{pinnedLine("srv", tt.tools)}
+			wantJSONStderr := []string(nil)
+			wantFindings := tt.kept
+			if tt.omitted > 0 {
+				wantRows = append(wantRows, capFinding("srv", "high", tt.omitted, limit))
+				wantJSON = append(wantJSON, capJSONRow("srv", "high", tt.omitted, limit))
+				warning := capWarning("srv", tt.omitted, limit)
+				wantStderr = []string{warning, pinnedLine("srv", tt.tools)}
+				wantJSONStderr = []string{warning}
+				wantFindings++
+			}
+
+			got := scanWithCap(e, insp, limit)
+
+			wantStderr = withNewPinsLine(t, e, wantStderr)
+			assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
+			assertToolFindings(t, got.stdout, wantRows...)
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
+			assertContainsNone(t, "stdout", got.stdout, []string{"warning:"})
+			assertNoToolText(t, got.stderr, "tool_0001", "tool_0002", "tool_0003")
+			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != wantFindings || row.Tools != tt.tools {
+				t.Errorf("SUMMARY row of srv = %+v, want %d findings (the cap row counts) and %d tools", row, wantFindings, tt.tools)
+			}
+
+			// The server is pinned now, so the --json run prints only the
+			// warning on stderr. jsonFindings checks that complete is true.
+			jsonRun := scanWithCap(e, insp, limit, "--json")
+
+			assertScanRun(t, jsonRun, scanWant{code: exitFindings})
+			assertStderrLines(t, jsonRun.stderr, exactLines(wantJSONStderr))
+			if rows := jsonFindings(t, jsonRun.stdout); !slices.Equal(rows, wantJSON) {
+				t.Errorf("JSON findings = %+v\nwant            %+v", rows, wantJSON)
+			}
+		})
+	}
+}
+
+// TestScanToolsCapKeepsMostSevere checks that a server cannot push a severe
+// finding out of the report with weak findings in front of it. The server lists
+// four tools with a low finding (MOAT-T1-007, a very long description) and then
+// one poisoned tool (MOAT-T1-001, high). With a limit of 3 the report keeps the
+// high row and the first two low rows, in tool order, and counts the other two
+// low rows in the cap row.
+func TestScanToolsCapKeepsMostSevere(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	weak := func(name string) inspect.Tool {
+		return mkTool(name, strings.Repeat("Reads a file. ", 400))
+	}
+	tools := []inspect.Tool{weak("weak_1"), weak("weak_2"), weak("weak_3"), weak("weak_4"), poisonedTool("poison")}
+	e := newPinEnv(t, oneServer("srv"))
+
+	got := scanWithCap(e, fakeServers(map[string][]inspect.Tool{"srv": tools}), limit, "--json")
+
+	assertScanRun(t, got, scanWant{code: exitFindings})
+	// jsonFindings sorts the rows by rule ID, so the low rows follow the high one.
+	want := []report.JSONFinding{
+		toolRow("MOAT-T1-001", "high", "srv", "poison", "description"),
+		toolRow("MOAT-T1-007", "low", "srv", "weak_1", "description"),
+		toolRow("MOAT-T1-007", "low", "srv", "weak_2", "description"),
+		capJSONRow("srv", "high", 2, limit),
+	}
+	if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
+		t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
+	}
+}
+
+// TestFlushToolsUnknownSeverityFailsClosed checks that a row whose severity is
+// not valid counts as critical when flushTools sorts the rows, as in
+// hasFailingFinding: the cap drops the valid row, not the unknown one. No rule
+// gives such a row today (findingRule returns a valid severity or critical),
+// so the test calls flushTools directly.
+func TestFlushToolsUnknownSeverityFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	r := &toolRulesRun{maxRows: 1, pending: []report.FindingRow{
+		{RuleID: "MOAT-T1-001", Severity: "high"},
+		{RuleID: "MOAT-X", Severity: "bogus"},
+	}}
+
+	r.flushTools(0)
+
+	if len(r.res.rows) != 1 || r.res.rows[0].RuleID != "MOAT-X" || r.omitted != 1 {
+		t.Errorf("kept rows = %+v, omitted = %d, want only the unknown severity row and 1 omitted", r.res.rows, r.omitted)
+	}
+}
+
+// TestScanToolsCapSeverity checks the severity of the rules.RuleToolFindingCap
+// row (see failClosedSeverity): the highest severity that the analyzer applies,
+// never lower than high. The built-in rules are high, so the row is high, and
+// "--fail-on critical" gives exit code 0. With a critical rule from --rules the
+// row is critical, although that rule has no hit: the rows that are not listed
+// could be critical, so "--fail-on critical" gives exit code 1. A severity
+// below high cannot be reached from the command line, because the built-in
+// high rules are always applied.
+func TestScanToolsCapSeverity(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	tests := []struct {
+		name     string
+		critical bool // add the critical rule with --rules
+		failOn   string
+		severity string
+		code     int
+	}{
+		{name: "built-in rules, default --fail-on", failOn: "", severity: "high", code: exitFindings},
+		{name: "built-in rules, --fail-on high", failOn: "high", severity: "high", code: exitFindings},
+		{name: "built-in rules, --fail-on critical", failOn: "critical", severity: "high", code: exitOK},
+		{name: "critical rule, --fail-on critical", critical: true, failOn: "critical", severity: "critical", code: exitFindings},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var flags []string
+			if tt.critical {
+				flags = append(flags, "--rules", criticalRulesDir(t))
+			}
+			if tt.failOn != "" {
+				flags = append(flags, "--fail-on", tt.failOn)
+			}
+			insp := fakeServers(map[string][]inspect.Tool{"srv": numberedTools(5)})
+			wantRows := append(keptFindings("srv", limit), capFinding("srv", tt.severity, 2, limit))
+			// The tool rows come from built-in rules, so they stay high.
+			wantStderr := []string{capWarning("srv", 2, limit), pinnedLine("srv", 5)}
+			if tt.failOn == "critical" {
+				wantStderr = append([]string{failOnCriticalNotice}, wantStderr...)
+			}
+
+			e := newPinEnv(t, oneServer("srv"))
+			got := scanWithCap(e, insp, limit, flags...)
+
+			wantStderr = withNewPinsLine(t, e, wantStderr)
+			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
+			assertToolFindings(t, got.stdout, wantRows...)
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
+
+			jsonRun := scanWithCap(e, insp, limit, append(slices.Clone(flags), "--json")...)
+
+			if jsonRun.code != tt.code {
+				t.Errorf("--json exit code = %d, want %d\nstderr:\n%s", jsonRun.code, tt.code, jsonRun.stderr)
+			}
+			want := append(keptJSONRows("srv", limit), capJSONRow("srv", tt.severity, 2, limit))
+			if rows := jsonFindings(t, jsonRun.stdout); !slices.Equal(rows, want) {
+				t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
+			}
+		})
+	}
+}
+
+// TestScanToolsCapAfterIgnore checks that a row that --ignore drops does not
+// count toward the limit: the cap works on the rows that are left. The tools
+// alternate between a MOAT-T1-009 hit and a MOAT-T1-001 hit, so a cap that
+// counted before the ignore list would stop at the wrong row.
+func TestScanToolsCapAfterIgnore(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	// desc fires MOAT-T1-001 and schema fires MOAT-T1-009.
+	desc := func(n int) inspect.Tool { return poisonedTool(fmt.Sprintf("d%d", n)) }
+	schema := func(n int) inspect.Tool { return schemaTool(fmt.Sprintf("s%d", n)) }
+	descRow := func(n int) toolFinding {
+		return toolFinding{"MOAT-T1-001", "high", "srv", fmt.Sprintf("d%d (description)", n), ""}
+	}
+	schemaRow := func(n int) toolFinding {
+		return toolFinding{"MOAT-T1-009", "high", "srv", fmt.Sprintf("s%d (schema)", n), ""}
+	}
+	tests := []struct {
+		name  string
+		tools []inspect.Tool
+		flags []string
+		want  []toolFinding
+		// stderr are the exact stderr lines, in order, and the pin line.
+		stderr []string
+	}{
+		{
+			name:  "5 hits, 2 ignored: 3 kept, no cap row",
+			tools: []inspect.Tool{schema(1), desc(1), schema(2), desc(2), desc(3)},
+			flags: []string{"--ignore", "MOAT-T1-009"},
+			want:  []toolFinding{descRow(1), descRow(2), descRow(3)},
+			stderr: []string{
+				scanPrefix + "2 findings ignored: MOAT-T1-009 (2)",
+				pinnedLine("srv", 5),
+			},
+		},
+		{
+			name:  "6 hits, 2 ignored: 3 kept and 1 over the limit",
+			tools: []inspect.Tool{schema(1), desc(1), schema(2), desc(2), desc(3), desc(4)},
+			flags: []string{"--ignore", "MOAT-T1-009"},
+			want:  []toolFinding{descRow(1), descRow(2), descRow(3), capFinding("srv", "high", 1, limit)},
+			stderr: []string{
+				capWarning("srv", 1, limit),
+				scanPrefix + "2 findings ignored: MOAT-T1-009 (2)",
+				pinnedLine("srv", 6),
+			},
+		},
+		{
+			name:  "the same 5 hits without --ignore: 3 kept and 2 over the limit",
+			tools: []inspect.Tool{schema(1), desc(1), schema(2), desc(2), desc(3)},
+			want:  []toolFinding{descRow(1), schemaRow(1), schemaRow(2), capFinding("srv", "high", 2, limit)},
+			stderr: []string{
+				capWarning("srv", 2, limit),
+				pinnedLine("srv", 5),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := newPinEnv(t, oneServer("srv"))
+			insp := fakeServers(map[string][]inspect.Tool{"srv": tt.tools})
+
+			got := scanWithCap(e, insp, limit, tt.flags...)
+
+			wantStderr := withNewPinsLine(t, e, tt.stderr)
+			assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
+			assertToolFindings(t, got.stdout, slices.SortedFunc(slices.Values(tt.want), func(a, b toolFinding) int {
+				return cmp.Or(cmp.Compare(a.server, b.server), cmp.Compare(a.rule, b.rule), cmp.Compare(a.tool, b.tool))
+			})...)
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
+			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(tt.want) {
+				t.Errorf("SUMMARY findings of srv = %d, want %d", row.Findings, len(tt.want))
+			}
+		})
+	}
+}
+
+// TestScanToolsCapMultipleHits checks that the limit counts rows, not tools: a
+// tool with a description hit and a schema hit gives two rows, and both count.
+func TestScanToolsCapMultipleHits(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	both := mkTool("both", poisonDescription)
+	both.InputSchema = []byte(poisonSchema)
+	e := newPinEnv(t, oneServer("srv"))
+	insp := fakeServers(map[string][]inspect.Tool{"srv": {both, poisonedTool("p1"), poisonedTool("p2")}})
+
+	got := scanWithCap(e, insp, limit)
+
+	assertScanRun(t, got, scanWant{code: exitFindings})
+	assertToolFindings(t, got.stdout,
+		toolFinding{"MOAT-T1-001", "high", "srv", "both (description)", ""},
+		toolFinding{"MOAT-T1-001", "high", "srv", "p1 (description)", ""},
+		toolFinding{"MOAT-T1-009", "high", "srv", "both (schema)", ""},
+		capFinding("srv", "high", 1, limit),
+	)
+	assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, []string{capWarning("srv", 1, limit), pinnedLine("srv", 3)})))
+}
+
+// TestScanToolsCapAndBudget checks that the budget row (MOAT-T1-023) and the
+// cap row (MOAT-T1-024) show together, and that the budget row does not count
+// toward the limit. srv has 5 poisoned tools, which fill the limit of 3 and
+// leave 2 rows over it, and then a hostile tool that uses up the budget. The
+// server keeps 3 tool rows, the budget row and the cap row. Each row has its
+// own warning, the budget one first.
+//
+// The budget is the one of TestScanToolsBudgetPerServer: far more than the
+// short tools need and far less than the hostile tool needs.
+func TestScanToolsCapAndBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		budget = 2 * time.Second
+		limit  = 3
+	)
+	tools := append(numberedTools(5), mkTool("big_tool", hostileDescription()))
+	e := newPinEnv(t, oneServer("srv"))
+	insp := fakeServers(map[string][]inspect.Tool{"srv": tools})
+
+	got := scanWithLimits(e, insp, budget, limit, "--rules", hostileRulesDir(t))
+
+	wantStderr := withNewPinsLine(t, e, []string{budgetWarning("srv", budget, 1, 6), capWarning("srv", 2, limit), pinnedLine("srv", 6)})
+	assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
+	assertToolFindings(t, got.stdout, append(keptFindings("srv", limit),
+		toolFinding{rules.RuleAnalysisBudget, "high", "srv", "", quotedCell(budgetReason(1, 6))},
+		capFinding("srv", "high", 2, limit),
+	)...)
+	assertStderrLines(t, got.stderr, exactLines(wantStderr))
+	if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != limit+2 {
+		t.Errorf("SUMMARY findings of srv = %d, want %d (3 tool rows, the budget row and the cap row)", row.Findings, limit+2)
+	}
+}
+
+// TestScanToolsCapIgnore checks that only --ignore drops a
+// rules.RuleToolFindingCap row. A .mcpmoat-ignore file can come from a cloned
+// repository, so an entry for the rule, or for the rule and the server, keeps
+// the row and prints the "cannot ignore" warning (see fileCannotIgnore). An
+// entry for one tool of the server, or for another server, does not match the
+// row, so it gives no warning. The warning of the omitted rows still prints
+// when the row is dropped: the user must still know that the list is short.
+func TestScanToolsCapIgnore(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	warning := capWarning("srv", 2, limit)
+	ignoredLine := scanPrefix + "1 finding ignored: " + rules.RuleToolFindingCap + " (1)"
+	fileWarning := fileCannotIgnoreWarning(rules.RuleToolFindingCap)
+	toolRows := keptFindings("srv", limit)
+	withCap := append(slices.Clone(toolRows), capFinding("srv", "high", 2, limit))
+
+	for _, tc := range nativeIgnoreCases(rules.RuleToolFindingCap, "tool_0001") {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			want := withCap
+			if tc.dropped {
+				want = toolRows
+			}
+			e := newPinEnv(t, oneServer("srv"))
+			stderr := withNewPinsLine(t, e, tc.stderr(warning, ignoredLine, fileWarning, pinnedLine("srv", 5)))
+			if tc.file != "" {
+				writeTestFile(t, e.work, rules.IgnoreFileName, tc.file)
+			}
+			insp := fakeServers(map[string][]inspect.Tool{"srv": numberedTools(5)})
+
+			got := scanWithCap(e, insp, limit, tc.flags...)
+
+			// The tool rows stay high, so the exit code is 1 in each case.
+			assertScanRun(t, got, scanWant{code: exitFindings, stderr: stderr})
+			assertToolFindings(t, got.stdout, want...)
+			assertStderrLines(t, got.stderr, exactLines(stderr))
+			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(want) {
+				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(want))
+			}
+		})
+	}
+}
+
+// threeServers returns the server map of a config with the stdio servers
+// srv-a, srv-b and srv-c.
+func threeServers() map[string]any {
+	m := twoServers()
+	m["srv-c"] = map[string]any{"command": "npx"}
+	return m
+}
+
+// TestScanToolsCapPerServer checks that the limit is for each server: srv-a and
+// srv-b are over it by a different number and each gets its own cap row and its
+// own warning, and srv-c is at the limit, so it gets none. One .mcpmoat-ignore
+// entry for the rule keeps both cap rows and prints the "cannot ignore"
+// warning once.
+func TestScanToolsCapPerServer(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	insp := func() *inspecttest.Fake {
+		return fakeServers(map[string][]inspect.Tool{
+			"srv-a": numberedTools(6),
+			"srv-b": numberedTools(4),
+			"srv-c": numberedTools(3),
+		})
+	}
+	var rows []toolFinding
+	for _, name := range []string{"srv-a", "srv-b", "srv-c"} {
+		rows = append(rows, keptFindings(name, limit)...)
+		switch name {
+		case "srv-a":
+			rows = append(rows, capFinding(name, "high", 3, limit))
+		case "srv-b":
+			rows = append(rows, capFinding(name, "high", 1, limit))
+		}
+	}
+	pinned := []string{pinnedLine("srv-a", 6), pinnedLine("srv-b", 4), pinnedLine("srv-c", 3)}
+	warnings := []string{capWarning("srv-a", 3, limit), capWarning("srv-b", 1, limit)}
+
+	t.Run("each server has its own row", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, threeServers())
+
+		got := scanWithCap(e, insp(), limit)
+
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertToolFindings(t, got.stdout, rows...)
+		assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, append(slices.Clone(warnings), pinned...))))
+		for _, w := range []struct {
+			name     string
+			findings int
+		}{{"srv-a", limit + 1}, {"srv-b", limit + 1}, {"srv-c", limit}} {
+			if row := summaryRowOf(t, got.stdout, w.name); row.Findings != w.findings {
+				t.Errorf("SUMMARY findings of %s = %d, want %d", w.name, row.Findings, w.findings)
+			}
+		}
+	})
+
+	t.Run("one file entry warns once", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, threeServers())
+		writeTestFile(t, e.work, rules.IgnoreFileName, rules.RuleToolFindingCap+"\n")
+
+		got := scanWithCap(e, insp(), limit)
+
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertToolFindings(t, got.stdout, rows...)
+		wantStderr := append([]string{scanPrefix + "using 1 entry from " + rules.IgnoreFileName}, warnings...)
+		wantStderr = append(wantStderr, fileCannotIgnoreWarning(rules.RuleToolFindingCap))
+		assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, append(wantStderr, pinned...))))
+	})
+}
+
+// TestScanToolsCapDefaultLimit checks the default limit: with maxToolRows at
+// zero (what a real scan has), a server keeps maxToolRowsPerServer tool rows
+// and gets one cap row for the rest. The server has 5 more hits than the limit.
+// The check uses --json, which keeps the check of 1000 rows short.
+func TestScanToolsCapDefaultLimit(t *testing.T) {
+	t.Parallel()
+
+	const over = 5
+	if maxToolRowsPerServer != 1000 {
+		t.Fatalf("maxToolRowsPerServer = %d, want 1000 (PRD limit)", maxToolRowsPerServer)
+	}
+	e := newPinEnv(t, oneServer("srv"))
+	insp := fakeServers(map[string][]inspect.Tool{"srv": numberedTools(maxToolRowsPerServer + over)})
+
+	// The test checks the cap, not the time budget: 1005 tools take about 4
+	// seconds under -race, so a busy machine could use up the default budget
+	// of 5 seconds and cut the rows.
+	got := scanWithLimits(e, insp, time.Hour, 0, "--json")
+
+	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{capWarning("srv", over, maxToolRowsPerServer)}})
+	assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, []string{
+		capWarning("srv", over, maxToolRowsPerServer), pinnedLine("srv", maxToolRowsPerServer+over),
+	})))
+	want := append(keptJSONRows("srv", maxToolRowsPerServer), capJSONRow("srv", "high", over, maxToolRowsPerServer))
+	rows := jsonFindings(t, got.stdout)
+	if len(rows) != len(want) {
+		t.Fatalf("JSON findings = %d rows, want %d (%d tool rows and the cap row)", len(rows), len(want), maxToolRowsPerServer)
+	}
+	if !slices.Equal(rows, want) {
+		t.Errorf("JSON findings differ from the first %d tool rows and the cap row", maxToolRowsPerServer)
+	}
+}
+
+// TestScanToolsCapServerNameEscaped checks that a server name with an escape
+// sequence is quoted and escaped in the warning, so no raw escape byte reaches
+// stderr or stdout, and that the cap row holds fixed text and two numbers
+// only: neither the server name nor a tool name nor tool text.
+func TestScanToolsCapServerNameEscaped(t *testing.T) {
+	t.Parallel()
+
+	const (
+		limit      = 3
+		name       = "evil\x1b[31m\u202e"
+		quotedName = "\"evil\\x1b[31m\\u202e\""
+	)
+	e := newPinEnv(t, map[string]any{name: map[string]any{"command": "npx"}})
+	insp := fakeServers(map[string][]inspect.Tool{name: numberedTools(5)})
+
+	got := scanWithCap(e, insp, limit)
+
+	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{capWarning(quotedName, 2, limit)}})
+	assertContainsAll(t, "stderr", got.stderr, []string{capWarning(quotedName, 2, limit) + "\n"})
+	assertTerminalSafe(t, got.stderr)
+	assertTerminalSafe(t, got.stdout)
+	assertNoToolText(t, got.stderr, "tool_0001")
+
+	jsonRun := scanWithCap(e, insp, limit, "--json")
+
+	assertScanRun(t, jsonRun, scanWant{code: exitFindings})
+	assertTerminalSafe(t, jsonRun.stderr)
+	rows := jsonRowsOf(jsonFindings(t, jsonRun.stdout), rules.RuleToolFindingCap)
+	if want := []report.JSONFinding{capJSONRow(name, "high", 2, limit)}; !slices.Equal(rows, want) {
+		t.Fatalf("JSON cap rows = %+v, want %+v", rows, want)
+	}
+	for _, bad := range []string{"evil", "tool_", toolTextMarker, "\x1b"} {
+		if strings.Contains(rows[0].Related, bad) {
+			t.Errorf("cap row related = %q, want no %q", rows[0].Related, bad)
+		}
+	}
 }

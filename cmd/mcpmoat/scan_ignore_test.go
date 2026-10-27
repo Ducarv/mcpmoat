@@ -360,9 +360,7 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, out, errOut)
 				}
 				// The server table never changes: both servers stay in it.
-				if got := column(tableRows(t, out), 0); !slices.Equal(got, []string{"leaky-a", "leaky-b"}) {
-					t.Errorf("table servers = %v, want both\nstdout:\n%s", got, out)
-				}
+				assertServerNames(t, out, "leaky-a", "leaky-b")
 				rows := findingRows(t, out)
 				var gotServers []string
 				for _, row := range rows {
@@ -395,6 +393,22 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 				// The secret value never shows, in the findings block too.
 				assertNoLeakBoth(t, out, errOut)
 				assertNoEscape(t, out, errOut)
+
+				// The same scan with --json: same exit code, same stderr, and an
+				// "ignored" object that agrees with the stderr lines above.
+				jc, jStdout, jStderr := dirsCLI(t, home, work)
+				jCode, jOut, jErrOut := runScanArgs(jc, jStdout, jStderr, append(slices.Clone(args), "--json")...)
+
+				if jCode != code {
+					t.Errorf("--json exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", jCode, code, jOut, jErrOut)
+				}
+				if jErrOut != errOut {
+					t.Errorf("--json stderr differs from the terminal run\n--- terminal ---\n%s--- json ---\n%s", errOut, jErrOut)
+				}
+				// The helper reads the real stderr lines (the same text that the
+				// terminal run was checked against above).
+				assertIgnoredMatchesStderr(t, decodeScanJSON(t, jOut), jErrOut)
+				assertNoLeakBoth(t, jOut, jErrOut)
 			})
 		}
 	}

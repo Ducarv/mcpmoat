@@ -345,6 +345,9 @@ const acceptHintPrefix = "To accept "
 // the --expect value to force a digest mismatch.
 const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 
+// testDigest has the real digest format: "pd1:" and 64 hex characters.
+const testDigest = "pd1:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // assertPinsFileMode fails the test when the file at path cannot be read with
 // stat or its mode is not 0o600. E2E tests pass pinsPath(home) as path.
 func assertPinsFileMode(t *testing.T, path string) {

@@ -116,6 +116,13 @@
   `(the diff was cut: review the full tool first)`, `(--ignore hid some changes: run scan without
   it to review them first)` or `(a change has no diff text: review the tool first)`. The digest
   covers those changes too.
+- `scan --json` gives the same digest in the field `accept` of a pinned server that has a pin
+  finding with a `To accept` hint: `{ "digest": "pd1:<64 hex>", "command": "mcpmoat pin --accept ...
+  --expect <digest>" }`. `command` is there only when the terminal hint prints a command. When the
+  terminal prints steps (a cut diff, a change that `--ignore` hid, a diff that is only a note, a
+  server name that more than one server uses, a config file problem, or a name or path that is not a
+  plain shell word), the JSON has the digest and no command. The JSON never holds the steps. Do not
+  let a CI job accept a change from this field: a person must review the diff first.
 - A server that fails, times out or is refused (an untrusted or turned-off server) shows its status
   in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
   server is already pinned and fails or times out, it is also a high `MOAT-T2-004` finding (see
