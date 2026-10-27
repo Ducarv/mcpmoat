@@ -127,9 +127,11 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: .github/scripts/run-offline.sh
 
-  # Guards the tool version pins and checks the shell scripts in
-  # .github/scripts/. It is a separate small job, with no Go setup and no
-  # GoReleaser, so that it can be a required check on every branch.
+  # Guards the tool version pins, checks the shell scripts in
+  # .github/scripts/ and tests the failure issue job of the weekly vulnerability
+  # check. That test needs jq, which this runner has. It is a separate small
+  # job, with no Go setup and no GoReleaser, so that it can be a required check
+  # on every branch.
   tool-pins:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -150,6 +152,9 @@ jobs:
 
       - name: Check the tool version pins
         run: .github/scripts/check-tool-pins.sh
+
+      - name: Test the failure issue job
+        run: .github/scripts/notify-failure-test.sh
 
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
   # fails here and not at tag time. It then tests the release scripts against
@@ -196,8 +201,9 @@ jobs:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
 
-      # The next two tests need jq, file and go, which this job has. The
-      # snapshot test reads dist/ from the step above.
+      # check-snapshot-test.sh reads dist/ from the step above. It needs jq,
+      # file and go, which this job has. verify-and-publish-test.sh builds its
+      # own small dist/ and needs none of them.
       - name: Test the snapshot check
         run: .github/scripts/check-snapshot-test.sh
 
