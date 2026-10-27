@@ -1,11 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "tool": {
     "name": "mcpmoat",
     "version": "1.2.3"
   },
   "mode": "no-connect",
   "complete": true,
+  "fields_truncated": false,
   "servers": [
     {
       "name": "cc-global",
@@ -154,5 +155,10 @@
     }
   ],
   "diffs": [],
-  "errors": []
+  "errors": [],
+  "ignored": {
+    "total": 0,
+    "rules": {},
+    "file_entries": 0
+  }
 }

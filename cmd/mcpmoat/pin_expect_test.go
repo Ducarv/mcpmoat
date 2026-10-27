@@ -214,9 +214,9 @@ func TestPinExpectMismatch(t *testing.T) {
 		pinsBefore := readFileBytes(t, e.pinsPath())
 
 		got := e.pin(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}),
-			"--accept", "srv", "--expect", "pd1:0000000000000000000000000000000000000000000000000000000000000000")
+			"--accept", "srv", "--expect", wrongDigest)
 
-		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected pd1:0000000000000000000000000000000000000000000000000000000000000000); nothing was saved."}})
+		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected " + wrongDigest + "); nothing was saved."}})
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 			t.Errorf("pins.json changed after a digest mismatch\nbefore: %s\nafter:  %s", pinsBefore, after)
 		}

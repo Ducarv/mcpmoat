@@ -43,12 +43,16 @@ docs/                   PRD and other documentation
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
   apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step
   that both commands use (`serverIdentity`, `readPins`, `pinnable`, `appendDiff`). `scan_pins.go`
-  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
-  `scan_rules.go` loads the rules and builds the `rules.Analyzer` (`loadRules`), and
-  `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds the `--llm`
-  step: it maps each `inspect.Tool` to an `llm.Input` and calls a
-  `toolClassifier`, a small interface that `*llm.Client` implements. The `cli.newClassifier`
-  factory builds it, and tests replace the factory with a fake.
+  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line and its one
+  decision function (`acceptAdvice`). `scan.go` holds the parts of `scan`: `runScan` calls
+  `parseScanArgs` (the flags, in a `scanArgs`), `buildScanSetup` (the notices and the `scanSetup`)
+  and `scanConfigs`. `reportScan` then calls `runScanSteps` (the steps, in a `scanStepsResult`) and
+  `writeScanOutput` (the terminal report or the JSON). `scan_json.go` builds the JSON report
+  (`buildScanReport`). `scan_rules.go` loads the rules and builds the `rules.Analyzer`
+  (`loadRules`), and `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds
+  the `--llm` step: it maps each `inspect.Tool` to an `llm.Input` and calls a `toolClassifier`, a
+  small interface that `*llm.Client` implements. The `cli.newClassifier` factory builds it, and
+  tests replace the factory with a fake.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
@@ -71,7 +75,7 @@ docs/                   PRD and other documentation
   line for each server (`WriteSummary`), the findings grouped by severity (`WriteFindings`) and the
   diffs of changed, new and not verified tools (`WriteDiffs`). `Style` (`style.go`) decides the
   colour. See [Terminal report](#terminal-report). It also renders the JSON report of
-  `scan --json` (`WriteJSON`). See [JSON output](#json-output).
+  `scan --json` (`WriteJSON`), with caps on the text fields. See [JSON output](#json-output).
 - `internal/llm`: the optional `--llm` client (FR-17). It sends the name and description of one tool
   to an Anthropic or OpenAI-compatible API and accepts only a fixed verdict. It uses the standard
   library only. See [The `--llm` classifier](#the---llm-classifier).
@@ -150,26 +154,30 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    [The `--llm` classifier](#the---llm-classifier)).
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs, for clashes with built-in IDs and for reserved
-   native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023` or an ID
-   that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last, `rules.NewAnalyzer` compiles the
-   match block of each rule once. It compiles a config rule only to check it and drops its matcher,
-   and it keeps the description and schema rules. A rule whose regex does not compile gives a load
-   error with the file, the field `match` and the reason. A bad rule file, an ID problem or a bad
-   regex gives exit code 2, also with `--no-connect` (`loadRules` in `cmd/mcpmoat/scan_rules.go`).
-   Then `scan` prints a fixed notice on stderr for the rules from `--rules` that it does not apply:
-   `configRulesNotice` when a rule has the target `config` (`scan` runs only its built-in config
-   checks), and `toolRulesNoConnectNotice` when a rule has the target `description` or `schema` and
-   `--no-connect` is set.
+   native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023`,
+   `MOAT-T1-024` or an ID that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last,
+   `rules.NewAnalyzer` compiles the match block of each rule once. It compiles a config rule only to
+   check it and drops its matcher, and it keeps the description and schema rules. A rule whose regex
+   does not compile gives a load error with the file, the field `match` and the reason. A bad rule
+   file, an ID problem or a bad regex gives exit code 2, also with `--no-connect` (`loadRules` in
+   `cmd/mcpmoat/scan_rules.go`). Then `scan` prints a fixed notice on stderr for the rules from
+   `--rules` that it does not apply: `configRulesNotice` when a rule has the target `config` (`scan`
+   runs only its built-in config checks), and `toolRulesNoConnectNotice` when a rule has the target
+   `description` or `schema` and `--no-connect` is set.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
    two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool
-   rules, with the file and the flags, and one for the pin rules, the LLM rules and `MOAT-T1-023`, with
-   the flags only. The file can come
-   from a cloned repository, so it cannot ignore a pin rule, an LLM rule or the budget rule. The
-   guard is `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts
-   with `MOAT-T2-`, the unexported `ruleIDPrefix`), for `llm.RuleID` and `llm.RuleIDInvalid`
-   (`MOAT-LLM-001` and `MOAT-LLM-002`) and for `rules.RuleAnalysisBudget` (`MOAT-T1-023`). When a file entry for such a rule matches a finding, `scan`
-   keeps the finding, prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells
-   the user to use `--ignore`.
+   rules, with the file and the flags, and one for the pin rules, the LLM rules, `MOAT-T1-023` and
+   `MOAT-T1-024`, with the flags only. The file can come from a cloned repository, so it cannot
+   ignore a pin rule, an LLM rule, the budget rule or the cap rule. The guard is `fileCannotIgnore`:
+   it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with `MOAT-T2-`, the unexported
+   `ruleIDPrefix`), for `llm.RuleID` and `llm.RuleIDInvalid` (`MOAT-LLM-001` and `MOAT-LLM-002`),
+   for `rules.RuleAnalysisBudget` (`MOAT-T1-023`) and for `rules.RuleToolFindingCap`
+   (`MOAT-T1-024`). When a file entry for such a rule matches a finding, `scan` keeps the finding,
+   prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells the user to use
+   `--ignore`. `scanIgnores.fileEntries` holds the number of entries that `scan` read from the file (the
+   N in the stderr line `using N entries`, set in `loadIgnore`). Some of them can be entries that the
+   file cannot apply (see above) or that match no finding. The count goes to the JSON
+   `ignored.file_entries`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
    `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
    uses the same function, so both commands read the configs with the same trust rules.
@@ -177,17 +185,23 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
    from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
    some findings. The rule set gives the severity of each one that is left.
-6. `writeScanReport` prints the report on stdout (see [Terminal report](#terminal-report)):
-   `report.WriteServers` prints the server table, `report.WriteSummary` prints the summary, and
-   `report.WriteFindings` prints the findings, only when findings are left. It never prints a
-   value. Last, `reportScan` prints the ignored count for each rule ID on stderr (only rule IDs and
-   counts, no server names).
-   With `--json`, step 6 is different: `buildScanReport` (`cmd/mcpmoat/scan_json.go`) makes one
+6. `writeScanOutput` writes the report on stdout. Without `--json` it calls `writeScanReport` (see
+   [Terminal report](#terminal-report)): `report.WriteServers` prints the server table,
+   `report.WriteSummary` prints the summary, and `report.WriteFindings` prints the findings, only
+   when findings are left. It never prints a value. Last, `reportScan` prints the ignored count for
+   each rule ID on stderr (`printIgnored`: only rule IDs and counts, no server names). With
+   `--json`, step 6 is different: `buildScanReport` (`cmd/mcpmoat/scan_json.go`) makes one
    `report.ScanReport` from the same servers, findings and diffs, and `report.WriteJSON` writes it
-   on stdout instead of the terminal report. See [JSON output](#json-output).
+   on stdout instead of the terminal report. The `ignored` map that `printIgnored` prints, and
+   `scanIgnores.fileEntries`, also go into the document (`jsonIgnored`): they become the `ignored`
+   object, so a CI job can read the counts without the stderr line. See
+   [JSON output](#json-output).
 
-Steps 1 and 2 always run. Steps 3 to 6 run in both modes. Without `--no-connect`, `scan` adds
-the connect, pin, tool rule and LLM steps between step 5 and step 6:
+Steps 1 and 2 always run. Steps 3 to 6 run in both modes. In the code, `runScan` does steps 1 and 2
+(`parseScanArgs`, `setupLLM`, `loadRules` and `buildScanSetup`). `scanConfigs` does steps 3 and 4.
+`reportScan` does the rest: `runScanSteps` runs step 5 and the steps below, and `writeScanOutput`
+does step 6. Without `--no-connect`, `scan` adds the connect, pin, tool rule and LLM steps between
+step 5 and step 6:
 
 - 5a. `scan` first reads `pins.json` (`pins.Load`). A bad file exits with code 2 before any server
   starts. Then `inspect.Run` inspects the servers with the `--timeout` and `--concurrency` values.
@@ -250,6 +264,18 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it.
+  - The JSON `accept` object (`scan --json`, schema version 3) comes from the same hint and the same
+    decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
+    of the line and `isCommand`, which is true only when the text is the `pin --accept` command
+    (`acceptCommand`) and false when it is the prose steps (`acceptSteps`). The terminal prints
+    `text`. The JSON gets `digest` (the digest of the hint) and, only when `isCommand` is true,
+    `command` (the same `text`). It never gets the prose, so a program cannot run a line that the
+    terminal shows as steps. `acceptOf` (`cmd/mcpmoat/scan_json.go`) finds the hint of a server by
+    its identity (`serverIdentity`); a server with no hint has no `accept` key. When two servers
+    have the same identity (the same client, source, project path and name), the pin step compares
+    only the first one, so `scan` has one hint and prints one "To accept" line. `acceptOf` matches
+    by identity, so the JSON gives both servers the same `accept` object, with the same digest.
+    `WriteJSON` never cuts `digest` or `command`.
 - 5d. The tool rule step (`toolRulesStep` in `cmd/mcpmoat/scan_tools.go`) runs after the pin step
   and before the LLM step, on each server with status `StatusOK`, in config order. It does not run
   when the pin step failed as a whole. For each tool, `rules.Analyzer.CheckTool` runs the
@@ -267,7 +293,26 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     The key is cut to 512 runes and then ends with `...` (`toolKey`, `maxToolKeyRunes`), so a long
     tool name cannot fill the report.
     The rule set gives the severity, the title, the risk and the remediation. The ignore list drops
-    rows like the config rows (see step 3), but the `MOAT-T1-023` row only with `--ignore`.
+    rows like the config rows (see step 3), but the `MOAT-T1-023` and `MOAT-T1-024` rows only with
+    `--ignore`.
+  - Row cap: a server keeps at most 1000 tool rows (`maxToolRowsPerServer` in
+    `cmd/mcpmoat/scan_tools.go`). `addTool` holds the rows after the ignore list, in tool order: a
+    row that the list drops does not count. At the end of the server, `flushTools` keeps the most
+    severe rows (a stable sort, so among rows of the same severity it keeps the ones of the first
+    tools) and leaves them in tool order. A hostile server cannot push a severe finding out of the
+    report with weak findings that come first. A row over the limit is not kept, but it is counted.
+    The pending rows of one server are bounded by its tools (at most 10,000) times the rules. Then
+    `addCapRow` adds one `MOAT-T1-024` row (`rules.RuleToolFindingCap`, a native rule with no YAML file: its title, risk
+    and fix are fixed texts in `scan_tools.go`, `capTitle`, `capRisk` and `capRemediation`) and
+    prints one warning on stderr. Its related text is `N more tool findings are not listed; limit M`
+    (`capText`). The `MOAT-T1-023` row and the cap row do not count toward the limit. The cap row
+    has the severity of `failClosedSeverity`, the same as the budget row, so the row fails closed (high
+    with the built-in rules): a server that floods the report still fails the gate. Only
+    `--ignore MOAT-T1-024` drops it, not the file (`fileCannotIgnore`), so a cloned repository
+    cannot hide that findings were left out. The warning prints also when `--ignore` drops the row.
+    This is a finding, not an execution error: the exit code follows `--fail-on`, and the JSON
+    `complete` stays `true`. The cap keeps a hostile server from filling the report. It does not cap
+    the other rows (see [Size bound](#size-bound)).
   - Budget: each server gets its own wall-clock budget of 5 seconds (`toolRulesBudget`), as a
     context deadline. The analyzer checks the context before each regex on each form, and between
     the schema strings and the seams. So it stops at most about one regex on one form after the
@@ -275,7 +320,7 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     which cannot be stopped (#146). A server that uses up its budget keeps the rows found so far and
     gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
     Its severity is the highest severity of the description and schema rules that `scan` applies,
-    but never lower than high (`budgetSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
+    but never lower than high (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
     the built-in rules, and critical when a description or schema rule from `--rules` is critical.
     This severity counts every applied description or schema rule, also one that `--ignore` drops,
     on purpose: the rules that did not run could have given a finding (fail closed). Its related
@@ -331,14 +376,15 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
-In `reportScan`, a signal during the inspection, the tool rule step or the LLM step, an internal
-error of the tool rule step, or a report write error, returns 2 at once.
-Otherwise `reportScan` prints the report and then gets the exit code from `scanExitCode` in
-`cmd/mcpmoat/scan_findings.go`. An execution error gives 2, and 2 wins over 1. Otherwise
-`hasFailingFinding` gives 1 when a row (the ignored findings are already dropped) has a severity at
-or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severity with rank 0
-(unknown) always counts. The user contract, with the list of execution errors, is in
-[Exit codes](exit-codes.md). `--json` does not change the exit codes.
+In `reportScan`, a signal during the inspection, the tool rule step or the LLM step, or an internal
+error of the tool rule step, makes `runScanSteps` stop (its `ok` is false), and `reportScan` returns
+2 at once. A report write error in `writeScanOutput` returns 2 at once too. Otherwise `reportScan`
+writes the report and then gets the exit code from `scanExitCode` in `cmd/mcpmoat/scan_findings.go`.
+An execution error gives 2, and 2 wins over 1. Otherwise `hasFailingFinding` gives 1 when a row (the
+ignored findings are already dropped) has a severity at or above `--fail-on`. It compares
+`rules.Severity` `Rank()` values, and a severity with rank 0 (unknown) always counts. The user
+contract, with the list of execution errors, is in [Exit codes](exit-codes.md). `--json` does not
+change the exit codes.
 
 `mcpmoat pin --accept <server> [--project <path>] [--expect <digest>]` (FR-13) does these steps:
 
@@ -646,7 +692,8 @@ The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk
 of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pins.go`). The
 MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too. The budget finding
 MOAT-T1-023 has no YAML file, so its title, risk and fix are fixed texts in
-`cmd/mcpmoat/scan_tools.go` (`budgetTitle`, `budgetRisk`, `budgetRemediation`). The LLM findings
+`cmd/mcpmoat/scan_tools.go` (`budgetTitle`, `budgetRisk`, `budgetRemediation`). The cap finding
+MOAT-T1-024 has fixed texts there too (`capTitle`, `capRisk`, `capRemediation`). The LLM findings
 MOAT-LLM-001 and MOAT-LLM-002 have fixed titles, risk texts and remediations in `internal/llm`
 (`Title`, `Category.Text`, `Remediation`, `InvalidTitle`, `InvalidText`, `InvalidRemediation`). No
 text from the model reaches them.
@@ -661,30 +708,38 @@ variable value shorter than 8 bytes is not scrubbed from error text, see "Secret
 but it does not remove a secret.
 
 Colour (FR-14, NFR-07) is decoration. Every severity and status also shows as a word, so the plain
-output is complete. `report.Style` holds one switch, `Color`. `cmd/mcpmoat` sets it in `runScan`
-and `internal/report` does not read the environment. `Color` is true only when stdout is a
-terminal (`isTerminal` in `cmd/mcpmoat/cli.go` checks `os.ModeCharDevice` on the stdout writer when
-it is an `*os.File`, with no dependency; any other writer, such as a buffer, is never a terminal),
-`--no-color` is not set (before or after `scan`), and `NO_COLOR` is empty. Only the headings, the severity
-group lines and the status words get colour (ANSI SGR codes in `internal/report/style.go`, the
-only place that writes the ESC byte). All config, server and rule text goes through `termsafe`
-first, so an escape sequence in that text never reaches the terminal as one.
+output is complete. `report.Style` holds one switch, `Color`. `cmd/mcpmoat` sets it in
+`buildScanSetup` and `internal/report` does not read the environment. `Color` is true only when
+stdout is a terminal (`isTerminal` in `cmd/mcpmoat/cli.go` checks `os.ModeCharDevice` on the stdout
+writer when it is an `*os.File`, with no dependency; any other writer, such as a buffer, is never a
+terminal), `--no-color` is not set (before or after `scan`), and `NO_COLOR` is empty. Only the
+headings, the severity group lines and the status words get colour (ANSI SGR codes in
+`internal/report/style.go`, the only place that writes the ESC byte). All config, server and rule
+text goes through `termsafe` first, so an escape sequence in that text never reaches the terminal as
+one.
 
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
-[docs/schema/scan-output.v2.json](schema/scan-output.v2.json). The version 1 schema file,
-[docs/schema/scan-output.v1.json](schema/scan-output.v1.json), stays unchanged. The Go
-types are in
-`internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
-terminal report, in the same order. The one difference: `findings` keeps the order of the rows,
-and the terminal report groups them by severity. The report types hold plain strings, bools and ints, never a
-`discover` type, so a secret cannot reach the output by accident.
+[docs/schema/scan-output.v3.json](schema/scan-output.v3.json). The schema files of the older
+versions, [version 1](schema/scan-output.v1.json) and [version 2](schema/scan-output.v2.json), stay
+unchanged. The Go types are in `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from
+the same data as the terminal report, in the same order. The one difference: `findings` keeps the
+order of the rows, and the terminal report groups them by severity. The report types hold plain
+strings, bools and ints, never a `discover` type, so a secret cannot reach the output by accident.
 
-Shape (`schema_version` 2):
+Shape (`schema_version` 3):
 
 - Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
-  `complete`, `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
+  `complete`, `fields_truncated`, `servers`, `findings`, `diffs`, `errors` and `ignored`. An empty
+  list is `[]`, never `null`.
+- `fields_truncated` is `true` when `WriteJSON` cut at least one long text field (see
+  [Size bound](#size-bound)).
+- `ignored` is always there. It has `total` (the number of findings that an ignore entry dropped:
+  the number in the `N findings ignored` line on stderr), `rules` (the count for each rule ID; `{}`
+  when nothing was ignored; the keys are rule IDs, never text from the ignore file) and
+  `file_entries` (the number of entries that `scan` read from `.mcpmoat-ignore`). The dropped
+  findings are not in `findings`, so a CI job reads these counts to see what the ignore list hid.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
   be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
@@ -692,10 +747,14 @@ Shape (`schema_version` 2):
   the reason is on stderr only. A failed save of new pins comes after the document is written, so it
   does not change `complete`: the findings are whole, and the exit code is 2. A server that used up
   its rule analysis budget does not change `complete` either: it is a `MOAT-T1-023` finding (see
-  5d).
+  5d). A server that has more tool findings than the row cap does not change it either: it is a
+  `MOAT-T1-024` finding.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
-  `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
+  `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report. A server
+  that has changes to accept also has `accept`, with `digest` (the pin digest of the terminal hint)
+  and, only when the terminal hint shows a command, `command` (see 5c). A server with nothing to
+  accept has no `accept` key.
   `not_run` means that mcpmoat did not connect. This is the case in `no-connect` mode. It also
   happens in `connect` mode when the inspection or the pin step fails as a whole (for example,
   `pins.json` cannot be read). Then `mode` is `connect`, every server is `not_run`, `complete` is
@@ -752,12 +811,96 @@ validates sample output against the schema. The limit: the tests cannot stop som
 an old schema file in place. The reviewer must catch that. An old schema file is kept as it was
 released.
 
+Version 3 is one bump for three changes (#175, #169 and #170), because each of them adds a field.
+
 History: version 1 is the first format. Version 2 adds the required finding field `source` (for
 `--llm`, FR-17), and `complete` is also `false` when the LLM step did not classify every tool. The
-other fields keep their names and types.
+other fields keep their names and types. Version 3 adds the top-level `ignored` object (the
+counts of the findings that the ignore list dropped, so a CI job can read them: #175), the optional
+server field `accept` (the digest and the command of the "To accept" hint, so a CI job can read
+them: #169) and the top-level `fields_truncated` flag with the length caps of the text fields
+(#170, see [Size bound](#size-bound)). The other fields keep their names and types. The schema
+files of version 1 and version 2 stay as they were released.
 
-Not in version 2: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
-`--fail-on` (#65).
+Not in version 3: a summary, `pin --json` and `--fail-on` (#65).
+
+### Size bound
+
+`scan --json` bounds the text of each field, the number of tool findings for each server and the
+memory of the writer, also for a hostile config. A project `.mcp.json` can hold a server name of
+megabytes, and every finding row of that server repeats it. The bound has three parts. It does not
+bound the whole document: the config findings, the pin findings and the LLM findings have no row cap
+(see part 2).
+
+1. Per-field caps (`boundReport` in `internal/report/json_bound.go`). `WriteJSON` cuts each
+   untrusted text field to a number of characters (runes) and adds `...` (`termsafe.CutMarker`)
+   after a cut value. It never changes the report of the caller (it works on a copy).
+   - Names, keys, related texts and server fields: 512 characters (`jsonMaxNameRunes`). That is the
+     server `name`, the finding fields `server`, `key` and `related`, the diff fields `server` and
+     `tool`, and the config problem field `server`. A cut value has at most 515 characters.
+   - Paths: 4096 characters (`jsonMaxPathRunes`). That is the server fields `source` and
+     `project_path`, and the config problem fields `path` and `project_path`. A cut value has at
+     most 4099 characters.
+   - Never cut: the diff text (it has its own cut, `diff_truncated`), `argv`, `url`, the accept
+     `command` and the accept `digest`. A cut command line, URL or command would mislead, and a cut
+     digest would not work. The rule ID, the severity and every fixed or enum field are short.
+   - `fields_truncated` is `true` when `WriteJSON` cut any field. A caller can also set it to
+     `true`, and `WriteJSON` never sets it back to `false`. Each cut field has a `maxLength`
+     (515 or 4099) in the schema.
+   - Limit: two names that differ only after the cut look equal in the output (issue #223 tracks a
+     fix). The cut happens only when `WriteJSON` writes. The ignore list and the pins use the real
+     names.
+2. Per-server row cap (see 5d). A server keeps at most 1000 tool rule rows, then one `MOAT-T1-024`
+   row. The cap counts the rows after the ignore list. The `MOAT-T1-023` row and the cap row do not
+   count. The cap bounds the part that grows with the number of tools times the number of rules. It
+   does not bound the other rows of a server. The rows of one server are:
+   - up to 1000 tool rows, plus 1 cap row, plus 1 budget row (bounded by the row cap);
+   - plus the pin rows: at most one for each current tool (a new, changed or unverified tool) and
+     one for each removed tool, plus at most one row for the server itself. A server lists at most
+     10,000 tools (`maxItems` in `internal/inspect`), and `pins.json` holds the tools of an earlier
+     scan, so also at most 10,000;
+   - plus the LLM rows: the scan sends at most 500 tools in all (`maxLLMTools`), and the LLM step
+     adds at most one row for each tool;
+   - plus the config rows (T4 and T5). These have no bound of their own. `secretFinding` in
+     `internal/rules/config.go` makes one row for each env key and each header key that looks like a
+     secret, so the number of config rows is limited only by the size of the config file: 32 MiB
+     for a global file (`maxConfigSize`) and 4 MiB for a project file (`maxProjectConfigSize`).
+
+   The pin rows, the LLM rows and the config rows are not capped by the row cap. A config file can
+   hold at most 10,000 servers (`maxServersPerFile` in `internal/discover`), so the number of
+   servers multiplies the bound. The field caps still cut the text of every row, but a hostile
+   32 MiB config file with a very large number of short env keys can give a very large number of
+   rows, and each row repeats the server name (up to 515 characters). The JSON can then be hundreds
+   of MB. A cap for the config findings is planned as a follow-up (issue #213).
+3. Streaming writer. `WriteJSON` writes the document one list element at a time, through a
+   buffered writer (`jsonStream`). It encodes each server, finding, diff and error on its own, so
+   the memory follows the largest element and not the whole document. The output bytes are the
+   same as when one `json.Encoder` with `SetIndent` encodes the whole document. When a write fails
+   in the middle, `w` may already hold the first part of the document. `WriteJSON` returns the
+   error, and `scan` reports it and exits with 2.
+
+The tests prove the bound of the writer and of the tool rows. The exact measured numbers are in the
+comments of the tests, so they stay with the code. The limits have headroom of about 2 times, so a change that makes the output or the allocations grow with the
+size of a name fails them. No test covers the config rows, because they have no cap.
+
+- `TestWriteJSONBoundsOutputAndMemory` (`internal/report/json_bound_test.go`) tests the writer
+  alone. The hostile report has a server name of 1 MiB and 10,000 findings. In each finding, the
+  `Server`, the `Key` and the `Related` field hold that name, so without the cut the output would
+  be about 31 GB. The output is about 17 MB. `WriteJSON` allocates a small multiple of the output
+  (under 4 times, also with `-race`). The old whole-document encoder allocated 16 to 19 times. The
+  test limits are: output at most 32 MiB, and allocation at most 8 times the output.
+- `TestScanJSONBound` (`cmd/mcpmoat/scan_json_bound_test.go`) tests the whole in-process
+  `scan --json`. The hostile config has a server name of 1 MiB, 3000 tools and 25 rules that match
+  every description. The output is under 1 MiB, with about 1000 rows. In a tool row the
+  name is in the `server` field only: `key` is the tool name and `related` is `description`. For
+  comparison, the same rows with the version 2 encoder (no cut) would hold the name about 1000
+  times, about 1 GB, more than 1,000 times the bounded output. The test checks, in both modes
+  (with and without `-race`), the output size (at most 1.5 MiB), the number of rows, the
+  `fields_truncated` flag, the `MOAT-T1-024` row and the schema. The allocation check runs only
+  without `-race`: the scan allocates a few tens of MiB, and the limit is 128 MiB plus 8 times the
+  output (`maxScanAllocBytes` and `maxJSONAllocFactor`). Under `-race` the race detector makes `regexp`
+  allocate far more, so the check could not catch a regression there. The test skips the check and
+  uses fewer tools in that mode.
 
 ## The `--llm` classifier
 

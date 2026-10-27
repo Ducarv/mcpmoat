@@ -72,10 +72,7 @@ const (
 // must check it, like for the report.
 func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
 	for _, h := range hints {
-		text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-		if !ok || !h.fullyReviewed() || h.ambiguous || configProblem {
-			text = acceptSteps(h, configPath, configProblem)
-		}
+		text, _ := acceptAdvice(h, configPath, configProblem)
 		line := "To accept " + cutName(h.name) + ": " + text
 		if h.truncated {
 			line += hintCutNote
@@ -91,6 +88,22 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 		}
 	}
 	return nil
+}
+
+// acceptAdvice decides what the "To accept" hint of h says, in one place. text
+// is exactly the text that the terminal prints after "To accept <name>: ", before
+// the notes for a cut, ignored or no-text change. isCommand is true only when
+// text is the shell command from acceptCommand, and false when text is the prose
+// steps from acceptSteps. The text is a command only when the name, the project
+// and configPath are bare shell words, the user saw every change, the name
+// selects the server, and no config file has a problem. The JSON output reuses
+// this function, so the terminal and the JSON cannot disagree. It does no I/O.
+func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
+	text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
+	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem {
+		return acceptSteps(h, configPath, configProblem), false
+	}
+	return text, true
 }
 
 // acceptCommand returns the command that accepts the tools with the digest, and

@@ -33,44 +33,98 @@ import (
 // usage in cli.go) lists the flags. docs/exit-codes.md is the exit-code
 // contract (FR-16), and the usage text summarises it.
 func (c *cli) runScan(opts options, args []string) int {
+	a, code, ok := c.parseScanArgs(args)
+	if !ok {
+		return code
+	}
+
+	// Check the LLM flags and the API key before scan reads a config file
+	// (see setupLLM). Without --llm, classifier is nil: no key is read and no
+	// client is built.
+	classifier, ok := c.setupLLM(a.llmOpts, a.noConnect)
+	if !ok {
+		return exitError
+	}
+	defer closeClassifier(classifier)
+
+	// Load and check the rules in both modes, so a bad rule file gives exit
+	// code 2 also with --no-connect. The set gives the severity and the texts
+	// of the findings. The analyzer applies the description and schema rules
+	// to the tools when scan connects to the servers.
+	loaded, ok := c.loadRules(a.rulesDir)
+	if !ok {
+		return exitError
+	}
+
+	setup, ok := c.buildScanSetup(opts, a, loaded, classifier)
+	if !ok {
+		return exitError
+	}
+
+	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
+	// main). scan starts stdio servers in their own session, so the terminal
+	// does not reach them: only this context stops them.
+	return c.scanConfigs(c.ctxOrBackground(), a.configPath, a.ignoreIDs, setup)
+}
+
+// scanArgs holds the checked flags of "scan".
+type scanArgs struct {
+	noConnect bool // --no-connect: static analysis only
+	noColor   bool // --no-color after "scan"
+	jsonOut   bool // --json
+	// configPath is the --config value, or empty for auto-discovery.
+	configPath string
+	// rulesDir is the --rules folder, or empty.
+	rulesDir string
+	// ignoreIDs holds the --ignore rule IDs, in the order given. Each one is a
+	// valid rule ID.
+	ignoreIDs []string
+	// failOn is the --fail-on value, or high when the flag is not given.
+	failOn rules.Severity
+	// llmOpts holds the LLM flags (FR-17), see addLLMFlags.
+	llmOpts llmFlags
+	// connOpts are the checked --timeout and --concurrency values. They are
+	// checked in both modes, also when --no-connect starts no server.
+	connOpts inspect.Options
+}
+
+// parseScanArgs parses and checks the flags of "scan". When ok is false, it has
+// printed the message (or the help text) and code is the exit code.
+func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
 	// We print our own messages and scanUsage prints the help, so the flag
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
-	noConnect := fs.Bool("no-connect", false, "")
-	noColor := fs.Bool("no-color", false, "")
-	jsonOut := fs.Bool("json", false, "")
+	fs.BoolVar(&a.noConnect, "no-connect", false, "")
+	fs.BoolVar(&a.noColor, "no-color", false, "")
+	fs.BoolVar(&a.jsonOut, "json", false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
 	// onceStringFlag refuses an empty value, so a result that is not ""
 	// means the flag was given.
-	var configPath, rulesDir string
-	onceStringFlag(fs, "config", "a file name", &configPath)
-	onceStringFlag(fs, "rules", "a folder name", &rulesDir)
+	onceStringFlag(fs, "config", "a file name", &a.configPath)
+	onceStringFlag(fs, "rules", "a folder name", &a.rulesDir)
 
 	// fs.Func calls the function once for each --ignore, so the user can
 	// give the flag more than once. ValidRuleID also refuses an empty value
 	// and a flag name such as "--no-connect" that the flag package took as
 	// the value: a rule ID starts with a letter. The flag error already holds
 	// the value, so the message does not repeat it.
-	var ignoreIDs []string
 	fs.Func("ignore", "", func(value string) error {
 		if !rules.ValidRuleID(value) {
 			return errors.New("--ignore needs a rule ID")
 		}
-		ignoreIDs = append(ignoreIDs, value)
+		a.ignoreIDs = append(a.ignoreIDs, value)
 		return nil
 	})
 
 	// severityFlag refuses an empty value, so an empty result means the flag
 	// was not given: then the default is high.
-	var failOn rules.Severity
-	severityFlag(fs, "fail-on", &failOn)
+	severityFlag(fs, "fail-on", &a.failOn)
 
 	// The LLM flags (FR-17), see addLLMFlags.
-	var llmOpts llmFlags
-	baseURLFlag := addLLMFlags(fs, &llmOpts)
+	baseURLFlag := addLLMFlags(fs, &a.llmOpts)
 
 	// The error of another flag, or the list of unexpected arguments, can
 	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
@@ -81,65 +135,55 @@ func (c *cli) runScan(opts options, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
-			return exitOK
+			return scanArgs{}, exitOK, false
 		}
 		// The flag package puts the value into err. Print the problem that
 		// the flag recorded instead: its text holds no value.
 		if baseURLFlag.problem != nil {
-			return c.usageError("scan", "%v", baseURLFlag.problem)
+			return scanArgs{}, c.usageError("scan", "%v", baseURLFlag.problem), false
 		}
 		// The flag error holds untrusted argv inside its own text, so
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		return c.usageError("scan", "%s", termsafe.Quote(hider.hide(err.Error())))
+		return scanArgs{}, c.usageError("scan", "%s", termsafe.Quote(hider.hide(err.Error()))), false
 	}
 	if c.rejectArgs("scan", hider.hideAll(fs.Args())) {
-		return exitError
+		return scanArgs{}, exitError, false
 	}
-	if failOn == "" {
-		failOn = rules.SeverityHigh
+	if a.failOn == "" {
+		a.failOn = rules.SeverityHigh
 	}
 
 	// Check the values in both modes, so a bad value is a usage error even
 	// when --no-connect starts no server. The options go to inspect.Run.
 	connOpts, err := connectOptions(*timeout, *concurrency)
 	if err != nil {
-		return c.usageError("scan", "%v", err)
+		return scanArgs{}, c.usageError("scan", "%v", err), false
 	}
+	a.connOpts = connOpts
+	return a, exitOK, true
+}
 
-	// Check the LLM flags and the API key before scan reads a config file
-	// (see setupLLM). Without --llm, classifier is nil: no key is read and no
-	// client is built.
-	classifier, ok := c.setupLLM(llmOpts, *noConnect)
-	if !ok {
-		return exitError
-	}
-	defer closeClassifier(classifier)
-
-	// Load and check the rules in both modes, so a bad rule file gives exit
-	// code 2 also with --no-connect. The set gives the severity and the texts
-	// of the findings. The analyzer applies the description and schema rules
-	// to the tools when scan connects to the servers.
-	loaded, ok := c.loadRules(rulesDir)
-	if !ok {
-		return exitError
-	}
-
+// buildScanSetup prints the notices on stderr and builds the scanSetup from
+// the checked flags a, the loaded rules and the classifier (nil without
+// --llm). When ok is false, it has printed the message and scan must exit with
+// code 2.
+func (c *cli) buildScanSetup(opts options, a scanArgs, loaded loadedRules, classifier toolClassifier) (setup scanSetup, ok bool) {
 	var connect *inspect.Options // nil with --no-connect
-	if !*noConnect {
-		connect = &connOpts
+	if !a.noConnect {
+		connect = &a.connOpts
 	}
 	// Scan does not apply a rule from --rules with the target config, and it
 	// applies no description or schema rule with --no-connect. Say so, or such
 	// a rule would pass in silence. Each notice is fixed text.
-	for _, n := range loaded.external.notices(*noConnect) {
+	for _, n := range loaded.external.notices(a.noConnect) {
 		fprintf(c.stderr, "%s\n", n)
 	}
 	// No built-in rule is critical, so --fail-on critical gives exit code 0
 	// for every built-in finding. Say so, or a CI log shows no sign that the
 	// gate cannot fail.
-	if failOn == rules.SeverityCritical {
+	if a.failOn == rules.SeverityCritical {
 		fprintf(c.stderr, "%s\n", failOnCriticalNotice)
 	}
 
@@ -149,28 +193,24 @@ func (c *cli) runScan(opts options, args []string) int {
 	typo, err := rules.NewBuiltinTyposquat()
 	if err != nil {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
-		return exitError
+		return scanSetup{}, false
 	}
 	// Colour is on only when stdout is a terminal, --no-color is not set and
 	// NO_COLOR is empty (FR-14). opts.noColor holds the combined result of the
 	// global flag (before "scan") and the environment variable. The scan flag
 	// --no-color (after "scan") is read here, so both positions work.
-	style := report.Style{Color: !opts.noColor && !*noColor && c.stdoutIsTTY}
-	setup := scanSetup{
-		checks:     configChecks{set: loaded.set, typo: typo},
-		analyzer:   loaded.analyzer,
-		toolBudget: c.toolBudgetOrDefault(),
-		connect:    connect,
-		style:      style,
-		failOn:     failOn,
-		jsonOut:    *jsonOut,
-		classifier: classifier,
-	}
-
-	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
-	// main). scan starts stdio servers in their own session, so the terminal
-	// does not reach them: only this context stops them.
-	return c.scanConfigs(c.ctxOrBackground(), configPath, ignoreIDs, setup)
+	style := report.Style{Color: !opts.noColor && !a.noColor && c.stdoutIsTTY}
+	return scanSetup{
+		checks:      configChecks{set: loaded.set, typo: typo},
+		analyzer:    loaded.analyzer,
+		toolBudget:  c.toolBudgetOrDefault(),
+		maxToolRows: c.maxToolRowsOrDefault(),
+		connect:     connect,
+		style:       style,
+		failOn:      a.failOn,
+		jsonOut:     a.jsonOut,
+		classifier:  classifier,
+	}, true
 }
 
 // scanSetup holds what scan has built before it reads the config files.
@@ -184,6 +224,9 @@ type scanSetup struct {
 	// toolBudget is the time that the tool rule step can use for the tools
 	// of one server (toolRulesBudget in a real scan).
 	toolBudget time.Duration
+	// maxToolRows is the largest number of tool rows that the tool rule step
+	// keeps for one server (maxToolRowsPerServer in a real scan).
+	maxToolRows int
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers, checks their pins and
 	// applies the tool rules to their tools.
@@ -210,7 +253,16 @@ func (c *cli) toolBudgetOrDefault() time.Duration {
 	return c.toolBudget
 }
 
-// failOnCriticalNotice is the line that runScan prints on stderr for
+// maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
+// field is zero (or negative).
+func (c *cli) maxToolRowsOrDefault() int {
+	if c.maxToolRows > 0 {
+		return c.maxToolRows
+	}
+	return maxToolRowsPerServer
+}
+
+// failOnCriticalNotice is the line that buildScanSetup prints on stderr for
 // --fail-on critical. TestNoBuiltinCriticalSeverity keeps it true.
 const failOnCriticalNotice = "mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1"
 
@@ -453,10 +505,11 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
 // config rules holds the entries of .mcpmoat-ignore in the directory wd, then
 // one entry for each --ignore ID in ids. The list for the pin rules, the LLM
-// rules and the budget rule (MOAT-T1-023) holds only the --ignore entries,
-// because the file is untrusted (see scanIgnores). ids holds only valid rule
-// IDs: the --ignore flag checks them. An empty wd means that the working
-// directory is not known, so loadIgnore reads no file.
+// rules, the budget rule (MOAT-T1-023) and the tool findings cap rule
+// (MOAT-T1-024) holds only the --ignore entries, because the file is untrusted
+// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
+// them. An empty wd means that the working directory is not known, so
+// loadIgnore reads no file.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -466,9 +519,10 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // findings. The --ignore IDs come from the user, so they give no notice.
 //
 // An entry of the file for a pin rule (MOAT-T2-*), an LLM rule
-// (MOAT-LLM-001 or MOAT-LLM-002) or the budget rule (MOAT-T1-023) is not
-// applied: scan warns when such an entry matches a finding (see pinOutcomes,
-// toolRulesStep and classifyTools).
+// (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023) or the tool
+// findings cap rule (MOAT-T1-024) is not applied (see fileCannotIgnore): scan
+// warns when such an entry matches a finding (see pinOutcomes, toolRulesStep
+// and classifyTools).
 func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 	var ign scanIgnores
 	if wd != "" {
@@ -485,6 +539,7 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 			c.cmdPrintf("scan", "using %d %s from %s", n, plural(n, "entry", "entries"), rules.IgnoreFileName)
 		}
 		ign.all = fromFile
+		ign.fileEntries = fromFile.Len()
 	}
 	for _, id := range ids {
 		entry := rules.IgnoreEntry{RuleID: id}
@@ -500,40 +555,83 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the report can miss servers that the client loads"
 
-// reportScan runs the config rules on the servers of res, with the ignore list
-// ignore. When setup.connect is not nil, it also inspects the servers, checks
-// their pins (see inspectAndPin) and applies the description and schema rules
-// to their tools (see toolRulesStep). configPath is the --config value, or
-// empty. It prints the report on stdout (see writeScanReport, or the JSON
-// document with --json), and the file problems and warnings on stderr, and
-// returns the exit code (see scanExitCode; docs/exit-codes.md is the
-// contract, and the usage text in cli.go summarises it). The status of each
-// server and the warnings of its inspection are part of the report on stdout
-// (the summary), not warnings on stderr. They never change the exit code. When
-// the ignore list dropped at least one finding, it prints one line on stderr
-// after the report, with the rule IDs and their counts (see printIgnored).
+// reportScan runs the steps of the scan (see runScanSteps), writes the report
+// (see writeScanOutput) and returns the exit code. res holds the servers, setup
+// the settings of the scan, ignore the ignore list and configPath the --config
+// value, or empty.
 //
-// The pin findings, the tool rule findings and, with --llm, the LLM findings
-// (see classifyTools) are merged with the config findings before the report
-// (the table or the JSON document) is written, so the report holds them all
-// and scanExitCode sees them all: an LLM finding counts for --fail-on like any
-// other. A server whose rule analysis uses up setup.toolBudget gets a
-// MOAT-T1-023 finding and a warning on stderr; that alone is not exit code 2.
-// The finding is high, or critical when a description or schema rule from
-// --rules is critical (see budgetSeverity).
-// New pins are saved after the report is printed, so a save error never hides
-// the report. The "pinned N tools" notices come after a successful save.
+// The report goes on stdout, the file problems and warnings on stderr. After
+// the report, reportScan prints one line on stderr with the rule IDs and counts
+// of the findings that the ignore list dropped (see printIgnored), and saves
+// the new pins (see savePinned). A save error never hides the report. The
+// "pinned N tools" notices come after a successful save.
 //
-// A config file problem, a pins.json read or save error, an inspect.Run error,
-// an incomplete LLM step (a failed request, or more tools than maxLLMTools) or
-// a signal before the save of new pins (when there are new pins) gives exit
-// code 2, also when there are findings at or above setup.failOn (see
-// scanExitCode). The report is already printed when reportScan calls
-// scanExitCode, so the user still sees the findings. Only a signal during the
-// inspection, the tool rule step or the LLM step, an internal error of the
-// tool rule step and a failed write of the report return exit code 2 without
-// a full report.
+// The exit code comes from scanExitCode (docs/exit-codes.md is the contract,
+// and the usage text in cli.go summarises it). A config file problem, a pin
+// error or an incomplete LLM step gives exit code 2, also when there are
+// findings at or above setup.failOn: the report is already printed, so the
+// user still sees them. A signal during the steps, or a failed write of the
+// report, returns exit code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
+	steps, ok := c.runScanSteps(ctx, res, setup, ignore)
+	if !ok {
+		return exitError
+	}
+	pinFailed := steps.pinFailed
+
+	configProblem := len(res.Errors) > 0
+	if writeErr := c.writeScanOutput(res, steps, setup, ignore.fileEntries, configPath, configProblem); writeErr != nil {
+		c.cmdPrintf("scan", "cannot write output")
+		// stderr can still work. The file problems are the reason for a
+		// failed scan, so the user must still see them. New pins are not
+		// saved: the user did not see the report.
+		c.printFileErrors("scan", res.Errors)
+		return exitError
+	}
+	c.printIgnored(steps.ignored)
+
+	if !c.savePinned(ctx, steps.pr) {
+		pinFailed = true
+	}
+
+	if configProblem {
+		// Print the problems in the order of the result, then the hint.
+		c.printFileErrors("scan", res.Errors)
+		fprintf(c.stderr, "%s\n", configErrorHint)
+	}
+	return scanExitCode(configProblem || pinFailed || steps.llmIncomplete, steps.rows, setup.failOn)
+}
+
+// scanStepsResult holds what the steps of a scan produce (see runScanSteps).
+// reportScan writes the report from it.
+type scanStepsResult struct {
+	// rows holds the findings of all steps: the config rules, the pins, the
+	// tool rules and, with --llm, the LLM step.
+	rows []report.FindingRow
+	// ignored holds, for each rule ID, the number of findings that the ignore
+	// list dropped (see printIgnored).
+	ignored map[string]int
+	// counts holds the number of findings of each server, in the order of the
+	// servers, for the summary.
+	counts []int
+	// pr is the report of the pin step. It is the zero value when the pin step
+	// did not run.
+	pr pinReport
+	// pinFailed is true when the pin step failed. The error is already on
+	// stderr.
+	pinFailed bool
+	// llmIncomplete is true when a request failed or the tool cap was hit in
+	// the LLM step: the report still prints, and scan exits with 2.
+	llmIncomplete bool
+}
+
+// runScanSteps runs the steps of a scan on the servers of res: the config
+// rules, then, when setup.connect is not nil, the pin step (see inspectAndPin),
+// the tool rule step (see toolRulesStep) and the LLM step (see llmStep). It
+// merges their rows, ignored counts and per-server counts. When ok is false, the
+// scan must exit with 2 and print no report: the user stopped the scan, or the
+// guard of a step caught an error. The step already wrote the line on stderr.
+func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanSetup, ignore *scanIgnores) (steps scanStepsResult, ok bool) {
 	// counts holds the findings of each server for the summary. It starts
 	// with the config findings, and the tool rule step and the LLM step add
 	// their own.
@@ -550,7 +648,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
-			return exitError
+			return scanStepsResult{}, false
 		}
 		// Any other error is already on stderr. The report of the config
 		// rules still prints, and scan exits with 2.
@@ -559,87 +657,94 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	// The tool rule step and the LLM step (--llm) run after the pin step, on
-	// the tools of the servers that scan inspected. With --no-connect, or
-	// with no server, there are no outcomes, so both steps check nothing.
-	// When the pin step failed (pins.json cannot be read, or inspect.Run
-	// failed), no server was inspected and the error is already on stderr,
-	// so the steps do not run: the llmNoToolText notice would give the wrong
-	// cause.
+	// The tool rule step and the LLM step (--llm) run after the pin step. When
+	// the pin step failed (pins.json cannot be read, or inspect.Run failed), no
+	// server was inspected and the error is already on stderr, so the steps do
+	// not run: the llmNoToolText notice would give the wrong cause.
+	var tr toolRulesResult
 	var lr llmResult
 	if !pinFailed {
-		// The tool rule step applies the description and schema rules (T1
-		// and T3) and adds its rows to counts (see toolRulesStep). A server
-		// that uses up its time budget gets a MOAT-T1-023 row, not exit 2.
-		tr, err := c.toolRulesStep(ctx, setup, outcomes, ignore, counts)
-		if err != nil {
-			// The user stopped the scan, as for a signal during the
-			// inspection, or the guard of toolRulesStep caught an error: no
-			// report and no saved pins. toolRulesStep wrote the line on
-			// stderr.
-			return exitError
-		}
-		rows = append(rows, tr.rows...)
-		ignored = mergeIgnored(ignored, tr.ignored)
-
-		// The LLM step only adds rows: it never changes or drops a rule
-		// row, and it never touches pins, diffs or hints (see llmStep).
-		var ok bool
-		lr, ok = c.llmStep(ctx, setup.classifier, outcomes, ignore)
-		if !ok {
-			// The user stopped the scan, as for a signal during the
-			// inspection, or the guard of llmStep caught an error: no report
-			// and no saved pins. llmStep wrote the line on stderr.
-			return exitError
+		var stepsOK bool
+		tr, lr, stepsOK = c.runToolAndLLMSteps(ctx, setup, outcomes, ignore, counts)
+		if !stepsOK {
+			return scanStepsResult{}, false
 		}
 	}
-	// A failed request or the tool cap makes the result incomplete: the
-	// report still prints, and scan exits with 2.
-	llmIncomplete := lr.incomplete()
+	rows = append(rows, tr.rows...)
+	ignored = mergeIgnored(ignored, tr.ignored)
 	rows = append(rows, lr.rows...)
 	ignored = mergeIgnored(ignored, lr.ignored)
 	addLLMCounts(counts, lr.counts)
 
-	configProblem := len(res.Errors) > 0
-	var writeErr error
+	return scanStepsResult{
+		rows:      rows,
+		ignored:   ignored,
+		counts:    counts,
+		pr:        pr,
+		pinFailed: pinFailed,
+		// A failed request or the tool cap makes the result incomplete: the
+		// report still prints, and scan exits with 2.
+		llmIncomplete: lr.incomplete(),
+	}, true
+}
+
+// runToolAndLLMSteps runs the tool rule step (see toolRulesStep) and then the
+// LLM step (see llmStep) on the tools of the servers that scan inspected. With
+// --no-connect, or with no server, there are no outcomes, so both steps check
+// nothing. The tool rule step applies the description and schema rules (T1 and
+// T3) and adds its rows to counts. A server that uses up its time budget gets a
+// MOAT-T1-023 row, not exit 2. The LLM step only adds rows: it never changes or
+// drops a rule row, and it never touches pins, diffs or hints.
+//
+// When ok is false, the user stopped the scan, as for a signal during the
+// inspection, or the guard of a step caught an error: the scan must print no
+// report and save no pins. The step already wrote the line on stderr.
+func (c *cli) runToolAndLLMSteps(ctx context.Context, setup scanSetup, outcomes []inspect.Outcome, ignore *scanIgnores, counts []int) (tr toolRulesResult, lr llmResult, ok bool) {
+	tr, err := c.toolRulesStep(ctx, setup, outcomes, ignore, counts)
+	if err != nil {
+		return toolRulesResult{}, llmResult{}, false
+	}
+	lr, ok = c.llmStep(ctx, setup.classifier, outcomes, ignore)
+	if !ok {
+		return toolRulesResult{}, llmResult{}, false
+	}
+	return tr, lr, true
+}
+
+// writeScanOutput writes the report on c.stdout: the JSON document with --json,
+// or the terminal report (see writeScanReport). It returns the first write
+// error. fileEntries is the number of entries that scan read from
+// .mcpmoat-ignore: the JSON report holds it. configPath is the --config value,
+// or empty. configProblem is true when a config file has a problem.
+func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, fileEntries int, configPath string, configProblem bool) error {
 	if setup.jsonOut {
 		mode := report.ModeNoConnect
 		if setup.connect != nil {
 			mode = report.ModeConnect
 		}
-		complete := !pinFailed && !configProblem && !llmIncomplete
-		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
-	} else {
-		statuses := pr.serverStatuses(res.Servers, counts)
-		if pinFailed {
-			// The pin step stopped before any server was inspected. Say so, or
-			// each line would look like a refused server. The error is on stderr.
-			for i := range statuses {
-				statuses[i].Reason = reasonPinStepFailed
-			}
+		complete := !steps.pinFailed && !configProblem && !steps.llmIncomplete
+		return c.writeScanJSON(scanJSONInput{
+			version:       c.build.version,
+			mode:          mode,
+			complete:      complete,
+			res:           res,
+			rows:          steps.rows,
+			pr:            steps.pr,
+			ignored:       steps.ignored,
+			fileEntries:   fileEntries,
+			configPath:    configPath,
+			configProblem: configProblem,
+		})
+	}
+	statuses := steps.pr.serverStatuses(res.Servers, steps.counts)
+	if steps.pinFailed {
+		// The pin step stopped before any server was inspected. Say so, or
+		// each line would look like a refused server. The error is on stderr.
+		for i := range statuses {
+			statuses[i].Reason = reasonPinStepFailed
 		}
-		writeErr = c.writeScanReport(res.Servers, statuses, rows, pr, setup.style, configPath, configProblem)
 	}
-	if writeErr != nil {
-		c.cmdPrintf("scan", "cannot write output")
-		// stderr can still work. The file problems are the reason for a
-		// failed scan, so the user must still see them. New pins are not
-		// saved: the user did not see the report.
-		c.printFileErrors("scan", res.Errors)
-		return exitError
-	}
-	c.printIgnored(ignored)
-
-	if !c.savePinned(ctx, pr) {
-		pinFailed = true
-	}
-
-	if configProblem {
-		// Print the problems in the order of the result, then the hint.
-		c.printFileErrors("scan", res.Errors)
-		fprintf(c.stderr, "%s\n", configErrorHint)
-	}
-	return scanExitCode(configProblem || pinFailed || llmIncomplete, rows, setup.failOn)
+	return c.writeScanReport(res.Servers, statuses, steps.rows, steps.pr, setup.style, configPath, configProblem)
 }
 
 // writeScanReport writes the report on c.stdout, in this order: the server

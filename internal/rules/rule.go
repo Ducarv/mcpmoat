@@ -80,6 +80,12 @@ func (t Target) Valid() bool {
 // rule with this ID (see ReservedRuleID).
 const RuleAnalysisBudget = "MOAT-T1-023"
 
+// RuleToolFindingCap is a native rule ID with no YAML file in rules/. mcpmoat
+// scan reports it as one summary finding for a server that has more tool
+// findings than the per-server cap. The ID passes ValidRuleID. It is reserved:
+// NewSet refuses an external rule with this ID (see ReservedRuleID).
+const RuleToolFindingCap = "MOAT-T1-024"
+
 // Match is the `match:` block of a rule. Parse checks only its shape, and
 // Compile checks the rest: exactly one kind is set (AnyRegex, AllRegex,
 // Keywords or Heuristic), and Params is only for Heuristic, with integer

@@ -146,9 +146,7 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings, noStdout: canaries})
 			assertCleanStderr(t, stderr)
 			assertContainsNone(t, "stderr", stderr, canaries)
-			if got := column(tableRows(t, stdout), 0); !slices.Equal(got, wantServers) {
-				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
-			}
+			assertServerNames(t, stdout, wantServers...)
 			assertFindingRows(t, stdout, wantRows)
 			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
@@ -191,9 +189,7 @@ func TestScanFindingsTyposquatFixture(t *testing.T) {
 			code, stdout, stderr := findingsScan(t, "typosquat", mode)
 
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-			if got := column(tableRows(t, stdout), 0); !slices.Equal(got, wantServers) {
-				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
-			}
+			assertServerNames(t, stdout, wantServers...)
 			assertFindingRows(t, stdout, wantRows)
 			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
