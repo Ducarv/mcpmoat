@@ -99,8 +99,11 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   always check the exit code too. A server that uses up its rule time budget does not make
   `complete` `false`: the `MOAT-T1-023` finding tells you about it.
 - A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
-  in `related`. A tool name longer than 512 characters (runes) is cut to 512 in `key` and ends
-  with `...`. The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
+  in `related`. An LLM finding (`MOAT-LLM-001`, `MOAT-LLM-002`) also has `"field": "tool"` and
+  the tool name in `key`. In a tool rule finding and in an LLM finding, a tool name longer than
+  512 characters (runes) is cut to 512 in `key` and ends with `...`. A pin finding
+  (`MOAT-T2-001` to `MOAT-T2-003`) is not cut yet: its `key` holds the full tool name. The
+  `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
   (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
 - The document never holds env or header values. A finding names the key it is about, for example
   `GITHUB_TOKEN`, never its value. See [JSON output](ARCHITECTURE.md#json-output) for the full

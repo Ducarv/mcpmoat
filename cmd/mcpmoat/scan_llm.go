@@ -652,16 +652,17 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 // floor row (see truncatedRow) when the model rated it none or low, or gave
 // no usable answer. So a cut tool always gets an llm.RuleID row of at least
 // medium, and never an llm.RuleIDInvalid row.
+//
+// The Key is toolKey(job.in.ToolName), as in a tool rule row: the name cut to
+// maxToolKeyRunes runes, or noToolNameKey for an empty name. All the rows
+// below start from this row, so they all get the same Key. The ignore lookup
+// in classifyTools uses the real tool name, not the Key.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
-	key := job.in.ToolName
-	if key == "" {
-		key = noToolNameKey
-	}
 	row := report.FindingRow{
 		ServerRef: job.ref,
 		Source:    report.SourceLLM,
 		Field:     rules.FieldTool,
-		Key:       key,
+		Key:       toolKey(job.in.ToolName),
 	}
 	switch a.kind {
 	case answerVerdict:

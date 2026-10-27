@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
@@ -26,6 +27,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file tests "mcpmoat scan --llm" (FR-17) in process. The tests inject
@@ -1414,6 +1416,144 @@ func TestScanLLMIgnore(t *testing.T) {
 			t.Errorf("stderr has %d \"cannot ignore\" warnings, want 1\nstderr:\n%s", n, r.stderr)
 		}
 	})
+}
+
+// llmLongOutputMax is the most bytes that stdout or stderr of one scan in
+// TestScanLLMLongToolName may hold. It is far below the 100 KiB tool name,
+// and far above the size of the report with the cut name.
+const llmLongOutputMax = 16 << 10
+
+// TestScanLLMLongToolName checks the cap on the Key of an LLM row (FR-17,
+// issue #211), as TestScanToolsLongToolName does for a tool rule row. A tool
+// with a 100 KiB name gives an LLM row whose Key is the name cut to
+// maxToolKeyRunes runes and termsafe.CutMarker, in the --json findings. The
+// terminal report cuts the Key again to its own cell cap. Neither stdout nor
+// stderr holds the full name. The 'é' name has two bytes in each rune, so a
+// cut that counts bytes gives a Key of the wrong length.
+func TestScanLLMLongToolName(t *testing.T) {
+	t.Parallel()
+
+	// The tail marker is at the end of the name, after the cut, so it must
+	// not show anywhere.
+	const tail = "ZQNAMETAIL"
+	names := []struct {
+		name string
+		r    string // the rune that fills the tool name
+	}{
+		{"ascii", "n"},
+		{"multi-byte", "é"},
+	}
+	for _, nm := range names {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", nm.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				toolName := strings.Repeat(nm.r, (100<<10-len(tail))/len(nm.r)) + tail
+				tools := map[string][]inspect.Tool{"srv": {mkTool(toolName, llmMarkHigh)}}
+				e := llmEnv(t, tools)
+				args := []string{"--llm"}
+				if jsonOut {
+					args = append(args, "--json")
+				}
+
+				r := llmScan(t, e, tools, &llmFake{}, args...)
+
+				if r.code != exitFindings {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
+				}
+				wantKey := strings.Repeat(nm.r, maxToolKeyRunes) + termsafe.CutMarker
+				if jsonOut {
+					rows := llmJSONRows(t, decodeScanJSON(t, r.stdout))
+					if len(rows) != 1 || rows[0].rule != llm.RuleID || rows[0].severity != "high" || rows[0].server != "srv" {
+						t.Fatalf("JSON LLM findings = %d rows, want one %s high row of srv", len(rows), llm.RuleID)
+					}
+					key := rows[0].tool
+					short, ok := strings.CutSuffix(key, termsafe.CutMarker)
+					if n := utf8.RuneCountInString(short); !ok || n != maxToolKeyRunes || key != wantKey {
+						t.Errorf("JSON LLM Key = %d bytes, %d runes before the cut marker (marker at the end: %v), want %d runes of %q and %q",
+							len(key), n, ok, maxToolKeyRunes, nm.r, termsafe.CutMarker)
+					}
+				} else {
+					rows := llmRowsOf(t, parseFindings(t, r.stdout))
+					if len(rows) != 1 || rows[0].rule != llm.RuleID || rows[0].severity != "high" || rows[0].server != "srv" {
+						t.Fatalf("terminal LLM findings = %d rows, want one %s high row of srv", len(rows), llm.RuleID)
+					}
+					cellText := rows[0].tool
+					if !strings.HasPrefix(cellText, strings.Repeat(nm.r, 4)) || !strings.HasSuffix(cellText, termsafe.CutMarker) || len(cellText) > len(wantKey) {
+						t.Errorf("Tool line of the LLM finding = %d bytes, want the cut name with the cut marker", len(cellText))
+					}
+				}
+				tooLong := strings.Repeat(nm.r, maxToolKeyRunes+1)
+				for _, out := range []struct{ name, text string }{{"stdout", r.stdout}, {"stderr", r.stderr}} {
+					if strings.Contains(out.text, tail) || strings.Contains(out.text, tooLong) {
+						t.Errorf("%s holds the tool name beyond the cap (%d bytes of output)", out.name, len(out.text))
+					}
+					if len(out.text) > llmLongOutputMax {
+						t.Errorf("%s has %d bytes, want at most %d", out.name, len(out.text), llmLongOutputMax)
+					}
+				}
+			})
+		}
+	}
+
+	// The ignore lookup uses the real tool name, not the cut Key. Only
+	// --ignore drops an LLM finding, and it takes a rule ID only, so the
+	// sign of a match is the warning that the file cannot ignore the rule. A
+	// line of .mcpmoat-ignore has at most 4096 bytes, so these names have
+	// 600 runes: longer than the cap, short enough for one line.
+	ignoreCases := []struct {
+		name        string
+		description string
+		ruleID      string
+		severity    string
+		code        int
+		// useKey makes the entry name the cut Key instead of the real name.
+		useKey bool
+		warned bool
+	}{
+		{name: "real name MOAT-LLM-001", description: llmMarkHigh, ruleID: llm.RuleID, severity: "high", code: exitFindings, warned: true},
+		{name: "real name MOAT-LLM-002", description: llmMarkInvalid, ruleID: llm.RuleIDInvalid, severity: "medium", code: exitOK, warned: true},
+		{name: "cut key MOAT-LLM-001", description: llmMarkHigh, ruleID: llm.RuleID, severity: "high", code: exitFindings, useKey: true},
+	}
+	for _, nm := range names {
+		for _, tt := range ignoreCases {
+			t.Run("ignore file/"+nm.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				toolName := strings.Repeat(nm.r, 600)
+				key := strings.Repeat(nm.r, maxToolKeyRunes) + termsafe.CutMarker
+				tools := map[string][]inspect.Tool{"srv": {mkTool(toolName, tt.description)}}
+				e := llmEnv(t, tools)
+				entryTool := toolName
+				if tt.useKey {
+					entryTool = key
+				}
+				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ruleID+" srv/"+entryTool+"\n")
+
+				r := llmScan(t, e, tools, &llmFake{}, "--llm", "--json")
+
+				if r.code != tt.code {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, tt.code, r.stderr)
+				}
+				// The finding stays in the report, with the cut Key.
+				want := []llmHit{{tt.ruleID, tt.severity, "srv", key}}
+				if got := llmJSONRows(t, decodeScanJSON(t, r.stdout)); !slices.Equal(got, want) {
+					t.Errorf("JSON LLM findings = %d rows, want one %s %s row of srv with the cut Key", len(got), tt.ruleID, tt.severity)
+				}
+				wantWarnings := 0
+				if tt.warned {
+					wantWarnings = 1
+				}
+				if n := strings.Count(r.stderr, llmFileWarning(tt.ruleID)); n != wantWarnings {
+					t.Errorf("the warning for %s shows %d times, want %d\nstderr:\n%s", tt.ruleID, n, wantWarnings, r.stderr)
+				}
+				if n := strings.Count(r.stderr, "cannot ignore"); n != wantWarnings {
+					t.Errorf("stderr has %d \"cannot ignore\" warnings, want %d\nstderr:\n%s", n, wantWarnings, r.stderr)
+				}
+				if strings.Contains(r.stderr, "ignored") {
+					t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+				}
+			})
+		}
+	}
 }
 
 // TestScanLLMKeepsRuleRows checks that the LLM step only adds findings (FR-17):
