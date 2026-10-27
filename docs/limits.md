@@ -63,10 +63,16 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   - A header value of 8 bytes or more is replaced also when it is not secret, for example
     `application/json`. Arg text that the report masks is replaced also when it is not secret, for
     example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
+  - A tool whose text had a configured value removed gets a `medium` finding at least, also when
+    the removed text is an ordinary word of your config (for example the env value `production`).
+    A config that you do not control can choose which text is removed, for example an env value
+    that equals an injection phrase in a tool description. The finding is `medium`, not `high`,
+    so the default `--fail-on high` does not fail on it. The rule findings still read the full
+    text.
 - The report on the terminal and the `--json` output show the tool names as the server sent them.
   mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
   can make it show on stdout. Only the rows of the `--llm` step hide such a value (as
-  `********`). Issue #234 tracks the other rows.
+  `********`). Issue #228 tracks the other rows.
 - When you give a wrong argument, every command hides the user info of each URL in the error text
   (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
   `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors

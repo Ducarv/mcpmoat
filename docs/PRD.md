@@ -686,7 +686,7 @@ the machine**.
   - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
     secret that a server puts in a tool name can show on stdout. Only the LLM rows show the name
     as the request had it, with each removed value as `********` (`Input.RedactedName`). Issue
-    #234 tracks the other rows.
+    #228 tracks the other rows.
 
   docs/llm.md holds the user text of this rule.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a

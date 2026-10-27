@@ -96,7 +96,7 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   - The rows of the LLM step show the tool name as the request had it, with each removed value
     shown as `********`. The other rows of the report on your terminal and the `--json` output
     show the tool name as the server sent it, so a server that puts a secret in a tool name can
-    make it show there (see issue #234).
+    make it show there (see issue #228).
 - **No tool to send:** when no server was inspected, or the inspected servers list no tools,
   `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
   change.
@@ -165,7 +165,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     instructions for the AI agent.` The reason: a hostile config can choose which text mcpmoat
     removes, so a part of a malicious description may never reach the model. When the text was
     also cut, the finding has the text of the cut. Text that mcpmoat removes but that is not secret
-    (see the limits above) gives the same floor. What you see: a tool whose description echoes a
+    (see the limits above) gives the same floor. This includes a plain word of 8 bytes or more
+    from your config, such as an env value `production` or `localhost`, and the second word of a
+    path segment with a space, when it is in the tool description. Read the description to check
+    such a finding. It is `medium`, so it does not change the exit code under the default
+    `--fail-on high`, but `--fail-on medium` gives exit 1. What you see: a tool whose description echoes a
     secret from your config gets a `medium` finding. That is also a sign that the server echoes a
     secret. The floor does not make the rating complete. The rule engine still reads the full
     text, and a `medium` finding is below the default `--fail-on high`.
