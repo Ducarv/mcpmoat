@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -95,15 +96,10 @@ const (
 	maxScanAllocBytes = 128 << 20
 )
 
-// jsonNameCap is the number of characters that scan --json keeps of a server
-// name before it adds termsafe.CutMarker. It is jsonMaxNameRunes in
-// internal/report, which is not exported.
-const jsonNameCap = 512
-
 // maxJSONNameChars returns the most characters that a cut server name in scan
-// --json can hold: jsonNameCap, then termsafe.CutMarker.
+// --json can hold: report.MaxJSONNameRunes, then termsafe.CutMarker.
 func maxJSONNameChars() int {
-	return jsonNameCap + utf8.RuneCountInString(termsafe.CutMarker)
+	return report.MaxJSONNameRunes + utf8.RuneCountInString(termsafe.CutMarker)
 }
 
 // hostileRulesDirMatchAll writes hostileRuleCount description rules that match
@@ -206,8 +202,8 @@ func TestScanJSONBound(t *testing.T) {
 		t.Errorf("%s rows = %d, want 1", rules.RuleToolFindingCap, capRows)
 	}
 
-	// Every server name in the document is cut: jsonNameCap characters, then
-	// the cut marker.
+	// Every server name in the document is cut: report.MaxJSONNameRunes
+	// characters, then the cut marker.
 	maxNameChars := maxJSONNameChars()
 	if len(doc.Servers) != 1 {
 		t.Fatalf("servers = %d, want 1", len(doc.Servers))
@@ -240,8 +236,8 @@ func TestScanJSONBound(t *testing.T) {
 
 // TestScanJSONCutNamesKeepServerIndex runs a whole in-process scan (first run,
 // then a run with changed tools) of two servers whose names have the same
-// first jsonNameCap characters and differ only after them. scan --json cuts both
-// names to the same text, so "server" cannot tell the rows apart (issue
+// first report.MaxJSONNameRunes characters and differ only after them. scan --json
+// cuts both names to the same text, so "server" cannot tell the rows apart (issue
 // #223). Each finding and each diff must then carry the server_index of its
 // own server.
 //
@@ -254,7 +250,7 @@ func TestScanJSONCutNamesKeepServerIndex(t *testing.T) {
 	t.Parallel()
 
 	maxNameChars := maxJSONNameChars()
-	prefix := strings.Repeat("N", jsonNameCap)
+	prefix := strings.Repeat("N", report.MaxJSONNameRunes)
 	type server struct{ suffix, name, command string }
 	servers := []server{
 		{suffix: "one", name: prefix + "-one", command: "cmd-one"},

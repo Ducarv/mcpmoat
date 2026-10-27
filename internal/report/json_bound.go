@@ -17,6 +17,12 @@ import (
 // longest output is 515 runes. The JSON schema uses 515 as maxLength.
 const jsonMaxNameRunes = 512
 
+// MaxJSONNameRunes is the value of jsonMaxNameRunes, exported so that the scan
+// tests in cmd/mcpmoat can check a cut name against the same cap (as
+// MaxShortCellRunes is for the terminal report). Change jsonMaxNameRunes, not
+// this name: the two are one value.
+const MaxJSONNameRunes = jsonMaxNameRunes
+
 // jsonMaxPathRunes is the most runes that boundReport keeps from a path-like
 // field: a source file, a project path or a path in a config problem. A cut
 // value has this many runes and then termsafe.CutMarker (3 runes), so the

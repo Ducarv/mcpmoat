@@ -457,7 +457,7 @@ func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect
 		kept = true
 		h.truncated = h.truncated || ch.Truncated
 		h.noText = h.noText || ch.DiffIsNote()
-		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, ref.Name, ref.Index, ch)
+		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, ref, ch)
 	}
 	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)

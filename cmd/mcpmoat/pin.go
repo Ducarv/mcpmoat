@@ -560,8 +560,9 @@ func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, too
 	// pin gets a --json output (issue #65), remove this constant: add an index
 	// parameter and pass the Index of the outcome from the caller.
 	const serverIndex = 0
+	ref := report.ServerRef{Name: server, Index: serverIndex}
 	for _, ch := range pins.Compare(stored, tools) {
-		diffs = c.appendDiff("pin", diffs, server, serverIndex, ch)
+		diffs = c.appendDiff("pin", diffs, ref, ch)
 	}
 	return diffs
 }
