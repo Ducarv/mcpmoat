@@ -379,12 +379,13 @@ step 5 and step 6:
     could take about 100 seconds. The analyzer checks the context before each regex on each form,
     and between the schema strings and the seams. So it stops at most about one regex on one form
     after the deadline, plus one build of the forms of one text, which cannot be stopped (#146).
-    That overshoot is up to about 1 s on an idle Apple M1 Pro and about 10 s with the race
-    detector (see the comment of `TestAnalyzerCheckToolHostileBudget` in
-    `internal/rules/analyze_test.go`). So the step takes at most 30 s plus one overshoot. The
-    overshoot comes out of the shared limit, so servers early in the order can use up the time of
-    later servers: those servers get `MOAT-T1-023`, never a silent pass. A server that uses up its
-    share keeps the rows found so far and gets one finding `MOAT-T1-023`
+    The worst known case of that build is a fill of CSIs (see the cost comment in
+    `internal/rules/match.go` and `maxStrictOSCStarts`). [Limits](limits.md) has the measured size
+    of the overshoot, and the comment of `TestAnalyzerCheckToolHostileBudget` in
+    `internal/rules/analyze_test.go` explains it. So the step takes at most 30 s plus one
+    overshoot. The overshoot comes out of the shared limit, so servers early in the order can use
+    up the time of later servers: those servers get `MOAT-T1-023`, never a silent pass. A server
+    that uses up its share keeps the rows found so far and gets one finding `MOAT-T1-023`
     (`rules.RuleAnalysisBudget`, a native rule with no YAML file). Its severity is the highest
     severity of the description and schema rules that `scan` applies, but never lower than high
     (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with the built-in rules,

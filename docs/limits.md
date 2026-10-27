@@ -37,10 +37,16 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   had its own 5 seconds, one after the other, so 20 servers could take about 100 seconds.
 - The rule analysis step takes at most 30 seconds plus one overshoot. The overshoot is the part of
   an analysis that cannot stop at its deadline: one build of the match forms of one text (#146)
-  and one regex on one form (the Go `regexp` package has no context). It is up to about 1 second
-  on an idle Apple M1 Pro, about 10 seconds with the race detector, and more on a loaded machine.
+  and one regex on one form (the Go `regexp` package has no context). The build takes under about
+  0.2 seconds in the worst case that we measured. The whole overshoot is up to about 1 second on
+  an idle Apple M1 Pro, about 10 seconds with the race detector, and more on a loaded machine.
   The overshoot uses the shared limit too, so servers early in the order can use up the time of
   later servers. Those later servers get `MOAT-T1-023`, never a silent pass.
+- A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
+  (high), also a benign text in the wrong encoding. The reason and the example are in
+  [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
+  severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
+  that rule and only `MOAT-T1-017` or `MOAT-T1-018` (high) fires.
 - `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
   after the ignore list. `scan` keeps the most severe findings, and among findings of the same
   severity the ones of the first tools, so a server cannot push a severe finding out of the report
@@ -90,9 +96,6 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
   when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
   planned as issue #223). Diffs, commands, URLs and argv are never cut.
-- The time limit cannot stop the build of the match forms of one text. For a very hostile text
-  (for example 128 KiB of one run of invisible characters), this build can take about a second, so
-  the analysis of a server can end that much after its share (#146).
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

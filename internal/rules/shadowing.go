@@ -93,10 +93,18 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // dummy tool with the victim's name.
 //
 // The texts that are scanned are the tool description, the tool title, the
-// title in the annotations, and the description and title strings of the input
-// and output schema, decoded by schemaText (see toolTexts). Each text is
-// scanned on its own, so a name never joins across two texts. In this comment,
-// "text" means any of them.
+// title in the annotations, and the schema texts of the input and output
+// schema (see toolTexts). The schema texts, decoded by schemaShadowTexts, are
+// every string value and every object key of the schema: description and
+// title, but also default, enum, const, examples, $comment, vendor keys (x-*
+// or markdownDescription), property names and strings inside arrays. They
+// leave out only the keyword keys of schema objects, format values that are
+// registered format names (see isRegisteredFormat) and $schema values that
+// are standard meta-schema URIs (see isMetaSchemaURI), because foldText
+// turns words such as readOnly, date-time or json-schema into compound names
+// that can equal the name of a tool. Each text is scanned on its own, so a
+// name never joins across two texts. In this comment, "text" means any of
+// them.
 //
 // Names and tool text are compared in the form of foldText, as the model
 // reads them: "send-email", "sendEmail", "send\_email" and
@@ -120,19 +128,24 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // tool text, and the launch config values are used only as a map key.
 //
 // Known limits: prompts and resources are not scanned. Schema text is scanned
-// only up to the caps of schemaText: on a schema that is too deep or too big,
-// the check scans the texts that schemaText found before the cap and reports
-// nothing about the rest. Only "description" and "title" strings (the keys in
-// any case) are read. A server can hide a mention in other text that a model
-// can see: default, enum,
-// examples, const, $comment, vendor keys (x-* or markdownDescription),
-// property names, and strings inside an array under "description". The check
-// does not scan these. A tool name with a byte outside letters, digits, "_"
-// and "-" (a dot or a space, for example) cannot be found as a token, so it is
-// never a candidate name. A mention of a single-word tool name is never
-// found. A space or a dot between the words ("send email") is not folded,
-// because that is normal prose, and neither are look-alike letters, such as
-// the fullwidth U+FF3F for "_" or a Cyrillic "е".
+// only up to the caps of schemaShadowTexts: on a schema that is too deep or
+// too big, the check scans the texts that schemaShadowTexts found before the
+// cap and reports nothing about the rest. A schema key that is a keyword name
+// in a schema object is not scanned, and neither is a format value that is a
+// registered format name or a $schema value that is a standard meta-schema
+// URI. These are fixed words of the standards, not text that the server
+// chose, so a mention there is not a shadowing attempt. Every other format
+// and $schema value is scanned, so "send_email" as a format value or
+// "https://json-schema.org/send_email" as a $schema value is found. Only
+// JSON Schema keywords are skipped, so an OpenAPI or pydantic key such as
+// propertyName (inside discriminator) is scanned and can give a rare false
+// positive when its fold (property_name) is a tool name. A tool
+// name with a byte outside letters, digits, "_" and "-" (a dot or a space,
+// for example) cannot be found as a token, so it is never a candidate name.
+// A mention of a single-word tool name is never found. A space or a dot
+// between the words ("send email") is not folded, because that is normal
+// prose, and neither are look-alike letters, such as the fullwidth U+FF3F
+// for "_" or a Cyrillic U+0435 for "e".
 //
 // Tool names and texts are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
@@ -140,8 +153,8 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 //
 // The cost is linear in the size of the tool text: each text is scanned once
 // and every token is looked up in a map. The schema walk is bounded as
-// schemaText documents, so pass tools that inspect read. 10 servers with 20
-// tools each run well under one second (NFR-03).
+// schemaShadowTexts documents, so pass tools that inspect read. 10 servers
+// with 20 tools each run well under one second (NFR-03).
 func CheckShadowing(all []ServerTools) []Finding {
 	identities := launchIdentities(all)
 	owners := indexOwners(all, identities)
@@ -218,9 +231,9 @@ func toolTexts(tool inspect.Tool) []string {
 	if tool.Annotations != nil {
 		texts = append(texts, tool.Annotations.Title)
 	}
-	// A partial result is scanned too; see schemaText.
-	input, _ := schemaText(tool.InputSchema)
-	output, _ := schemaText(tool.OutputSchema)
+	// A partial result is scanned too; see schemaShadowTexts.
+	input, _ := schemaShadowTexts(tool.InputSchema)
+	output, _ := schemaShadowTexts(tool.OutputSchema)
 	texts = append(texts, input...)
 	return append(texts, output...)
 }
