@@ -607,6 +607,13 @@ func cfgCapServer(name string, n int, npx bool) discover.Server {
 	return s
 }
 
+// cfgCapUntrusted returns s as a server from a project file (discover marks
+// such a server Untrusted).
+func cfgCapUntrusted(s discover.Server) discover.Server {
+	s.Untrusted = true
+	return s
+}
+
 // cfgCapKey returns the env key number i of cfgCapServer.
 func cfgCapKey(i int) string { return fmt.Sprintf("TOKEN_%03d", i) }
 
@@ -750,6 +757,22 @@ func TestConfigFindingsCaps(t *testing.T) {
 			// The cap row is one of the rows of the server, but it does not
 			// count toward the cap: 2 rows and the cap row.
 			wantCounts: []int{3},
+			wantCut:    1,
+		},
+		{
+			// The scan cap keeps the rows of b first: a project file can ship
+			// many servers, and must not push out the rows of a server that
+			// the user set up.
+			name:    "a project server does not push out the rows of a user server",
+			set:     builtin,
+			caps:    configCaps{perServer: 10, total: 3},
+			servers: []discover.Server{cfgCapUntrusted(cfgCapServer("a", 3, false)), cfgCapServer("b", 2, false)},
+			want: []string{
+				secretView("a", 0, "high"),
+				capView("a", "high", "2 more config findings are not listed; limit 3"),
+				secretView("b", 0, "high"), secretView("b", 1, "high"),
+			},
+			wantCounts: []int{2, 2},
 			wantCut:    1,
 		},
 		{
@@ -1277,6 +1300,43 @@ func TestConfigCapCutHits(t *testing.T) {
 			slices.Sort(gotOmitted)
 			if !slices.Equal(gotOmitted, tt.wantOmitted) {
 				t.Errorf("omitted = %v, want %v", gotOmitted, tt.wantOmitted)
+			}
+		})
+	}
+}
+
+// TestConfigCapCutHitsTrustedFirst checks that, among hits of the same
+// severity, cutConfigHits keeps the hits of trusted servers before the hits of
+// untrusted ones, and that severity still comes first.
+func TestConfigCapCutHitsTrustedFirst(t *testing.T) {
+	t.Parallel()
+
+	hits := []configHit{
+		{index: 0, severity: "high", untrusted: true},
+		{index: 1, severity: "high", untrusted: true},
+		{index: 2, severity: "high"},
+		{index: 3, severity: "critical", untrusted: true},
+		{index: 4, severity: "high"},
+	}
+	tests := []struct {
+		name  string
+		limit int
+		want  []int // the indexes of the kept hits, in their first order
+	}{
+		{"a critical untrusted hit still beats a high trusted one", 2, []int{2, 3}},
+		{"trusted hits come before untrusted ones of the same severity", 3, []int{2, 3, 4}},
+		{"untrusted hits fill the room that is left, first ones first", 4, []int{0, 2, 3, 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			kept, _ := cutConfigHits(hits, tt.limit)
+			got := make([]int, 0, len(kept))
+			for _, h := range kept {
+				got = append(got, h.index)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("kept = %v, want %v", got, tt.want)
 			}
 		})
 	}

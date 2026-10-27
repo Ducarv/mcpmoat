@@ -20,7 +20,7 @@ The flag is off by default. Without it, `scan` never opens the file. When the fi
 prints this note on stderr and goes on:
 
 ```text
-mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it
+mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it
 ```
 
 The default protects you. The working directory can be a repository that you cloned or the checkout

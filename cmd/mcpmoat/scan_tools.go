@@ -263,8 +263,9 @@ func (c *cli) checkTools(ctx context.Context, checker toolChecker, setup scanSet
 // serverShare returns the time budget of the next server: the time left until
 // the step limit, split evenly among the servers left (with the next one),
 // but never more than perServer. A server that ends early leaves its unused
-// time to the servers after it. left must be more than zero, and servers at
-// least 1. perServer can be 0 or less: the budget is then used up at once.
+// time to the servers after it. left can be zero or less: the share is then
+// zero or less too. A servers value under 1 counts as 1. perServer can be 0 or
+// less: the budget is then used up at once.
 func serverShare(perServer, left time.Duration, servers int) time.Duration {
 	// time.Duration is an int64 count of nanoseconds, so this is an integer
 	// division.
@@ -277,7 +278,7 @@ func serverShare(perServer, left time.Duration, servers int) time.Duration {
 // or their fair share was under minServerShare.
 // It holds the limit and the count, and fixed words only: no server name.
 func lateServersText(limit time.Duration, late int) string {
-	return fmt.Sprintf("the %s time limit of the rule analysis ended; %d %s not checked",
+	return fmt.Sprintf("the %s time limit of the rule analysis left too little time; %d %s not checked",
 		limit, late, plural(late, "server was", "servers were"))
 }
 

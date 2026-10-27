@@ -456,7 +456,7 @@ references:
 - `scan` reads `.mcpmoat-ignore` from the working directory only with `--use-ignore-file`, which is
   off by default. Without the flag, `scan` never opens the file. When the file exists, `scan`
   prints one note on stderr:
-  `mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it`.
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it`.
   There is no `--no-ignore-file` flag: the default is already fail-closed, so CI needs no extra
   flag.
 - Why the file is opt-in: the working directory can be a cloned, untrusted repository or a pull
@@ -670,8 +670,8 @@ with `--no-color`).
   `--fail-on`.
 - The config findings (`MOAT-T4-*` and `MOAT-T5-*`) are capped at 100 for each server and 10,000
   for the whole scan, counted after the ignore list (#213). Each cut keeps the most severe
-  findings: severity first, then server order, then finding order, and an unknown severity counts
-  as critical. A server that lost findings gets one summary finding, `MOAT-T4-005`
+  findings: severity first, then servers from a user file before servers from a project file, then
+  server order, then finding order, and an unknown severity counts as critical. A server that lost findings gets one summary finding, `MOAT-T4-005`
   (`N more config findings are not listed; limit M`). It is high, or higher when a finding that it
   left out is higher. It does not count toward the caps, so a scan has at most 10,000 config
   findings plus one `MOAT-T4-005` finding for each cut server. Only `--ignore` drops it (FR-10).

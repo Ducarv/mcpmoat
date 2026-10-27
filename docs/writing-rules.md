@@ -325,14 +325,16 @@ Which fields are required:
 
 - The loader requires only `id`, `title`, `severity`, `target` and `match`. A rule with only these fields
   loads, so the PRD example works unchanged.
-- A built-in rule also needs `risk` (one sentence, no line break, up to 500 characters), `remediation`,
-  at least one reference, at least one `should_match` case and at least one `should_not_match` case.
+- A built-in rule also needs `risk` (one sentence, no line break, up to 500 characters), `remediation`
+  (up to 500 characters, so that the terminal report never cuts its `Fix:` line), at least one
+  reference, at least one `should_match` case and at least one `should_not_match` case.
   The file name must equal the ID.
 
 Limits:
 
 - A rule file is at most 64 KiB.
-- `title` is at most 200 characters, `risk` at most 500 and `remediation` at most 1000.
+- `title` is at most 200 characters, `risk` at most 500 and `remediation` at most 1000 (500 for a
+  built-in rule, see above).
 - `heuristic` is at most 64 bytes.
 - `any_regex`, `all_regex` and `keywords` hold at most 100 items each. One item is at most 4096 bytes.
 - `references` holds at most 20 items. One item is at most 2048 bytes.
@@ -347,10 +349,9 @@ Guidelines:
   such as `<instructions>...</instructions>`, can be unbounded (`[\s\S]+?`): the closing tag
   ends it. Go uses RE2, so there is no catastrophic backtracking.
 - Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
-  tool of each server. The time is shared. The rule analysis of all servers together has a limit
-  of 30 seconds, for the built-in rules and the rules from `--rules` together. Each server gets a
-  fair share of the time that is left, at most 5 seconds: its time budget. A server that uses up
-  its budget gets a `MOAT-T1-023` finding, and the rest of its tools are not checked. A server
+  tool of each server. The time is shared: all servers together have one time limit, for the
+  built-in rules and the rules from `--rules` together (see [Limits](limits.md)). Each server gets
+  a fair share of it: its time budget. A server that uses up its budget gets a `MOAT-T1-023` finding, and the rest of its tools are not checked. A server
   that `scan` does not reach in time (the limit ended, or its share is under 1 ms) gets the same
   finding for all its tools. The finding is high, or critical when a description or schema rule
   from `--rules` is critical. Only `--ignore` drops it, not `.mcpmoat-ignore`. So a slow rule can

@@ -445,11 +445,11 @@ func TestScanJSONConfigBound(t *testing.T) {
 	}
 
 	cases := []configFloodCase{
-		{"one_server_env_keys/json", envConfig, true, envKeys, 1, configRowsPerServer, maxConfigFloodOneServerBytes},
-		{"one_server_header_keys/json", headerConfig, true, headerKeys, 1, configRowsPerServer, maxConfigFloodOneServerBytes},
-		{"many_servers/json", manyConfig, true, manyKeys, manyServers, configRowsTotal, maxConfigFloodManyBytes},
-		{"one_server_env_keys/terminal", envConfig, false, envKeys, 1, configRowsPerServer, maxConfigFloodOneServerBytes},
-		{"many_servers/terminal", manyConfig, false, manyKeys, manyServers, configRowsTotal, maxConfigFloodManyBytes},
+		{name: "one_server_env_keys/json", config: envConfig, json: true, keys: envKeys, servers: 1, maxKept: configRowsPerServer, maxStdout: maxConfigFloodOneServerBytes},
+		{name: "one_server_header_keys/json", config: headerConfig, json: true, keys: headerKeys, servers: 1, maxKept: configRowsPerServer, maxStdout: maxConfigFloodOneServerBytes},
+		{name: "many_servers/json", config: manyConfig, json: true, keys: manyKeys, servers: manyServers, maxKept: configRowsTotal, maxStdout: maxConfigFloodManyBytes},
+		{name: "one_server_env_keys/terminal", config: envConfig, keys: envKeys, servers: 1, maxKept: configRowsPerServer, maxStdout: maxConfigFloodOneServerBytes},
+		{name: "many_servers/terminal", config: manyConfig, keys: manyKeys, servers: manyServers, maxKept: configRowsTotal, maxStdout: maxConfigFloodManyBytes},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

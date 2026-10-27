@@ -211,7 +211,7 @@ known.
   source, so that another app cannot report a check with the same name.
 
 - Without `--use-ignore-file`, `scan` prints
-  `mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it` on stderr
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it` on stderr
   when the file is there. With the flag, when the file gives entries, `scan` prints
   `mcpmoat scan: using N entries from .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for
   these lines in the job log.

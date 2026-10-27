@@ -33,8 +33,7 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   share, or that `scan` does not analyse, gets a `MOAT-T1-023` finding (see
   [Exit codes](exit-codes.md)), and its tools that were not fully checked can hide a malicious
   text. `scan` does not analyse a server that it reaches after the limit or with a share under
-  1 ms, or any server after it. Before this limit, each server
-  had its own 5 seconds, one after the other, so 20 servers could take about 100 seconds.
+  1 ms, or any server after it.
 - The rule analysis step takes at most 30 seconds plus one overshoot. The overshoot is the part of
   an analysis that cannot stop at its deadline: one build of the match forms of one text (#146)
   and one regex on one form (the Go `regexp` package has no context). The build takes under about
@@ -64,8 +63,8 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   key that looks like a secret, so without the caps a hostile project `.mcp.json` with many short
   keys could make a huge report. The caps count the findings after the ignore list. `scan` first
   keeps the 100 most severe findings of each server. When more than 10,000 are left, it keeps the
-  10,000 most severe of the whole scan: severity first, then the order of the servers, then the
-  order of the findings. A severity that mcpmoat does not know counts as critical. A server that
+  10,000 most severe of the whole scan: severity first, then servers from your own files before
+  servers from a project file, then the order of the servers, then the order of the findings. A severity that mcpmoat does not know counts as critical. A server that
   lost findings gets one `MOAT-T4-005` finding: `N more config findings are not listed; limit M`
   (M is 100, or 10000 when the limit of the whole scan cut that server). It is high, or higher
   when a finding that it left out is higher. It does not count toward the caps, so the report has

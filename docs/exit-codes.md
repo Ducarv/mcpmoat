@@ -29,11 +29,10 @@ here.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high
   `MOAT-T2-004` finding.
-- The rule analysis has a time limit of 30 seconds for all servers together. Each server gets a
-  fair share of the time that is left, but never more than 5 seconds. A server that uses up its
-  share is a `MOAT-T1-023` finding. A server that `scan` reaches after the 30 seconds, or with a
-  share under 1 ms, is not analysed, and the servers after it are not analysed either. Each of
-  them gets the same finding for all its tools. Its severity is the highest severity
+- The rule analysis shares one time limit between all servers (see [Limits](limits.md)). A server
+  that uses up its share is a `MOAT-T1-023` finding. A server that `scan` does not reach in time
+  is not analysed, and the servers after it are not analysed either. Each of them gets the same
+  finding for all its tools. Its severity is the highest severity
   of the description and schema rules that `scan` applies, but never lower than high. So it is
   high with the built-in rules, and critical when a description or schema rule from `--rules` is
   critical (see the `--fail-on critical` item above). It is not an execution error: it gives exit

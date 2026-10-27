@@ -1806,14 +1806,14 @@ func TestScanToolsServerShare(t *testing.T) {
 }
 
 // lateWarning is the stderr line for the servers that the tool rule step did
-// not check, because its time limit had passed. limit is the limit as the line
+// not check, because its time limit left too little time. limit is the limit as the line
 // prints it. The words are written out here, not taken from lateServersText, so
 // a change of the words fails the test.
 func lateWarning(limit string, late int) string {
 	if late == 1 {
-		return scanWarnPrefix + "the " + limit + " time limit of the rule analysis ended; 1 server was not checked"
+		return scanWarnPrefix + "the " + limit + " time limit of the rule analysis left too little time; 1 server was not checked"
 	}
-	return fmt.Sprintf("%sthe %s time limit of the rule analysis ended; %d servers were not checked", scanWarnPrefix, limit, late)
+	return fmt.Sprintf("%sthe %s time limit of the rule analysis left too little time; %d servers were not checked", scanWarnPrefix, limit, late)
 }
 
 // TestScanToolsLateServersText checks the text of the warning for the servers
@@ -1867,11 +1867,7 @@ type blockingChecker struct {
 
 // CheckTool records the call, runs onCall and blocks until ctx ends.
 func (b *blockingChecker) CheckTool(ctx context.Context, tl inspect.Tool) ([]rules.TextFinding, error) {
-	now := time.Now()
-	deadline, ok := ctx.Deadline()
-	b.mu.Lock()
-	b.calls = append(b.calls, checkCall{tool: tl.Name, now: now, deadline: deadline, hasDeadline: ok})
-	b.mu.Unlock()
+	b.record(ctx, tl)
 	if b.onCall != nil {
 		b.onCall()
 	}
@@ -1884,6 +1880,17 @@ func (b *blockingChecker) CheckTool(ctx context.Context, tl inspect.Tool) ([]rul
 		b.t.Errorf("CheckTool: the context did not end within %s", blockTimeout)
 		return nil, errors.New("fake check: the context did not end")
 	}
+}
+
+// record adds one call to the calls, with the time and the deadline of ctx. It
+// returns the deadline and whether ctx has one.
+func (b *blockingChecker) record(ctx context.Context, tl inspect.Tool) (deadline time.Time, ok bool) {
+	now := time.Now()
+	deadline, ok = ctx.Deadline()
+	b.mu.Lock()
+	b.calls = append(b.calls, checkCall{tool: tl.Name, now: now, deadline: deadline, hasDeadline: ok})
+	b.mu.Unlock()
+	return deadline, ok
 }
 
 // MaxSeverity returns high, the highest severity of the built-in rules.
@@ -2165,11 +2172,7 @@ func (o *overrunChecker) CheckTool(ctx context.Context, tl inspect.Tool) ([]rule
 	if len(o.recorded()) > 0 {
 		return o.blockingChecker.CheckTool(ctx, tl)
 	}
-	now := time.Now()
-	deadline, ok := ctx.Deadline()
-	o.mu.Lock()
-	o.calls = append(o.calls, checkCall{tool: tl.Name, now: now, deadline: deadline, hasDeadline: ok})
-	o.mu.Unlock()
+	deadline, ok := o.record(ctx, tl)
 	if !ok {
 		o.t.Errorf("CheckTool: the context has no deadline")
 		return nil, errors.New("fake check: the context has no deadline")

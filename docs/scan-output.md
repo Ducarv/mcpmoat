@@ -44,15 +44,14 @@ MEDIUM (1)
   a `Tool:` line in place of `Where:`: the tool name, then `(description)` or `(schema)`, the part
   of the tool that matched. A tool name longer than 80 characters (runes) is cut to 80 and ends
   with `...`. The finding never shows the tool text or the pattern.
-- **Time budget:** the rule analysis has a time limit of 30 seconds for all servers together. Each
-  server gets a fair share of the time that is left, but never more than 5 seconds. A server that
-  uses up its share keeps the findings found so far, and gets one `MOAT-T1-023` finding with a
-  `Reason:` line in place of `Tool:`. `scan` also prints one warning on stderr for that server,
-  with the share that it got. A server that `scan` reaches after the 30 seconds, or with a share
-  under 1 ms, is not analysed, and the servers after it are not analysed either. Each of them gets
-  the same finding for all its tools. For these servers `scan` prints one line on stderr
+- **Time budget:** the rule analysis shares one time limit between all servers (the numbers are in
+  [Limits](limits.md)). A server that uses up its share keeps the findings found so far, and gets
+  one `MOAT-T1-023` finding with a `Reason:` line in place of `Tool:`. `scan` also prints one
+  warning on stderr for that server, with the share that it got. A server that `scan` does not
+  reach in time is not analysed, and the servers after it are not analysed either. Each of them
+  gets the same finding for all its tools. For these servers `scan` prints one line on stderr
   for all of them, for example `mcpmoat scan: warning: the 30s time limit of the rule analysis
-  ended; 3 servers were not checked`. Its severity and exit code are in
+  left too little time; 3 servers were not checked`. Its severity and exit code are in
   [Exit codes](exit-codes.md).
 - **Finding cap:** a server with more than 1000 tool findings gets one `MOAT-T1-024` summary
   finding. `scan` lists the 1000 most severe findings (the ones of the first tools among findings of
@@ -112,7 +111,7 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
   `--json`, plus the lines that the summary shows without `--json`: a server that was not
   inspected, and the warnings of an inspection. They include the note
-  `mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it` (see
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it` (see
   [Ignore findings](ignore.md)) and the warnings of the time limit and the caps above.
 - **Exit codes** do not change: 0, 1 or 2 (see [Exit codes](exit-codes.md)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a

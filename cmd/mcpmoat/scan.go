@@ -104,9 +104,7 @@ func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 	fs.BoolVar(&a.noConnect, "no-connect", false, "")
 	fs.BoolVar(&a.noColor, "no-color", false, "")
 	fs.BoolVar(&a.jsonOut, "json", false, "")
-	// The flag package prints no usage text here (see above), so this text
-	// is only for a reader of the code. scanUsage holds the help line.
-	fs.BoolVar(&a.useIgnoreFile, "use-ignore-file", false, "read .mcpmoat-ignore from the working directory")
+	fs.BoolVar(&a.useIgnoreFile, flagUseIgnoreFile, false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -444,10 +442,14 @@ func (c *cli) scanWarnf(format string, a ...any) {
 	c.warnf("scan", format, a...)
 }
 
+// flagUseIgnoreFile is the name of the --use-ignore-file flag of scan, without
+// the dashes.
+const flagUseIgnoreFile = "use-ignore-file"
+
 // ignoreFileNote is the line that noteIgnoreFile prints on stderr when
 // .mcpmoat-ignore is in the working directory but --use-ignore-file is not
 // given. It is fixed text: it holds no path and no file content.
-const ignoreFileNote = "mcpmoat scan: note: " + rules.IgnoreFileName + " is not read; add --use-ignore-file to apply it"
+const ignoreFileNote = "mcpmoat scan: note: " + rules.IgnoreFileName + " is not read; it can hide findings. Add --" + flagUseIgnoreFile + " only if you trust it"
 
 // noteIgnoreFile prints ignoreFileNote on stderr when the working directory wd
 // has an entry named .mcpmoat-ignore of any type. It runs only without
@@ -594,11 +596,12 @@ type scanStepsResult struct {
 }
 
 // runScanSteps runs the steps of a scan on the servers of res: the config
-// rules (see configStep), then, when setup.connect is not nil, the pin step (see inspectAndPin),
-// the tool rule step (see toolRulesStep) and the LLM step (see llmStep). It
-// merges their rows, ignored counts and per-server counts. When ok is false, the
-// scan must exit with 2 and print no report: the user stopped the scan, or the
-// guard of a step caught an error. The step already wrote the line on stderr.
+// rules (see configStep), then, when setup.connect is not nil, the pin step
+// (see inspectAndPin), the tool rule step (see toolRulesStep) and the LLM step
+// (see llmStep). It merges their rows, ignored counts and per-server counts.
+// When ok is false, the scan must exit with 2 and print no report: the user
+// stopped the scan, or the guard of a step caught an error. The step already
+// wrote the line on stderr.
 func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanSetup, ignore *scanIgnores) (steps scanStepsResult, ok bool) {
 	// counts holds the findings of each server for the summary. It starts
 	// with the config findings, and the tool rule step and the LLM step add

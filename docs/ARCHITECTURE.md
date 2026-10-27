@@ -216,8 +216,9 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    - The caps count the rows after the ignore list. First a server keeps at most 100 rows
      (`configRowsPerServer`). Then, when more than 10,000 rows are left over all the servers, the
      scan keeps 10,000 (`configRowsTotal`). Each cut keeps the most severe rows (`cutConfigHits`, a
-     stable sort): severity first, then server order, then finding order. A severity that is not
-     valid counts as critical (`capRank`). The kept rows of a server stay in their first order.
+     stable sort): severity first, then trusted servers before untrusted ones (`configHit.untrusted`,
+     so a project file cannot push out the finding of a server that the user set up), then server
+     order, then finding order. A severity that is not valid counts as critical (`capRank`). The kept rows of a server stay in their first order.
    - A server that lost rows in one or both cuts gets one `MOAT-T4-005` row
      (`rules.RuleConfigFindingCap`, a native rule with no YAML file, see `configCapRow`). Its
      related text is `N more config findings are not listed; limit M` (`configCapText`). M is 100,
@@ -399,8 +400,8 @@ step 5 and step 6:
     after it are not analysed either (`checkTools`). So the late servers are always the last ones.
     `addLateServer` gives each late server the same row for all its tools, with no warning of its
     own. At the end, the step prints one line for all such servers (`lateServersText`):
-    `mcpmoat scan: warning: the 30s time limit of the rule analysis ended; N servers were not
-    checked`. This is a finding, not an execution error: the exit code follows `--fail-on` (1
+    `mcpmoat scan: warning: the 30s time limit of the rule analysis left too little time; N
+    servers were not checked`. This is a finding, not an execution error: the exit code follows `--fail-on` (1
     with the default), and the JSON `complete` stays `true` (see [JSON output](#json-output)). The
     end of the step limit is not an interrupt: `interrupted` checks the parent context, which
     ends only on a signal.

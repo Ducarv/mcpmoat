@@ -26,7 +26,9 @@ const configRowsPerServer = 100
 // most severe rows of the whole scan, not the rows of the first servers, so
 // many servers with weak findings cannot push a severe finding of a later
 // server out of the report. A server that loses rows to this cap gets the
-// same summary finding as for the per-server cap.
+// same summary finding as for the per-server cap. That finding does not count
+// toward the cap, so the report holds at most configRowsTotal rows plus one
+// summary row for each server that lost rows (see docs/limits.md).
 const configRowsTotal = 10_000
 
 // configCaps holds the two limits of the config finding rows. A value of zero
@@ -84,6 +86,10 @@ type configHit struct {
 	index int
 	// severity is the severity word of the row (see findingRule).
 	severity string
+	// untrusted is true when the server of the hit comes from a project file
+	// (discover.Server.Untrusted). The scan cap keeps the hits of other
+	// servers first among hits of the same severity (see cutConfigHits).
+	untrusted bool
 }
 
 // configServerHits holds what findings knows about one server after the
@@ -134,8 +140,9 @@ type configServerHits struct {
 //  1. The per-server cap cuts the rows of each server.
 //  2. When the rows that are left are more than the scan cap, the scan keeps
 //     the most severe of them across all the servers. Among rows of the same
-//     severity, it keeps the rows of the first servers, and in one server
-//     the first rows.
+//     severity, it keeps the rows of servers from a user file before the rows
+//     of servers from a project file (discover.Server.Untrusted), then the
+//     rows of the first servers, and in one server the first rows.
 //
 // The kept rows of a server stay in their first order. A server that lost
 // rows in one or both steps gets one rules.RuleConfigFindingCap row after its
@@ -222,7 +229,7 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 		}
 		for _, h := range kept {
 			sh.kept = append(sh.kept, found[h.index])
-			all = append(all, configHit{index: len(all), severity: h.severity})
+			all = append(all, configHit{index: len(all), severity: h.severity, untrusted: s.Untrusted})
 		}
 		byServer[i] = sh
 	}
@@ -300,8 +307,9 @@ func (cc configChecks) row(ref report.ServerRef, f rules.Finding) report.Finding
 // cutConfigHits splits hits into the ones to keep, at most limit of them, and
 // the ones to leave out. It keeps the most severe hits (see capRank: an
 // unknown severity counts as critical), the same way as the tool findings cap
-// (toolRulesRun.flushTools). Among hits of the same severity it keeps the
-// first ones. The kept hits stay in their first order. When all the hits fit,
+// (toolRulesRun.flushTools). Among hits of the same severity it keeps the hits
+// of trusted servers before the hits of untrusted ones, and then the first
+// ones. The kept hits stay in their first order. When all the hits fit,
 // it returns hits as they are and no omitted hits. A limit of zero or less
 // keeps nothing.
 func cutConfigHits(hits []configHit, limit int) (kept, omitted []configHit) {
@@ -315,11 +323,24 @@ func cutConfigHits(hits []configHit, limit int) (kept, omitted []configHit) {
 	for i := range order {
 		order[i] = i
 	}
-	// Most severe first: compare b to a, not a to b. SortStableFunc keeps
-	// the order of two equal elements, so among hits of the same severity
-	// the first ones stay in front and are kept.
+	// Most severe first: compare b to a, not a to b. Among hits of the same
+	// severity, the hits of trusted servers come before the hits of
+	// untrusted ones: a project file can ship many servers, so it must not
+	// use up the scan cap and push out the finding of a server that the user
+	// set up. SortStableFunc keeps the order of two equal elements, so the
+	// first ones stay in front and are kept.
 	slices.SortStableFunc(order, func(a, b int) int {
-		return cmp.Compare(capRank(hits[b].severity), capRank(hits[a].severity))
+		if c := cmp.Compare(capRank(hits[b].severity), capRank(hits[a].severity)); c != 0 {
+			return c
+		}
+		switch {
+		case hits[a].untrusted == hits[b].untrusted:
+			return 0
+		case hits[a].untrusted:
+			return 1
+		default:
+			return -1
+		}
 	})
 	keep := order[:limit]
 	// Put the kept indexes back in their first order.

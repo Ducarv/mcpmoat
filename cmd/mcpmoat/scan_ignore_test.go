@@ -42,7 +42,7 @@ const useIgnoreFileFlag = "--use-ignore-file"
 // own copy of the text (not ignoreFileNote of scan.go), so a change of the text
 // in scan.go fails the tests. Every test of this package that checks the note
 // uses this constant.
-const ignoreNoteLine = "mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it"
+const ignoreNoteLine = "mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it"
 
 // ignoreMarker is a marker inside the bad lines of the ignore files of these
 // tests. stderr must never contain it.

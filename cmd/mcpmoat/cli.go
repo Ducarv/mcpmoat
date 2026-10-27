@@ -304,7 +304,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  \tstdout is empty when the scan stops before the report (exit 2)\n")
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
-	fprintf(tw, "  --use-ignore-file\tAlso ignore the findings that the %s file in the working directory lists. Off by default\n", rules.IgnoreFileName)
+	fprintf(tw, "  --%s\tAlso ignore the findings that the %s file in the working directory lists. Off by default\n", flagUseIgnoreFile, rules.IgnoreFileName)
 	fprintf(tw, "  \tOne \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n")
 	fprintf(tw, "  \tWithout this flag scan does not read the file. When the file exists, scan prints a note on stderr\n")
 	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding that config findings were left out (MOAT-T4-005), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")

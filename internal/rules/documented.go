@@ -17,7 +17,8 @@ var builtinIDPattern = regexp.MustCompile(`^MOAT-T[1-5]-[0-9]{3}$`)
 // in runes. Validate allows longer remediation text (maxRemediationRunes),
 // but the terminal report cuts rule text at maxRuleTextRunes (500) in
 // internal/report/findings.go. A built-in rule must fit, so its "Fix:" line
-// is never cut. Keep this value equal to report.maxRuleTextRunes.
+// is never cut. Keep this value equal to report.maxRuleTextRunes:
+// TestBuiltinRuleTextFitsReport in internal/report fails when they differ.
 const maxBuiltinRemediationRunes = 500
 
 // CheckDocumented checks the strict requirements for a built-in rule
