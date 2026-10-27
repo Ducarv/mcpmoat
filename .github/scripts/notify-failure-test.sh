@@ -6,9 +6,11 @@
 #
 # The job cannot call a script: it has no checkout, so that it can keep
 # `permissions: issues: write` and nothing else. So this test takes the real
-# code out of the workflow. It reads the `run: |` body of the step "Open or
-# update the failure issue" in the job notify-failure, and it runs that body.
-# A change to the workflow is a change to the code under test.
+# code out of the workflow. The run body is tested by running it: the test
+# reads the `run: |` body of the step "Open or update the failure issue" in the
+# job notify-failure, and it runs that body. The job keys are checked by text:
+# needs, if, permissions, env and no checkout. A change to the workflow is a
+# change to the code under test.
 #
 # The fake gh keeps a call log. It exits 99 on an unknown subcommand, on a
 # missing `-R owner/repo`, on a missing token, and on a list call without
@@ -50,28 +52,57 @@ record_failure() {
   failed=$((failed + 1))
 }
 
-# Take the body of the run step out of the job notify-failure and remove the
-# YAML indent. The job ends at the next line with an indent of two spaces.
+# extract_run prints the body of the run step out of the job notify-failure,
+# without the YAML indent. The job ends at the next line with an indent of two
+# spaces. The first run block of the step is the only block that it prints:
+# the line that ends the block still counts as the start of the next step.
+# It exits 3 when there is no run block.
+extract_run() {
+  awk '
+    /^  [A-Za-z0-9_-]+:/ { job = ($1 == "notify-failure:"); step = 0 }
+    inrun {
+      if ($0 ~ /^ *$/) { print ""; next }
+      match($0, /^ */)
+      if (RLENGTH >= indent) { print substr($0, indent + 1); next }
+      exit
+    }
+    job && /^ *- name: Open or update the failure issue *$/ { step = 1; next }
+    step && /^ *- name:/ { step = 0 }
+    step && /^ *run: \|[+-]? *$/ {
+      match($0, /^ */)
+      indent = RLENGTH + 2
+      inrun = 1
+      found = 1
+    }
+    END { exit found ? 0 : 3 }
+  ' "$1"
+}
+
+# Regression test for the extractor: a later step and a later job with their
+# own run blocks must not end up in the output.
+cat >"$tmp/two-steps.yml" <<'YAML'
+jobs:
+  notify-failure:
+    steps:
+      - name: Open or update the failure issue
+        run: |
+          echo first
+          echo second
+      - name: Another step
+        run: |
+          exit 7
+  other:
+    steps:
+      - run: |
+          exit 8
+YAML
+total=$((total + 1))
+got=$(extract_run "$tmp/two-steps.yml" || true)
+[ "$got" = "$(printf 'echo first\necho second')" ] ||
+  record_failure "the extractor prints more or less than the first run block of the step: $got"
+
 [ -r "$workflow" ] || fail "Cannot read the workflow $workflow."
-awk '
-  /^  [A-Za-z0-9_-]+:/ { job = ($1 == "notify-failure:"); step = 0; inrun = 0 }
-  inrun {
-    if ($0 ~ /^ *$/) { print ""; next }
-    match($0, /^ */)
-    if (RLENGTH < indent) { inrun = 0; next }
-    print substr($0, indent + 1)
-    next
-  }
-  job && /^ *- name: Open or update the failure issue *$/ { step = 1; next }
-  step && /^ *- name:/ { step = 0 }
-  step && /^ *run: \|[+-]? *$/ {
-    match($0, /^ */)
-    indent = RLENGTH + 2
-    inrun = 1
-    found = 1
-  }
-  END { exit found ? 0 : 3 }
-' "$workflow" >"$tmp/run.sh" ||
+extract_run "$workflow" >"$tmp/run.sh" ||
   fail "$workflow has no run block in the step 'Open or update the failure issue' of the job notify-failure."
 grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step 'Open or update the failure issue' is empty."
 
@@ -172,6 +203,46 @@ check_case "only a similar title" 0 only_similar create ""
 check_case "two issues with the title" 0 two_exact "comment 5" ""
 check_case "the list call fails" 1 list_fails none "the list call failed"
 check_case "the title is case sensitive" 0 other_case create ""
+
+# The keys of the job. The cases above give the fake its token, so they cannot
+# see a missing key. The checks below read the job block as text, without the
+# comment lines.
+awk '
+  /^  [A-Za-z0-9_-]+:/ { job = ($1 == "notify-failure:") }
+  /^[^ #]/ { job = 0 }
+  job && !/^ *#/
+' "$workflow" >"$tmp/job.txt"
+[ -s "$tmp/job.txt" ] || fail "$workflow has no job notify-failure."
+
+# job_section prints the lines under the job key $1, for example permissions.
+job_section() {
+  awk -v k="$1" '
+    $0 ~ "^    " k ":" { on = 1; next }
+    on && /^      / { print; next }
+    { on = 0 }
+  ' "$tmp/job.txt"
+}
+
+# check_text runs the command after the name and records a failure when it
+# fails.
+check_text() {
+  local name=$1
+  shift
+  total=$((total + 1))
+  "$@" || record_failure "the job notify-failure: $name"
+}
+can_write_issues() { job_section permissions | grep -Eq '^      issues: write *$'; }
+# shellcheck disable=SC2016 # the ${{ }} must stay literal
+has_job_token() { job_section env | grep -Fqx '      GH_TOKEN: ${{ github.token }}'; }
+no_checkout() { ! grep -q 'actions/checkout' "$tmp/job.txt"; }
+no_contents() { ! job_section permissions | grep -q 'contents:'; }
+
+check_text "lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
+check_text "lacks 'if: failure()'" grep -Eq '^    if: failure\(\) *$' "$tmp/job.txt"
+check_text "lacks 'issues: write' under permissions" can_write_issues
+check_text "has a contents permission" no_contents
+check_text "has a checkout step" no_checkout
+check_text "lacks 'GH_TOKEN: \${{ github.token }}' under the job env" has_job_token
 
 if [ "$failed" -ne 0 ]; then
   echo "notify-failure-test: $failed of $total cases failed" >&2
