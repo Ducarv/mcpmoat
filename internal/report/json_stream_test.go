@@ -99,7 +99,7 @@ func streamRichReport() ScanReport {
 func TestWriteJSONMatchesReference(t *testing.T) {
 	t.Parallel()
 
-	long := strings.Repeat("n", jsonMaxNameRunes+10)
+	long := strings.Repeat("n", MaxJSONNameRunes+10)
 	longPath := strings.Repeat("p", jsonMaxPathRunes+10)
 
 	unsafe := streamRichReport()

@@ -1005,7 +1005,7 @@ bound the whole document: the config findings, the pin findings and the LLM find
 1. Per-field caps (`boundReport` in `internal/report/json_bound.go`). `WriteJSON` cuts each
    untrusted text field to a number of characters (runes) and adds `...` (`termsafe.CutMarker`)
    after a cut value. It never changes the report of the caller (it works on a copy).
-   - Names, keys, related texts and server fields: 512 characters (`jsonMaxNameRunes`). That is the
+   - Names, keys, related texts and server fields: 512 characters (`MaxJSONNameRunes`). That is the
      server `name`, the finding fields `server`, `key` and `related`, the diff fields `server` and
      `tool`, and the config problem field `server`. A cut value has at most 515 characters.
    - Paths: 4096 characters (`jsonMaxPathRunes`). That is the server fields `source` and
@@ -1310,7 +1310,8 @@ can send any text. Raw control characters in such text can rewrite your terminal
 - `IsInvisible(r)` tells if a rune shows as nothing.
 
 The layers that import it are `cmd/mcpmoat`, `internal/discover`, `internal/report` and
-`internal/rules`. `internal/pins` does not import it. It returns raw server text, and the report
+`internal/rules`. The CI tool `internal/pincheck` imports it too. It is not a product layer.
+`internal/pins` does not import it. It returns raw server text, and the report
 layer escapes that text. To list the files, run:
 
 ```sh

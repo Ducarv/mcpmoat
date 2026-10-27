@@ -41,25 +41,25 @@ func oneOfEach() ScanReport {
 // boundFields lists every field that boundReport cuts (see its doc comment).
 func boundFields() []boundField {
 	return []boundField{
-		{"JSONServer.Name", jsonMaxNameRunes,
+		{"JSONServer.Name", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Servers[0].Name = v },
 			func(r ScanReport) string { return r.Servers[0].Name }},
-		{"JSONFinding.Server", jsonMaxNameRunes,
+		{"JSONFinding.Server", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Findings[0].Server = v },
 			func(r ScanReport) string { return r.Findings[0].Server }},
-		{"JSONFinding.Key", jsonMaxNameRunes,
+		{"JSONFinding.Key", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Findings[0].Key = v },
 			func(r ScanReport) string { return r.Findings[0].Key }},
-		{"JSONFinding.Related", jsonMaxNameRunes,
+		{"JSONFinding.Related", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Findings[0].Related = v },
 			func(r ScanReport) string { return r.Findings[0].Related }},
-		{"JSONDiff.Server", jsonMaxNameRunes,
+		{"JSONDiff.Server", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Diffs[0].Server = v },
 			func(r ScanReport) string { return r.Diffs[0].Server }},
-		{"JSONDiff.Tool", jsonMaxNameRunes,
+		{"JSONDiff.Tool", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Diffs[0].Tool = v },
 			func(r ScanReport) string { return r.Diffs[0].Tool }},
-		{"JSONFileError.Server", jsonMaxNameRunes,
+		{"JSONFileError.Server", MaxJSONNameRunes,
 			func(r *ScanReport, v string) { r.Errors[0].Server = v },
 			func(r ScanReport) string { return r.Errors[0].Server }},
 		{"JSONServer.Source", jsonMaxPathRunes,
@@ -201,7 +201,7 @@ func TestBoundReportKeepsNeverCutFields(t *testing.T) {
 
 func TestBoundReportDoesNotChangeTheCallersData(t *testing.T) {
 	t.Parallel()
-	long := strings.Repeat("n", jsonMaxNameRunes+10)
+	long := strings.Repeat("n", MaxJSONNameRunes+10)
 	longPath := strings.Repeat("p", jsonMaxPathRunes+10)
 	build := func() ScanReport {
 		return ScanReport{
@@ -254,7 +254,7 @@ func TestWriteJSONCutNamesKeepServerIndex(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			prefix := strings.Repeat(tt.char, jsonMaxNameRunes)
+			prefix := strings.Repeat(tt.char, MaxJSONNameRunes)
 			tags := []string{"one", "two"}
 			var r ScanReport
 			for _, tag := range tags {
@@ -291,7 +291,7 @@ func TestWriteJSONCutNamesKeepServerIndex(t *testing.T) {
 			// The known limit: every cut name is the same text, at most the
 			// cap plus the marker.
 			wantName := prefix + termsafe.CutMarker
-			maxRunes := jsonMaxNameRunes + utf8.RuneCountInString(termsafe.CutMarker)
+			maxRunes := MaxJSONNameRunes + utf8.RuneCountInString(termsafe.CutMarker)
 			cutNames := []string{
 				got.Servers[0].Name, got.Servers[1].Name,
 				got.Findings[0].Server, got.Findings[1].Server,
@@ -339,8 +339,8 @@ func TestWriteJSONFieldsTruncatedFlag(t *testing.T) {
 		want bool
 	}{
 		{"nothing cut", ScanReport{Servers: []JSONServer{{Name: "s"}}}, false},
-		{"name at the limit", ScanReport{Servers: []JSONServer{{Name: strings.Repeat("a", jsonMaxNameRunes)}}}, false},
-		{"name one over", ScanReport{Servers: []JSONServer{{Name: strings.Repeat("a", jsonMaxNameRunes+1)}}}, true},
+		{"name at the limit", ScanReport{Servers: []JSONServer{{Name: strings.Repeat("a", MaxJSONNameRunes)}}}, false},
+		{"name one over", ScanReport{Servers: []JSONServer{{Name: strings.Repeat("a", MaxJSONNameRunes+1)}}}, true},
 		{"set by the caller", ScanReport{FieldsTruncated: true}, true},
 	}
 	for _, tt := range tests {
