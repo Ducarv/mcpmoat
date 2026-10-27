@@ -227,6 +227,36 @@ that is not Linux, the script stops with exit code 2. On macOS there is no netwo
 `go test ./cmd/mcpmoat/` runs the in-process network tests (`cmd/mcpmoat/network_test.go`) and the
 E2E tests as usual, without the kernel check.
 
+### Rebuild the look-alike tables
+
+Two tables in `internal/rules` come from Unicode data: `skeletonTable` in `confusables.go` and
+`edgeLookalikes` in `mixedscript.go`. Rebuild them when `TestScriptTablesVersion` fails after a Go
+Unicode update, or when the project moves to a new Unicode TR39 version. The constants
+`confusablesVersion` and `scriptTablesVersion` in `internal/rules/confusables.go` record the
+versions in use.
+
+1. Download `confusables.txt` for that version by hand from
+   `https://www.unicode.org/Public/security/<version>/confusables.txt`. Keep it outside the
+   repository and do not commit it. The test reads only this local file and makes no network
+   call. The build and CI never download it.
+2. Update the two version constants first. The test fails when the `# Version:` line of the file
+   is not `confusablesVersion`, or when the Unicode version of Go or of `golang.org/x/text` is not
+   `scriptTablesVersion`.
+3. Compare the committed tables with the file. The test fails with a diff when they differ:
+
+   ```sh
+   go test ./internal/rules/ -run TestGenTables -args -confusables=/path/to/confusables.txt
+   ```
+
+   Without `-confusables`, the test skips.
+4. Add `-update` after `-confusables=...` to rewrite `skeletonTable` and `edgeLookalikes`.
+5. Review `git diff`. Update `skeletonTableSize` and `edgeLookalikesSize` when the counts change,
+   and the version numbers in the comments (for example in `internal/rules/doc.go`). Then run
+   `go test -race ./internal/rules/`.
+
+The generator is test code in package `rules` (`internal/rules/gentables_test.go`). It needs no
+extra tool and no extra dependency.
+
 ### Build the binary
 
 ```sh
