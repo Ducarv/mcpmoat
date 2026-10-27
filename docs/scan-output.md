@@ -95,8 +95,9 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
   tool: a provider failure, a provider refusal of every tool, the 10-minute time limit of the LLM
   step, an internal error of the LLM step, or tools over the 500-tool cap (see
-  [Optional LLM classification](llm.md)). The exit code is then 2, and the reason is on stderr. A tool that the provider refused (HTTP 400, 413 or 422) alone does not make
-  `complete` `false`: it is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut).
+  [Optional LLM classification](llm.md)). The exit code is then 2, and the reason is on stderr. A
+  tool that the provider refused (HTTP 400, 413 or 422) alone does not make `complete` `false`: it
+  is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut).
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too. A server that uses up its rule time budget does not make
   `complete` `false`: the `MOAT-T1-023` finding tells you about it.

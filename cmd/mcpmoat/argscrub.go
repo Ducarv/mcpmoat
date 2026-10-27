@@ -22,9 +22,10 @@ const hiddenArgText = "(hidden)"
 // newArgHider), also a value without a scheme such as "user:pass@host". Then it
 // hides the user info of every URL in the text (see hideUserinfo), so a URL
 // with a password in any other place, for example as the value of another
-// flag, does not show either.
+// flag, does not show either. A caller that already has the hider of args
+// (newArgHider(args, flagLLMBaseURL)) calls its errorText method instead.
 func argErrorText(args []string, text string) string {
-	return hideUserinfo(newArgHider(args, flagLLMBaseURL).hide(text))
+	return newArgHider(args, flagLLMBaseURL).errorText(text)
 }
 
 // hideUserinfo returns s with the user info of each URL in s replaced by
@@ -161,6 +162,13 @@ func (h argHider) hide(s string) string {
 		return s
 	}
 	return h.r.Replace(s)
+}
+
+// errorText returns text, an error message about the args of h, with the
+// values of the secret flag hidden (see hide) and then the user info of every
+// URL in the text hidden (see hideUserinfo). argErrorText uses it.
+func (h argHider) errorText(text string) string {
+	return hideUserinfo(h.hide(text))
 }
 
 // hideAll returns a copy of args with hide applied to each argument.

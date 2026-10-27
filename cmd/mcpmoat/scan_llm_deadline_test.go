@@ -31,19 +31,39 @@ import (
 //     "the LLM step stopped after <time>; N tools were not classified".
 //   - A signal wins over the deadline, and a provider failure that came
 //     first wins over it too.
-//   - The real client tries HTTP 429, 502, 503, 504 and 529 again, 3 requests
-//     in total for one tool. It honours Retry-After up to 30 seconds; a
-//     longer Retry-After means no retry.
+//   - The real client tries HTTP 429, 502, 503, 504 and 529 again
+//     (llmRetryCodes), llm.RetryMaxTries requests in total for one tool. It
+//     honours Retry-After up to 30 seconds; a longer Retry-After means no
+//     retry.
 //
 // The fake providers of this file send "Retry-After: 0" with every retryable
 // status: cmd/mcpmoat cannot change the backoff waits of package llm (1 s
 // and more), and the wait of 0 s keeps the tests fast.
+//
+// The step deadline is a real timer in runLLMJobs, and a test cannot fire it
+// early. So no test here needs work to finish inside a short time: each
+// deadline test uses llmTestStepLimit, seconds more than the work that must
+// come before the deadline, and its slow requests end only at the deadline.
 
 // llmDeadlineGuard is the longest time that a fake waits for the end of its
 // context. The step deadline of a test is much shorter, so the guard ends a
 // wait only when the code under test is broken (for example, no deadline).
 // The test then fails with an internal error line instead of a hang.
 const llmDeadlineGuard = 20 * time.Second
+
+// llmTestStepLimit is the time limit of the LLM step (cli.llmStepTimeout) in
+// the tests that need the deadline to end the step. Before the deadline, such
+// a test needs only some milliseconds of work: the fast tools get their
+// answers, and the first requests start (with the real client, they reach the
+// fake provider). The limit gives that work a margin of seconds, also under
+// -race with many parallel tests, so the order of the work and the deadline
+// does not depend on the speed of the machine. The cost is test time only:
+// the slow requests of a test end at the deadline.
+const llmTestStepLimit = 3 * time.Second
+
+// llmTestStepLimitText is llmTestStepLimit as stepTimeoutText gives it in the
+// deadline line. It is a copy, so a change of the text fails the tests.
+const llmTestStepLimitText = "3 seconds"
 
 // errDeadlineGuard is the error of a fake whose context never ended. It is
 // not a provider error, so the step fails with llmInternalText.
@@ -139,11 +159,12 @@ var llmOutputs = []struct {
 // too.
 //
 // The fast tools come first in the job order, so they start before the
-// slow ones take the workers.
+// slow ones take the workers. They answer in microseconds, and the deadline
+// is llmTestStepLimit (seconds) away, so they get their rows and the first
+// slow requests start before it.
 func TestScanLLMStepDeadline(t *testing.T) {
 	t.Parallel()
 
-	const timeout = 50 * time.Millisecond
 	tests := []struct {
 		name     string
 		fast     []inspect.Tool
@@ -192,12 +213,12 @@ func TestScanLLMStepDeadline(t *testing.T) {
 					return llm.Verdict{}, err
 				})
 
-				r, e := llmDeadlineRun(t.Context(), t, tools, cl, timeout, out.json)
+				r, e := llmDeadlineRun(t.Context(), t, tools, cl, llmTestStepLimit, out.json)
 
 				if r.code != exitError {
 					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, exitError, r.stdout, r.stderr)
 				}
-				want := []string{llmDeadlineLine("50ms", tt.slow)}
+				want := []string{llmDeadlineLine(llmTestStepLimitText, tt.slow)}
 				if got := llmStepLines(r.stderr); !slices.Equal(got, want) {
 					t.Errorf("LLM step lines = %q, want %q\nstderr:\n%s", got, want, r.stderr)
 				}
@@ -276,7 +297,7 @@ func TestScanLLMStepDeadlineSignal(t *testing.T) {
 		deadlineFirst bool
 	}{
 		{name: "signal first", timeout: time.Hour},
-		{name: "deadline first", timeout: 50 * time.Millisecond, deadlineFirst: true},
+		{name: "deadline first", timeout: llmTestStepLimit, deadlineFirst: true},
 	}
 	for _, tt := range tests {
 		for _, out := range llmOutputs {
@@ -359,16 +380,16 @@ func TestScanLLMStepDeadlineProviderFirst(t *testing.T) {
 		},
 		{
 			name:       "failure first, deadline passes later",
-			timeout:    50 * time.Millisecond,
+			timeout:    llmTestStepLimit,
 			failAtOnce: true,
 			outlive:    true,
 			wantLine:   scanPrefix + "the LLM provider failed (HTTP 503); 3 tools were not classified\n",
 		},
 		{
 			name:          "failure after the deadline",
-			timeout:       50 * time.Millisecond,
+			timeout:       llmTestStepLimit,
 			failAfterStop: true,
-			wantLine:      llmDeadlineLine("50ms", 3),
+			wantLine:      llmDeadlineLine(llmTestStepLimitText, 3),
 		},
 	}
 	for _, tt := range tests {
@@ -385,7 +406,7 @@ func TestScanLLMStepDeadlineProviderFirst(t *testing.T) {
 						// synchronisation: the result is the same when the
 						// deadline has not passed yet.
 						if dl, ok := ctx.Deadline(); ok {
-							timer := time.NewTimer(time.Until(dl) + 2*tt.timeout)
+							timer := time.NewTimer(time.Until(dl) + 100*time.Millisecond)
 							<-timer.C
 						}
 					}
@@ -416,11 +437,12 @@ func TestScanLLMStepDeadlineProviderFirst(t *testing.T) {
 // after every job got an answer changes nothing: the fake answers each tool
 // only after its context ended, with a verdict, so every job is answered and
 // there is no failure. A deadline before an answer gives answerDeadline for
-// the stopped job and the failure answerDeadline with the time limit.
+// the stopped job and the failure answerDeadline with the time limit. The
+// one job starts at once; the deadline is llmTestStepLimit away.
 func TestRunLLMJobsDeadline(t *testing.T) {
 	t.Parallel()
 
-	const timeout = 50 * time.Millisecond
+	const timeout = llmTestStepLimit
 	jobs := planLLMJobs(rejectOutcomes(mkTool("t1", "Add."))).jobs
 
 	t.Run("answered after the deadline", func(t *testing.T) {
@@ -736,12 +758,12 @@ func llmRetryScan(t *testing.T, api *llmRetryAPI, tools []inspect.Tool, timeout 
 // client closes it. The step deadline ends the step: exit 2, complete false,
 // the deadline line, no retry (a stopped request is not tried again), and
 // the provider sees each request closed. The request timeout of package llm
-// (30 s) is not reached, so its text is not on stderr.
+// (30 s) is not reached, so its text is not on stderr. The requests reach the
+// loopback fake in milliseconds; the deadline is llmTestStepLimit away.
 func TestScanLLMStepDeadlineRealClient(t *testing.T) {
 	t.Parallel()
 
-	// The time limit must give the requests the time to reach the fake.
-	const timeout = 500 * time.Millisecond
+	const timeout = llmTestStepLimit
 	for _, out := range llmOutputs {
 		t.Run(out.name, func(t *testing.T) {
 			t.Parallel()
@@ -754,7 +776,7 @@ func TestScanLLMStepDeadlineRealClient(t *testing.T) {
 			if r.code != exitError {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitError, r.stderr)
 			}
-			want := []string{llmDeadlineLine("500ms", 2)}
+			want := []string{llmDeadlineLine(llmTestStepLimitText, 2)}
 			if got := llmStepLines(r.stderr); !slices.Equal(got, want) {
 				t.Errorf("LLM step lines = %q, want %q\nstderr:\n%s", got, want, r.stderr)
 			}
@@ -797,16 +819,23 @@ func TestScanLLMStepDeadlineRealClient(t *testing.T) {
 // level: the number of requests for each tool, the exit code, the complete
 // field and the failure line.
 //
-// The time limit of the step is 1.4 s in the cases that need it. The backoff
-// of package llm waits at least 0.5 s and then 1 s (1 s and 2 s, with a
-// jitter of 0.5 to 1.5), so 3 tries without Retry-After take at least 1.5 s.
-// So a client that did not honour "Retry-After: 0" would reach the deadline
-// and fail the test. And a client that honoured a Retry-After above the cap
-// of 30 s would wait until the deadline.
+// The step limit of most cases is retryStep (10 s). It only bounds a broken
+// client: a client that honoured a Retry-After above the cap of 30 s would
+// wait until that limit, and the line would be the deadline line, not the
+// provider line. The case of a Retry-After at the cap uses
+// llmTestStepLimit: the first request reaches the fake in milliseconds, and
+// then the deadline ends the wait of 30 s.
+//
+// This test does not prove that the client honours "Retry-After: 0" (no
+// backoff wait). At scan level that proof needs a step limit just under the
+// backoff of 3 tries (at least 1.5 s), and a slow run under -race can then
+// reach the limit. The proof is in internal/llm: TestClassifyRetryAfter
+// ("zero seconds") gets its retry at once with a backoff of one hour, so it
+// has no timing margin to lose.
 func TestScanLLMRetry(t *testing.T) {
 	t.Parallel()
 
-	const shortStep = 1400 * time.Millisecond
+	const retryStep = 10 * time.Second
 	ra0 := func(code int) llmRetryStep { return llmRetryStep{code: code, retryAfter: "0"} }
 	repeat := func(s llmRetryStep, n int) []llmRetryStep {
 		out := make([]llmRetryStep, n)
@@ -834,12 +863,12 @@ func TestScanLLMRetry(t *testing.T) {
 	}
 	var tests []retryCase
 	// One busy answer, then the verdict: the retry succeeds.
-	for _, code := range []int{429, 502, 503, 504, 529} {
+	for _, code := range llmRetryCodes {
 		tests = append(tests, retryCase{
 			name:      fmt.Sprintf("HTTP %d once, then 200", code),
 			tools:     []inspect.Tool{t1, t2},
 			script:    map[string][]llmRetryStep{"t1": {ra0(code)}},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitFindings,
 			wantTries: map[string]int{"t1": 2, "t2": 1},
 			wantRows:  highT1,
@@ -851,27 +880,27 @@ func TestScanLLMRetry(t *testing.T) {
 			name:      "HTTP 429 and 503, then 200",
 			tools:     []inspect.Tool{t1, t2},
 			script:    map[string][]llmRetryStep{"t1": {ra0(429), ra0(503)}},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitFindings,
-			wantTries: map[string]int{"t1": 3, "t2": 1},
+			wantTries: map[string]int{"t1": llm.RetryMaxTries, "t2": 1},
 			wantRows:  highT1,
 		},
 		retryCase{
 			name:      "HTTP 429 every time",
 			tools:     []inspect.Tool{t1},
 			script:    map[string][]llmRetryStep{"t1": repeat(ra0(429), 10)},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitError,
-			wantTries: map[string]int{"t1": 3},
+			wantTries: map[string]int{"t1": llm.RetryMaxTries},
 			wantLine:  scanPrefix + "the LLM provider failed (HTTP 429); 1 tool was not classified\n",
 		},
 		retryCase{
 			name:      "HTTP 529 every time",
 			tools:     []inspect.Tool{t1},
 			script:    map[string][]llmRetryStep{"t1": repeat(ra0(529), 10)},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitError,
-			wantTries: map[string]int{"t1": 3},
+			wantTries: map[string]int{"t1": llm.RetryMaxTries},
 			wantLine:  scanPrefix + "the LLM provider failed (HTTP 529); 1 tool was not classified\n",
 		},
 		retryCase{
@@ -879,7 +908,7 @@ func TestScanLLMRetry(t *testing.T) {
 			name:      "HTTP 429 with Retry-After 3600",
 			tools:     []inspect.Tool{t1},
 			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{429, "3600"}, 10)},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
 			wantLine:  scanPrefix + "the LLM provider failed (HTTP 429); 1 tool was not classified\n",
@@ -889,7 +918,7 @@ func TestScanLLMRetry(t *testing.T) {
 			name:      "HTTP 503 with Retry-After 31",
 			tools:     []inspect.Tool{t1},
 			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{503, "31"}, 10)},
-			timeout:   shortStep,
+			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
 			wantLine:  scanPrefix + "the LLM provider failed (HTTP 503); 1 tool was not classified\n",
@@ -901,10 +930,10 @@ func TestScanLLMRetry(t *testing.T) {
 			name:      "HTTP 429 with Retry-After 30 ends at the deadline",
 			tools:     []inspect.Tool{t1},
 			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{429, "30"}, 10)},
-			timeout:   shortStep,
+			timeout:   llmTestStepLimit,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
-			wantLine:  llmDeadlineLine("1.4s", 1),
+			wantLine:  llmDeadlineLine(llmTestStepLimitText, 1),
 		},
 		retryCase{
 			// A refusal is never tried again, also with Retry-After.

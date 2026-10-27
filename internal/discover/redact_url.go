@@ -306,6 +306,69 @@ func SecretQueryParts(rawQuery string) []string {
 	return parts
 }
 
+// maskedURLParts returns the parts of raw that RedactURL masks, for
+// ArgSecrets, when RedactURL does not mask raw whole:
+//
+//   - the user info as written; the password as written and unescaped; and
+//     the name as written and unescaped only when there is no password, as
+//     in https://<token>@host/ (a name next to a password is often a plain
+//     word);
+//   - SecretPathSegments and SecretQueryParts;
+//   - the fragment as written and unescaped.
+//
+// Each part is not empty. It returns nil when raw does not parse.
+func maskedURLParts(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var parts []string
+	add := func(written, plain string) {
+		if written != "" {
+			parts = append(parts, written)
+		}
+		if plain != "" && plain != written {
+			parts = append(parts, plain)
+		}
+	}
+	if u.User != nil {
+		info := rawUserinfo(raw)
+		add(info, "")
+		name, password, hasPassword := strings.Cut(info, ":")
+		if hasPassword {
+			plainPassword, _ := u.User.Password()
+			add(password, plainPassword)
+		} else {
+			add(name, u.User.Username())
+		}
+	}
+	parts = append(parts, SecretPathSegments(raw)...)
+	parts = append(parts, SecretQueryParts(u.RawQuery)...)
+	if _, fragment, found := strings.Cut(raw, "#"); found {
+		add(fragment, u.Fragment)
+	}
+	return parts
+}
+
+// rawUserinfo returns the user info of raw as written, the text between "//"
+// and the last "@" of the authority, or "" when there is none. It finds the
+// authority as url.Parse does: after the first "//" (a scheme has no "/"), up
+// to the first "/", "?" or "#".
+func rawUserinfo(raw string) string {
+	_, authority, found := strings.Cut(raw, "//")
+	if !found {
+		return ""
+	}
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return ""
+	}
+	return authority[:at]
+}
+
 // isSecretPathSegment reports whether seg, one escaped path segment with no
 // ";" part, must be masked. It fails closed: a segment that does not
 // unescape, or whose unescaped form has "=", "," or ";", is masked.

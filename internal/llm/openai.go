@@ -104,7 +104,7 @@ func (o openAIAPI) requestBody(model, message string) any {
 			JSONSchema: openAIJSONSchema{
 				Name:   verdictSchemaName,
 				Strict: true,
-				Schema: VerdictSchema(),
+				Schema: verdictSchema(),
 			},
 		},
 		MaxCompletionTokens: o.maxCompletionTokens,

@@ -75,7 +75,8 @@ func (c *cli) runScan(opts options, args []string) int {
 	// and "--timeout=--llm-base-url=URL" make the flag package quote the
 	// whole value. hider removes every base URL value of args from the list
 	// (see newArgHider), and rejectArgs also hides the user info of any URL
-	// in it. argErrorText does both for the flag error (see argscrub.go).
+	// in it. hider.errorText does both for the flag error, as argErrorText
+	// does for the other commands (see argscrub.go).
 	hider := newArgHider(args, flagLLMBaseURL)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -91,7 +92,7 @@ func (c *cli) runScan(opts options, args []string) int {
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		return c.usageError("scan", "%s", termsafe.Quote(argErrorText(args, err.Error())))
+		return c.usageError("scan", "%s", termsafe.Quote(hider.errorText(err.Error())))
 	}
 	if c.rejectArgs("scan", hider.hideAll(fs.Args())) {
 		return exitError
@@ -195,7 +196,7 @@ type scanSetup struct {
 	// jsonOut is true with --json: scan writes one JSON document on stdout
 	// and none of the terminal tables.
 	jsonOut bool
-	// classifier rates the tools with an LLM (--llm, see classifyTools). It
+	// classifier rates the tools with an LLM (--llm, see llmStep). It
 	// is nil without --llm, and then scan runs no LLM code.
 	classifier toolClassifier
 }
@@ -376,7 +377,7 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // An entry of the file for a pin rule (MOAT-T2-*), an LLM rule
 // (MOAT-LLM-001 or MOAT-LLM-002) or the budget rule (MOAT-T1-023) is not
 // applied: scan warns when such an entry matches a finding (see pinOutcomes,
-// toolRulesStep and classifyTools).
+// toolRulesStep and llmStep).
 func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 	var ign scanIgnores
 	if wd != "" {
@@ -422,7 +423,7 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // after the report, with the rule IDs and their counts (see printIgnored).
 //
 // The pin findings, the tool rule findings and, with --llm, the LLM findings
-// (see classifyTools) are merged with the config findings before the report
+// (see llmStep) are merged with the config findings before the report
 // (the table or the JSON document) is written, so the report holds them all
 // and scanExitCode sees them all: an LLM finding counts for --fail-on like any
 // other. A server whose rule analysis uses up setup.toolBudget gets a
@@ -649,7 +650,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 // Nothing is saved: inspectAndPin never saves.
 //
 // It also returns the outcomes of inspect.Run, for the tool rule step (see
-// toolRulesStep) and the LLM step (see classifyTools). They are nil when it
+// toolRulesStep) and the LLM step (see llmStep). They are nil when it
 // returns an error.
 func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores, jsonOut bool) (pinReport, []inspect.Outcome, error) {
 	store, ok := c.readPins("scan")

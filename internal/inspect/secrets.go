@@ -3,6 +3,7 @@ package inspect
 import (
 	"cmp"
 	"slices"
+	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
@@ -34,10 +35,7 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 		}
 	}
 	slices.SortFunc(values, func(a, b string) int {
-		if c := cmp.Compare(len(b), len(a)); c != 0 {
-			return c
-		}
-		return cmp.Compare(a, b)
+		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
 	})
 	// Equal values are next to each other after the sort.
 	values = slices.Compact(values)
@@ -48,6 +46,30 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 	secrets := make([]discover.Secret, len(values))
 	for i, v := range values {
 		secrets[i] = discover.NewSecret(v)
+	}
+	return secrets
+}
+
+// argSecrets returns the secrets in the command line of s, for classify to
+// remove from error text and for Result.Secrets (see resultSecrets): the
+// text that discover.RedactArgs masks (see discover.ArgSecrets), with at
+// least minBareSecretLen bytes. A server gets its argv and can echo it.
+//
+// s is the expanded server, so these are the command and the args that the
+// child gets as argv (see stdioCommand). The configured form is not needed:
+// its "${VAR}" text never reaches the child, and the expanded values are in
+// the list of the lookup already. The command goes first, as in the report
+// (formatCommand in internal/report), so that the same rules see the same
+// line.
+//
+// The result holds raw values. Never print, log or encode them.
+func argSecrets(s discover.Server) []string {
+	line := append([]string{s.Command}, s.Args.Values()...)
+	var secrets []string
+	for _, v := range discover.ArgSecrets(line) {
+		if len(v) >= minBareSecretLen {
+			secrets = append(secrets, v)
+		}
 	}
 	return secrets
 }

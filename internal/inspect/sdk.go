@@ -110,16 +110,18 @@ func New(opts SDKOptions) *SDKInspector {
 //
 // Every non-nil error is a *ConnectError; use errors.As to get it. Its text
 // never holds a configured env value: mcpmoat puts none there, and Inspect
-// removes from text that the server sent the configured values and the
-// values of the expanded variables that have at least minBareSecretLen bytes
-// (a server gets them and can echo them). Its URL is the redacted URL as
-// discovered, not the expanded one. It can hold other text that the server
-// controls, so callers must escape it with internal/termsafe before they
-// print it. errors.Is(err, context.DeadlineExceeded) works for timeouts.
+// removes from text that the server sent the configured values, the values
+// of the expanded variables and, for a stdio server, the secrets in the argv
+// (see argSecrets) that have at least minBareSecretLen bytes (a server gets
+// them and can echo them). Its URL is the redacted URL as discovered, not
+// the expanded one. It can hold other text that the server controls, so
+// callers must escape it with internal/termsafe before they print it.
+// errors.Is(err, context.DeadlineExceeded) works for timeouts.
 //
-// On success, Result.Secrets holds the configured values and the expanded
-// values that have at least minBareSecretLen bytes (see Result.Secrets and
-// resultSecrets). For a remote server, [Remote] sets it.
+// On success, Result.Secrets holds the configured values, the expanded
+// values and, for a stdio server, the argv secrets that have at least
+// minBareSecretLen bytes (see Result.Secrets and resultSecrets). For a
+// remote server, [Remote] sets it.
 //
 // For a stdio server, Inspect:
 //
@@ -203,8 +205,9 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 // inspectStdio is Inspect for a server that is not remote. s is the expanded
 // server, parent is the environment for buildEnv, and lookedUp holds the
 // values of the expanded variables, for the scrub of error text and for
-// Result.Secrets. Inspect checked the gates before, and stdioCommand checks
-// them again.
+// Result.Secrets. Both also get the configured env values and the argv
+// secrets of s (see envSecrets and argSecrets). Inspect checked the gates
+// before, and stdioCommand checks them again.
 func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent, lookedUp []string) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, classify(err, s, nil, nil)
@@ -252,7 +255,9 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	// the defer below stops the process first; stop is idempotent.
 	defer proc.stop()
 
-	secrets := slices.Concat(envSecrets(s.Env), lookedUp)
+	// The configured env values, the expanded values and the secrets in the
+	// argv (see argSecrets). The child gets all of them and can echo them.
+	secrets := slices.Concat(envSecrets(s.Env), lookedUp, argSecrets(s))
 	raw, sizes := &rawLists{}, &rawLimit{limit: limit}
 	// fail turns err into the *ConnectError that Inspect returns. The SDK
 	// formats some errors with %v, which drops the context error from the
@@ -298,9 +303,10 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	if err := listInto(ctx, cs, initRes.Capabilities, raw, &result); err != nil {
 		return fail(err)
 	}
-	// The configured env values and the expanded values, for consumers that
-	// remove them from the Result text (see Result.Secrets). Both lists hold
-	// only values of at least minBareSecretLen bytes already.
+	// The configured env values, the expanded values and the argv secrets,
+	// for consumers that remove them from the Result text (see
+	// Result.Secrets). All three lists hold only values of at least
+	// minBareSecretLen bytes already.
 	result.Secrets = resultSecrets(secrets)
 	return result, nil
 }

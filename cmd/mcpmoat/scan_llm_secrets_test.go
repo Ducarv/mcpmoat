@@ -388,7 +388,13 @@ func llmSecretScan(t *testing.T, api *llmSecretAPI, servers []llmSecretServer, j
 		}
 		insp.Results[s.name] = res
 	}
-	e := llmEnv(t, tools)
+	return llmSecretRun(t, api, llmEnv(t, tools), insp, jsonOut)
+}
+
+// llmSecretRun runs "mcpmoat scan --llm" on the config of e with the fake
+// inspector insp, with the real LLM client against api.
+func llmSecretRun(t *testing.T, api *llmSecretAPI, e *pinEnv, insp inspect.Inspector, jsonOut bool) pinRunResult {
+	t.Helper()
 	// A factory with no classifier fails the test when it is called, so
 	// the scan must use the real client below.
 	c, stdout, stderr := llmCLI(e, insp, &llmFactory{t: t})
@@ -402,6 +408,135 @@ func llmSecretScan(t *testing.T, api *llmSecretAPI, servers []llmSecretServer, j
 		args = append(args, "--json")
 	}
 	return llmRun(t, e, c, stdout, stderr, args...)
+}
+
+// The secret values of the argv of TestScanLLMRedactsArgSecrets. Like
+// llmEchoCanary they hold no word, so no part of them shows by chance. Their
+// names hold no secret word on purpose: gosec (G101) flags such a name.
+const (
+	// llmArgFlagCanary is the value after "--api-key" in the args.
+	llmArgFlagCanary = "argflag-Hq7Zt2Lm9Wv4"
+	// llmArgHeaderCanary is the credential of the header line
+	// "Authorization: Bearer <value>" after "-H" in the args.
+	llmArgHeaderCanary = "arghead-Rk3Pn8Xc5Jd1"
+	// llmArgPackage is the package name in the args. It is no secret, so it
+	// is sent as it is.
+	llmArgPackage = "@modelcontextprotocol/server-filesystem"
+)
+
+// TestScanLLMRedactsArgSecrets checks the secrets of the argv of a stdio
+// server (issue #185): a server gets its args and can echo them. For a stdio
+// server, inspect puts in Result.Secrets the text of the args that
+// discover.RedactArgs masks (discover.ArgSecrets: the value after
+// "--api-key", the header line after "-H", and the parts of that line), with
+// at least 8 bytes. The fake inspector gets the same values: the test calls
+// the real discover.ArgSecrets on the command line of the config.
+//
+// Each tool echoes a part of the args. The provider must get discover.Mask
+// and "redacted": true for each echoed secret, never a canary, and the
+// package name unchanged. The negative control ("no secrets") sends the same
+// text without Secrets: both canaries then reach the provider, so the checks
+// on the bodies are not vacuous. The canaries are in neither stdout nor
+// stderr: the report prints the args of the config masked.
+func TestScanLLMRedactsArgSecrets(t *testing.T) {
+	t.Parallel()
+
+	const mask = discover.Mask
+	command := "npx"
+	args := []string{"-y", llmArgPackage, "--api-key", llmArgFlagCanary, "-H", "Authorization: Bearer " + llmArgHeaderCanary, "/data"}
+
+	// The tool with the package name has the high marker, so every scan has
+	// one LLM row and exits with exitFindings.
+	pkgDesc := "Serves files with " + llmArgPackage + ". " + llmMarkHigh
+	tools := []inspect.Tool{
+		mkTool("flags", "Started with --api-key "+llmArgFlagCanary+" today."),
+		mkTool("header", "Send the header Authorization: Bearer "+llmArgHeaderCanary+" now."),
+		mkTool("bearer", "Use Bearer "+llmArgHeaderCanary+" for each call."),
+		mkTool("bare", "The credential is "+llmArgHeaderCanary+"."),
+		mkTool("pkg", pkgDesc),
+	}
+	// sent is the payload of each tool without a redaction.
+	sent := make(map[string]llmSecretPayload, len(tools))
+	for _, tl := range tools {
+		sent[tl.Name] = llmSecretPayload{ToolName: tl.Name, ToolDescription: tl.Description}
+	}
+	// masked is the payload of each tool after the redaction. A run of text
+	// that more than one value covers gets one Mask: the header line, the
+	// value "Bearer <value>" and the credential alone overlap.
+	masked := map[string]llmSecretPayload{
+		"flags":  {ToolName: "flags", ToolDescription: "Started with --api-key " + mask + " today.", Redacted: true},
+		"header": {ToolName: "header", ToolDescription: "Send the header " + mask + " now.", Redacted: true},
+		"bearer": {ToolName: "bearer", ToolDescription: "Use " + mask + " for each call.", Redacted: true},
+		"bare":   {ToolName: "bare", ToolDescription: "The credential is " + mask + ".", Redacted: true},
+		"pkg":    sent["pkg"],
+	}
+
+	// argSecrets is what inspect gives a stdio server: the values of
+	// discover.ArgSecrets of the command line (the command first), with at
+	// least 8 bytes.
+	// The values are raw secrets: the test compares them in memory only,
+	// and never prints them.
+	var argSecrets []discover.Secret
+	var withPackage int
+	for _, v := range discover.ArgSecrets(append([]string{command}, args...)) {
+		if strings.Contains(v, llmArgPackage) {
+			withPackage++
+		}
+		if len(v) >= 8 {
+			argSecrets = append(argSecrets, discover.NewSecret(v))
+		}
+	}
+	// The package name is no secret, so no value may hold it: else the
+	// redaction would mask it, and the test would check the wrong thing.
+	if withPackage != 0 {
+		t.Fatalf("discover.ArgSecrets gave %d values with the package name, want 0", withPackage)
+	}
+
+	tests := []struct {
+		name    string
+		secrets []discover.Secret
+		want    map[string]llmSecretPayload
+	}{
+		{name: "argv secrets", secrets: argSecrets, want: masked},
+		{name: "no secrets", want: sent},
+	}
+	for _, tt := range tests {
+		for _, provider := range []llm.Provider{llm.ProviderAnthropic, llm.ProviderOpenAI} {
+			for _, out := range llmOutputs {
+				t.Run(tt.name+"/"+string(provider)+"/"+out.name, func(t *testing.T) {
+					t.Parallel()
+					api := newLLMSecretAPI(t, provider)
+					e := newPinEnv(t, map[string]any{"srv": map[string]any{"command": command, "args": args}})
+					insp := fakeServers(map[string][]inspect.Tool{"srv": tools})
+					res := insp.Results["srv"]
+					res.Secrets = tt.secrets
+					insp.Results["srv"] = res
+
+					r := llmSecretRun(t, api, e, insp, out.json)
+
+					if r.code != exitFindings {
+						t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, exitFindings, r.stdout, r.stderr)
+					}
+					if out.json && !decodeScanJSON(t, r.stdout).Complete {
+						t.Errorf("JSON complete = false, want true")
+					}
+					wantRows := []llmHit{{llm.RuleID, "high", "srv", "pkg"}}
+					if got := llmJSONOrTerminalRows(t, r.stdout, out.json); !slices.Equal(got, wantRows) {
+						t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, wantRows, r.stdout)
+					}
+					for _, canary := range []string{llmArgFlagCanary, llmArgHeaderCanary} {
+						llmSecretAssertAbsent(t, canary, "stdout", r.stdout)
+						llmSecretAssertAbsent(t, canary, "stderr", r.stderr)
+						llmSecretAssertRequests(t, api, provider, canary, tt.want)
+					}
+					// llmSecretAssertRequests compared each payload, so the
+					// package name in the text of pkg went out unchanged, with
+					// no "redacted" key.
+					assertNoLeakBoth(t, r.stdout, r.stderr)
+				})
+			}
+		}
+	}
 }
 
 // llmSecretAssertRequests checks the requests that api got: one for each

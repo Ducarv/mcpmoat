@@ -201,13 +201,12 @@ func (a *llmRejectAPI) requestsPerTool() map[string]int {
 }
 
 // llmToolTries returns the largest number of requests that the client sends
-// for tl with llmRejectAPI: llmWantTries for a tool that gets a code that the
-// client tries again, else 1.
+// for tl with llmRejectAPI: llm.RetryMaxTries for a tool that gets a code of
+// llmRetryCodes (a code that the client tries again), else 1.
 func llmToolTries(tl inspect.Tool) int {
 	if m := llmRejectStatus.FindStringSubmatch(tl.Description); m != nil {
-		switch m[1] {
-		case "429", "502", "503", "504", "529":
-			return llmWantTries
+		if code, err := strconv.Atoi(m[1]); err == nil && slices.Contains(llmRetryCodes, code) {
+			return llm.RetryMaxTries
 		}
 	}
 	return 1
@@ -342,18 +341,6 @@ func notClassifiedText(n int) string {
 // tool with the lowest job index, and n the number of tools.
 func rejectedGuardLine(code, n int) string {
 	return fmt.Sprintf("%sthe LLM provider failed (HTTP %d, the provider refused every tool); %s\n", scanPrefix, code, notClassifiedText(n))
-}
-
-// llmStepFailureLines returns the lines of stderr that report a failure of
-// the LLM step: a provider failure or an internal error.
-func llmStepFailureLines(stderr string) []string {
-	var out []string
-	for line := range strings.Lines(stderr) {
-		if strings.HasPrefix(line, scanPrefix+"the LLM provider failed") || strings.HasPrefix(line, scanPrefix+"the LLM step failed") {
-			out = append(out, line)
-		}
-	}
-	return out
 }
 
 // TestScanLLMRejected runs scan --llm with the real client against a fake
@@ -510,7 +497,7 @@ func TestScanLLMRejected(t *testing.T) {
 			wantCode:   exitError,
 			wantRows:   []llmRejectRow{rejectedRow002("t1")},
 			wantReason: "HTTP 503",
-			wantTries:  map[string]int{"t2": llmWantTries},
+			wantTries:  map[string]int{"t2": llm.RetryMaxTries},
 		},
 		{
 			name:       "one tool 401 stays global",
@@ -563,7 +550,7 @@ func TestScanLLMRejected(t *testing.T) {
 
 					// The requests: one for each tool, unless a global
 					// failure cancelled the rest. A tool with a code that
-					// the client tries again gets up to llmWantTries
+					// the client tries again gets up to llm.RetryMaxTries
 					// requests (see llmToolTries); a refused tool gets one.
 					n := int(api.requests.Load())
 					maxN := 0
@@ -599,7 +586,7 @@ func TestScanLLMRejected(t *testing.T) {
 					}
 
 					// The failure line of the LLM step.
-					lines := llmStepFailureLines(r.stderr)
+					lines := llmStepLines(r.stderr)
 					complete := true
 					switch {
 					case tt.wantLine != "":
@@ -714,7 +701,7 @@ func (f llmFuncClassifier) Classify(ctx context.Context, in llm.Input) (llm.Verd
 // order fixed: t2 answers only after t1 answered. The global failure wins:
 // exit 2, complete false and the line of the 503 with one tool that was not
 // classified. The refused tool that was answered before the failure keeps
-// its MOAT-LLM-002 row (this is what classifyTools does: see sortAnswer).
+// its MOAT-LLM-002 row (this is what classifyPlan does: see sortAnswer).
 func TestScanLLMRejectedThenGlobalFailure(t *testing.T) {
 	t.Parallel()
 
@@ -753,7 +740,7 @@ func TestScanLLMRejectedThenGlobalFailure(t *testing.T) {
 				t.Errorf("Classify calls = %d, want 2", got)
 			}
 			want := []string{scanPrefix + "the LLM provider failed (HTTP 503); 1 tool was not classified\n"}
-			if got := llmStepFailureLines(r.stderr); !slices.Equal(got, want) {
+			if got := llmStepLines(r.stderr); !slices.Equal(got, want) {
 				t.Errorf("LLM failure lines = %q, want %q\nstderr:\n%s", got, want, r.stderr)
 			}
 			if jsonOut && decodeScanJSON(t, r.stdout).Complete {
@@ -783,8 +770,9 @@ func statusCode(err error) int {
 	return 0
 }
 
-// TestClassifyToolsRejected checks classifyTools directly with a fake
-// classifier, so the order of the answers is under control.
+// TestClassifyToolsRejected checks planLLMJobs and classifyPlan (through the
+// classifyTools helper) directly with a fake classifier, so the order of the
+// answers is under control.
 func TestClassifyToolsRejected(t *testing.T) {
 	t.Parallel()
 

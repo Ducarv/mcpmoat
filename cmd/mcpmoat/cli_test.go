@@ -428,10 +428,13 @@ func TestUsageContent(t *testing.T) {
 		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
 		"  every tool, or another provider error gives exit 2; the report still prints.\n",
 		// The retries of a busy provider and the time limit of the whole
-		// LLM step (issue #188). The numbers are literal, so a change of
-		// the policy or of llmStepTimeout must change the help too.
-		"  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to 3 tries in total for each tool.\n",
-		"  When the provider asks to wait (Retry-After), scan waits at most 30 seconds before the next try.\n",
+		// LLM step (issue #188). The two retry numbers come from the
+		// policy of package llm (llm.RetryMaxTries and llm.RetryAfterCap,
+		// 3 and "30 seconds" today), so the help follows the policy;
+		// internal/llm pins their values. The step limit is literal, so a
+		// change of llmStepTimeout must change the help too.
+		fmt.Sprintf("  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries),
+		"  When the provider asks to wait (Retry-After), scan waits at most " + stepTimeoutText(llm.RetryAfterCap) + " before the next try.\n",
 		"  The LLM step stops after 10 minutes: the tools that are not classified yet give exit 2; the report still prints.\n",
 	} {
 		if !strings.Contains(got, want) {

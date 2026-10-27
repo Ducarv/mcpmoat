@@ -162,7 +162,7 @@ func TestAnthropicRequestShape(t *testing.T) {
 			if got := decodeAs[string](t, "tool description", tool["description"]); got != anthropicToolDescription {
 				t.Errorf("tool description = %q, want %q", got, anthropicToolDescription)
 			}
-			if got, want := compactJSON(t, tool["input_schema"]), compactJSON(t, VerdictSchema()); got != want {
+			if got, want := compactJSON(t, tool["input_schema"]), compactJSON(t, verdictSchema()); got != want {
 				t.Errorf("input_schema = %s, want %s", got, want)
 			}
 

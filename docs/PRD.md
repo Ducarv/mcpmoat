@@ -658,17 +658,20 @@ the machine**.
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
   rule.
-- Secret values are removed before the cut. A server that got a token through its env or headers
-  can put that token into a tool name or description. So mcpmoat replaces each secret value that
-  it gave to that server with `********` in the name and the description of the tools of that
+- Secret values are removed before the cut. A server that got a token through its env, headers or
+  args can put that token into a tool name or description. So mcpmoat replaces each secret value
+  that it gave to that server with `********` in the name and the description of the tools of that
   server, before it cuts them. The values are the configured env values, the header values, the
-  credential parts of a header, the URL user info and the secret URL parts, and the expanded
-  placeholder values. The user message then has the field `redacted: true`, and the system prompt
-  tells the model that `********` is removed text and not an instruction. The limits:
+  credential parts of a header, the URL user info and the secret URL parts, the expanded
+  placeholder values and, for a stdio server, the parts of the expanded command and args that the
+  report masks. The user message then has the field `redacted: true`, and the system prompt tells
+  the model that `********` is removed text and not an instruction. The limits:
   - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
   - An encoded form of a value (base64, URL-encoded, or split across words) is not removed.
   - A header value that is not secret but has 8 bytes or more (for example `application/json`) is
-    replaced too.
+    replaced too, and so is arg text that the report masks but that is not secret (for example a
+    UUID or a random-looking path segment). Some secrets in args are not found (for example
+    `--db mypassword`), so they are not removed.
   - A server can write `********` itself.
   - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
     secret that a server puts in a tool name can show on stdout.
@@ -689,7 +692,10 @@ the machine**.
 - An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
   content filter or a context limit). The tool is not classified and gets a `medium` finding:
   `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut. The
-  other requests go on, and the scan can still be complete.
+  other requests go on, and the scan can still be complete. That finding is below the default
+  `--fail-on high`, so a hostile server that makes the provider refuse its own tool description
+  can keep its LLM rating from reaching `high`, as with an unusable answer. The rule findings still
+  apply.
 - Retries: a provider answer of HTTP 429, 502, 503, 504 or 529 (busy or overloaded) is tried
   again, with at most 3 tries in total for each tool. The wait before a retry is an exponential
   backoff with jitter (1 s, doubling up to 8 s), or the `Retry-After` time of the answer up to 30

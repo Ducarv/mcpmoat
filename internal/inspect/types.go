@@ -295,6 +295,14 @@ type Result struct {
 	// Secrets are the secret values that Inspect gave to the server:
 	//
 	//   - stdio: each configured env value.
+	//   - stdio: the secrets in the command and the args that the child
+	//     gets, after the expansion: the text that discover.RedactArgs masks
+	//     (see discover.ArgSecrets), for example the value after "--token"
+	//     or "--api-key=", "x" in -H "Authorization: Bearer x", a token path
+	//     segment, or the user info and the query values of a URL. Plain
+	//     args that RedactArgs shows, such as package names and paths, are
+	//     not in the list. RedactArgs fails closed, so some text that is not
+	//     a secret (a path segment with a space) is in the list too.
 	//   - remote: each configured header value, and the credential after an
 	//     auth scheme ("Bearer <token>").
 	//   - remote: for a "Basic <base64>" header and for the URL user info, the

@@ -141,11 +141,13 @@ func sdkAssertNotExist(t *testing.T, path, why string) {
 func TestSDKInspectBenign(t *testing.T) {
 	t.Parallel()
 
-	got, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	s := sdkBenign(t)
+	got, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
-	sdkAssertResult(t, got, inspecttest.BenignResult())
+	// No env: only the masked segments of the fixture path.
+	sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(sdkPathSecrets(t, s.Command)...)...)
 }
 
 // TestSDKInspectUntrusted checks that an untrusted server never starts
@@ -177,7 +179,7 @@ func TestSDKInspectUntrusted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Inspect() error = %v, want nil with AllowUntrusted", err)
 		}
-		sdkAssertResult(t, got, inspecttest.BenignResult())
+		sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(sdkPathSecrets(t, s.Command, pidfile)...)...)
 		sdkReadPID(t, pidfile)
 	})
 }
@@ -412,7 +414,10 @@ func TestSDKInspectArgsReachChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
-	sdkAssertResult(t, got, inspecttest.BenignResult())
+	// RedactArgs masks the path segments with spaces and shell syntax (it
+	// fails closed), so they are argv secrets too, each one whole.
+	wantSecrets := append(sdkPathSecrets(t, s.Command, root), "with space", "$(x);`id`|&*", "pid file $HOME", "env 'file'")
+	sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(wantSecrets...)...)
 	sdkReadPID(t, pidfile)
 	if _, err := os.Stat(envfile); err != nil {
 		t.Errorf("envfile at the exact path: %v", err)
@@ -485,7 +490,8 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 		env  map[string]string
 		want map[string]string
 		// wantSecrets is Result.Secrets: the configured env values of at
-		// least 8 bytes. The parent values never are in it.
+		// least 8 bytes, with the masked segments of the paths in the argv
+		// (see sdkPathSecrets). The parent values never are in it.
 		wantSecrets []string
 	}{
 		{
@@ -526,7 +532,8 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.wantSecrets...)
+			wantSecrets := append(slices.Clone(tt.wantSecrets), sdkPathSecrets(t, s.Command, envfile)...)
+			sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(wantSecrets...)...)
 
 			vars, raw := sdkReadEnvFile(t, envfile)
 			if !reflect.DeepEqual(vars, tt.want) {
@@ -651,12 +658,13 @@ func TestSDKInspectConcurrent(t *testing.T) {
 	wg.Wait()
 
 	want := inspecttest.BenignResult()
+	wantSecrets := inspect.WantSecrets(sdkPathSecrets(t, s.Command)...)
 	for i := range workers {
 		if errs[i] != nil {
 			t.Errorf("worker %d: Inspect() error = %v, want nil", i, errs[i])
 			continue
 		}
-		sdkAssertResult(t, results[i], want)
+		sdkAssertResult(t, results[i], want, wantSecrets...)
 	}
 }
 
@@ -777,7 +785,8 @@ func TestSDKInspectStateGate(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Inspect() error = %v, want nil", err)
 				}
-				sdkAssertResult(t, res, inspecttest.BenignResult(), discovertest.CanaryEnv)
+				wantSecrets := append(sdkPathSecrets(t, s.Command, pidfile), discovertest.CanaryEnv)
+				sdkAssertResult(t, res, inspecttest.BenignResult(), inspect.WantSecrets(wantSecrets...)...)
 				sdkReadPID(t, pidfile)
 				return
 			}
@@ -899,8 +908,10 @@ func TestSDKInspectExpand(t *testing.T) {
 		env       map[string]string
 		want      func(dir string) map[string]string
 		// secrets gives the values that Result.Secrets must hold: the
-		// looked-up values and the expanded env values. inspect.WantSecrets
-		// drops the short ones and sorts them.
+		// looked-up values and the expanded env values. The test adds the
+		// masked segments of the expanded command and envfile paths (see
+		// sdkPathSecrets). inspect.WantSecrets drops the short ones and
+		// sorts them.
 		secrets func(dir, fixture string) []string
 	}{
 		{
@@ -1120,8 +1131,10 @@ func TestSDKInspectExpand(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			wantSecrets := inspect.WantSecrets(tt.secrets(dir, inspecttest.Fixture(t, "benign"))...)
-			sdkAssertResult(t, got, inspecttest.BenignResult(), wantSecrets...)
+			// The child gets the expanded paths: the fixture and dir/env.
+			fixture := inspecttest.Fixture(t, "benign")
+			wantSecrets := append(tt.secrets(dir, fixture), sdkPathSecrets(t, fixture, filepath.Join(dir, "env"))...)
+			sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(wantSecrets...)...)
 
 			vars, _ := sdkReadEnvFile(t, filepath.Join(dir, "env"))
 			want := tt.want(dir)

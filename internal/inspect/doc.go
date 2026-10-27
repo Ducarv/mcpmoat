@@ -101,10 +101,20 @@
 // and the text of a [Result] (the names and descriptions of tools, prompts
 // and resources, and ServerName) is not scrubbed. So a server can echo a
 // secret in its Result. On success, Inspect puts the recorded values and the
-// configured values of at least 8 bytes in Result.Secrets. scan --llm uses
-// them to replace those values in the tool names and descriptions that it
-// sends to the provider (FR-17). The report and the JSON output do not use
-// them: they print the Result text as the server sent it.
+// configured values of at least 8 bytes in Result.Secrets.
+//
+// A stdio server also gets its argv, and real configs often put a token
+// there ("--api-key", -H "Authorization: Bearer <token>"). So for a stdio
+// server, Result.Secrets and the scrub of error text also hold the secrets
+// in the expanded command and args (argSecrets): the text that
+// discover.RedactArgs masks in all output (see discover.ArgSecrets), with at
+// least 8 bytes. Args that RedactArgs shows, such as package names, are not
+// in the list, so they stay readable.
+//
+// scan --llm uses Result.Secrets to replace those values in the tool names
+// and descriptions that it sends to the provider (FR-17). The report and the
+// JSON output do not use them: they print the Result text as the server
+// sent it.
 //
 // # Starting stdio servers
 //

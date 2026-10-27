@@ -47,15 +47,21 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   OpenAI-compatible server), mcpmoat sets no cap on the output tokens of the model (see
   [Output cap](llm.md)).
 - A tool that the provider refuses (HTTP 400, 413 or 422) is not classified. It gets a `medium`
-  finding, not a rating. When the provider refuses every tool that it answers, the LLM step fails
-  and the scan exits with 2.
+  finding, not a rating. That is below the default `--fail-on high`, so a hostile server that makes
+  the provider refuse its tool descriptions can keep their LLM rating from reaching `high`. When
+  the provider refuses every tool that it answers, the LLM step fails and the scan exits with 2.
 - `--llm` replaces the secret values of a server with `********` in the tool text that it sends,
-  but not all of them (see [What is sent](llm.md)):
+  also the secrets in the args of a stdio server, but not all of them (see
+  [What is sent](llm.md)):
   - A value shorter than 8 bytes is not removed.
   - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
     removed.
+  - A secret in an arg that mcpmoat does not recognise is not removed, for example
+    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`.
+  - A secret that starts or ends with `*` can show again next to a `********`.
   - A header value of 8 bytes or more is replaced also when it is not secret, for example
-    `application/json`.
+    `application/json`. Arg text that the report masks is replaced also when it is not secret, for
+    example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
 - The report on the terminal and the `--json` output show the tool names as the server sent them.
   mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
   can make it show on stdout.

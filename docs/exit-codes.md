@@ -41,11 +41,12 @@ a `--rules` file that does not compile, with or without `--no-connect`), an unre
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, a provider
 refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM
-step, or tools over the 500-tool cap), an
-internal error of the tool rule step, or another internal error. One tool that the provider
-refuses (HTTP 400, 413 or 422) is not an execution error: it is a `medium` finding, and the scan
-goes on (see [Optional LLM classification](llm.md)). Some of these errors still
-print the report on stdout first, so you can read the findings:
+step, or tools over the 500-tool cap), an internal error of the tool rule step, or another
+internal error. One tool that the provider refuses (HTTP 400, 413 or 422) is not an execution
+error: it is a `medium` finding, and the scan goes on (see [Optional LLM classification](llm.md)).
+That is below the default `--fail-on high`, so a hostile server that makes the provider refuse its
+tool descriptions can keep their LLM rating from reaching `high`. Some of these errors still print
+the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
 |---|---|

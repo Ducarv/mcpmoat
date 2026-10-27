@@ -5,7 +5,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/Ducarv/mcpmoat)](go.mod)
 [![License](https://img.shields.io/github/license/Ducarv/mcpmoat)](LICENSE)
 
-An offline scanner for malicious or tampered MCP servers, built for the individual developer.
+An offline-first scanner for malicious or tampered MCP servers, built for the individual developer.
 
 mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your machine, reads the tools
 they expose, and checks them for tool poisoning, shadowing, rug pulls, dangerous config and

@@ -91,7 +91,7 @@ func TestOpenAIRequestShape(t *testing.T) {
 	if got := string(schema["strict"]); got != "true" {
 		t.Errorf("json_schema strict = %s, want true", got)
 	}
-	if got, want := compactJSON(t, schema["schema"]), compactJSON(t, VerdictSchema()); got != want {
+	if got, want := compactJSON(t, schema["schema"]), compactJSON(t, verdictSchema()); got != want {
 		t.Errorf("json_schema schema = %s, want %s", got, want)
 	}
 }

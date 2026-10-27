@@ -140,6 +140,14 @@ func TestRetryPolicyDefaults(t *testing.T) {
 	if retryJitter != 0.5 || retryMultiplier != 2 {
 		t.Errorf("jitter, multiplier = %v, %v, want 0.5, 2", retryJitter, retryMultiplier)
 	}
+	// The help text of a caller shows the exported numbers, so they must be
+	// the numbers that the zero policy uses.
+	if RetryMaxTries != 3 || RetryAfterCap != 30*time.Second {
+		t.Errorf("RetryMaxTries, RetryAfterCap = %v, %v, want 3, 30s", RetryMaxTries, RetryAfterCap)
+	}
+	if got.maxTries != RetryMaxTries || got.afterCap != RetryAfterCap {
+		t.Errorf("withDefaults() maxTries, afterCap = %v, %v, want RetryMaxTries, RetryAfterCap", got.maxTries, got.afterCap)
+	}
 
 	fixed := func() time.Time { return retryBase }
 	set := retryPolicy{maxTries: 5, initialWait: 2, maxWait: 3, afterCap: 4, now: fixed}.withDefaults()
@@ -200,8 +208,8 @@ func TestRetryPolicyDecide(t *testing.T) {
 		{name: "stopped", err: stopped(context.Canceled), want: noRetry},
 		{name: "Retry-After zero", err: after(429, 0), want: retryWait, wantWait: 0},
 		{name: "Retry-After 7s", err: after(503, 7*time.Second), want: retryWait, wantWait: 7 * time.Second},
-		{name: "Retry-After at the cap", err: after(529, retryAfterCap), want: retryWait, wantWait: retryAfterCap},
-		{name: "Retry-After above the cap", err: after(429, retryAfterCap+time.Nanosecond), want: noRetry},
+		{name: "Retry-After at the cap", err: after(529, RetryAfterCap), want: retryWait, wantWait: RetryAfterCap},
+		{name: "Retry-After above the cap", err: after(429, RetryAfterCap+time.Nanosecond), want: noRetry},
 		{name: "Retry-After max", err: after(429, time.Duration(math.MaxInt64)), want: noRetry},
 	}
 	for _, tt := range tests {
@@ -648,7 +656,7 @@ func TestSendReadsRetryAfter(t *testing.T) {
 			t.Parallel()
 			srv := startServer(t, failThen(ProviderAnthropic, http.StatusServiceUnavailable, always, tt.header))
 			c := newRetryClient(t, ProviderAnthropic, srv.URL, retryPolicy{now: func() time.Time { return retryBase }})
-			_, err := c.send(t.Context(), "m")
+			_, err := c.send(t.Context(), "m", c.retry.withDefaults().now)
 			var se *StatusError
 			if !errors.As(err, &se) || se.Code != http.StatusServiceUnavailable {
 				t.Fatalf("send() error = %v, want *StatusError{Code: 503}", err)

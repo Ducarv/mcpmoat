@@ -404,7 +404,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 		}
 	})
 
-	// classifyTools matches the ignore list with the real tool name, which is
+	// classifyPlan matches the ignore list with the real tool name, which is
 	// empty here, and not with "(no name)". A tool entry can name no empty
 	// tool, and an entry cannot hold "(no name)" (it has a space, so the line
 	// has too many fields). .mcpmoat-ignore cannot ignore the LLM rules (see
@@ -846,13 +846,18 @@ func TestClassifyToolsInvalidVerdict(t *testing.T) {
 // TestNewLLMAnswer checks what newLLMAnswer keeps of the verdict: all of it
 // for a verdict, only Truncated for an answer that cannot be used and for a
 // refused tool (so that llmRow can give a cut tool the floor row), and
-// nothing for the kinds without an answer. It never sets the error:
-// runLLMJobs sets it for a refusal.
+// nothing for the kinds without an answer. It keeps the error of Classify
+// only for a refusal (answerRejected), for the reason of rejectedFailure:
+// for every other kind the error is dropped, so its text can never be
+// printed.
 func TestNewLLMAnswer(t *testing.T) {
 	t.Parallel()
 
 	full := llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess, Truncated: true}
 	notCut := llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess}
+	// classifyErr is the error that Classify returned with the verdict. Each
+	// kind gets the same error, so only the kind decides whether it is kept.
+	classifyErr := fmt.Errorf("%w: test refusal", llm.ErrRejected)
 	tests := map[answerKind]struct{ cut, notCut llm.Verdict }{
 		answerNotRun:         {},
 		answerVerdict:        {full, notCut},
@@ -869,13 +874,19 @@ func TestNewLLMAnswer(t *testing.T) {
 			t.Errorf("%v has no row in the table", k)
 			continue
 		}
+		var wantErr error
+		if k == answerRejected {
+			wantErr = classifyErr
+		}
 		for _, in := range []struct{ v, want llm.Verdict }{{full, w.cut}, {notCut, w.notCut}} {
-			got := newLLMAnswer(k, in.v)
+			got := newLLMAnswer(k, in.v, classifyErr)
 			if got.kind != k || got.verdict != in.want {
 				t.Errorf("newLLMAnswer(%v, %+v) = %v %+v, want %v %+v", k, in.v, got.kind, got.verdict, k, in.want)
 			}
-			if got.err != nil {
-				t.Errorf("newLLMAnswer(%v, %+v).err = %v, want nil", k, in.v, got.err)
+			// Compare the error values, not with errors.Is: the answer must
+			// hold the very error of Classify, or nil.
+			if got.err != wantErr { //nolint:errorlint // identity check: newLLMAnswer must keep the same error value
+				t.Errorf("newLLMAnswer(%v, %+v).err = %v, want %v", k, in.v, got.err, wantErr)
 			}
 		}
 	}
@@ -1014,7 +1025,7 @@ func TestLLMFailureLine(t *testing.T) {
 	}
 }
 
-// TestLLMStepStopped checks the guard of llmStep. classifyTools fails only
+// TestLLMStepStopped checks the guard of llmStep. classifyPlan fails only
 // when the context ended, so the fake classifier cannot reach the guard
 // through llmStep: the test calls llmStepStopped directly. An error while the
 // context is alive must give one fixed line, never the text of the error.

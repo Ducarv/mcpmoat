@@ -342,15 +342,15 @@ func TestScanLLMRealClient(t *testing.T) {
 			} else {
 				full := 0
 				for name, n := range perTool {
-					if n > llmWantTries {
-						t.Errorf("tool %s got %d requests, want at most %d", name, n, llmWantTries)
+					if n > llm.RetryMaxTries {
+						t.Errorf("tool %s got %d requests, want at most %d", name, n, llm.RetryMaxTries)
 					}
-					if n == llmWantTries {
+					if n == llm.RetryMaxTries {
 						full++
 					}
 				}
 				if full == 0 {
-					t.Errorf("requests for each tool = %v, want one tool with %d (the retries of the failed tool)", perTool, llmWantTries)
+					t.Errorf("requests for each tool = %v, want one tool with %d (the retries of the failed tool)", perTool, llm.RetryMaxTries)
 				}
 			}
 			// The warning is the first line on stderr, it shows once, and no
@@ -470,11 +470,20 @@ func TestScanLLMRealClientTruncated(t *testing.T) {
 	}
 }
 
-// llmWantTries is the number of requests that the client sends for one tool
-// in total when the provider answers HTTP 429, 502, 503, 504 or 529 each
-// time: the first request and 2 retries. Package llm keeps the number
-// unexported, so the tests use their own copy, and a change of it fails them.
-const llmWantTries = 3
+// llmRetryCodes are the HTTP status codes that the client of package llm
+// tries again: 429, 502, 503, 504 and 529 (the overload code of the Anthropic
+// API, which net/http has no name for). It is the one list of these codes in
+// the tests of this package. For such a code the client sends at most
+// llm.RetryMaxTries requests for one tool (the first request and 2 retries);
+// the tests use that constant, and TestRetryPolicyDefaults in internal/llm
+// pins its value.
+var llmRetryCodes = []int{
+	http.StatusTooManyRequests,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+	529,
+}
 
 // llmRequestsPerTool returns the number of recorded requests for each tool
 // name, from the Anthropic request bodies. A body that cannot be read fails

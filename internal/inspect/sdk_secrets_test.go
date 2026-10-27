@@ -1,7 +1,11 @@
 package inspect_test
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -106,7 +110,10 @@ func TestSDKInspectSecretsStdio(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.want...)
+			// With the masked segments of the fixture path (an argv
+			// secret), in the order of Result.Secrets.
+			want := inspect.WantSecrets(append(slices.Clone(tt.want), sdkPathSecrets(t, s.Command)...)...)
+			sdkAssertResult(t, got, inspecttest.BenignResult(), want...)
 			for _, s := range got.Secrets {
 				if s.Reveal() == sdkParentCanary {
 					t.Error("Result.Secrets holds a parent value that no placeholder names")
@@ -154,6 +161,14 @@ func TestSDKInspectSecretsStdioNilOnFailure(t *testing.T) {
 			server: func(t *testing.T) discover.Server { return sdkBenign(t, "-mode", "crash") },
 			kinds:  []inspect.ConnectKind{inspect.KindProtocol},
 		},
+		{
+			// The argv holds a secret too (see sdkWrapped).
+			name: "server with an argv secret crashes",
+			server: func(t *testing.T) discover.Server {
+				return sdkWrapped(t, `exec "$0" -mode crash`, "--token="+discovertest.CanaryArgs)
+			},
+			kinds: []inspect.ConnectKind{inspect.KindProtocol},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -175,6 +190,199 @@ func TestSDKInspectSecretsStdioNilOnFailure(t *testing.T) {
 				t.Errorf("Result.Secrets has %d values on failure, want nil", len(res.Secrets))
 			}
 			sdkAssertNoLeak(t, err, sdkExpandSecret)
+		})
+	}
+}
+
+// sdkWrapped returns a stdio server that runs the benign fixture through
+// /bin/sh -c script, with the fixture path as $0 and args after it. The
+// script decides what the fixture gets (`exec "$0"` gives it no args), so
+// args can hold any shape: the benign fixture refuses unknown args. Inspect
+// still sees the whole argv of /bin/sh, so the argv secrets are in args.
+func sdkWrapped(t *testing.T, script string, args ...string) discover.Server {
+	t.Helper()
+	argv := append([]string{"-c", script, inspecttest.Fixture(t, "benign")}, args...)
+	return discover.Server{
+		Name:      "wrapped",
+		Client:    discover.ClientCodex,
+		Transport: discover.TransportStdio,
+		Command:   "/bin/sh",
+		Args:      discover.NewArgs(argv),
+	}
+}
+
+// sdkArgCanary is a fake secret in an argv value of 8 bytes or more.
+const sdkArgCanary = "mcpmoat-arg-canary-sdk-8Kp3Zt"
+
+// sdkCmdSegment is a fake token in a directory name of the command path.
+// The "ghp_" prefix makes RedactArgs mask it as a path segment.
+const sdkCmdSegment = "ghp_mcpmoat0cmd0canary7Rq4"
+
+// TestSDKInspectSecretsStdioArgs checks that Result.Secrets of a stdio
+// server holds the secrets in its argv (the text that discover.RedactArgs
+// masks) and not the plain args. want lists values that must be in
+// Result.Secrets, and notWant values that must not be. The lists are not
+// exact, because the fixture path adds masked segments that depend on the
+// machine (see sdkPathSecrets).
+func TestSDKInspectSecretsStdioArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  func(t *testing.T) discover.Server
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "value after equals",
+			server: func(t *testing.T) discover.Server {
+				return sdkWrapped(t, `exec "$0"`, "--token="+sdkArgCanary)
+			},
+			want:    []string{sdkArgCanary},
+			notWant: []string{"--token=" + sdkArgCanary},
+		},
+		{
+			// The whole line, the value after "Name:" and the credential.
+			name: "authorization header",
+			server: func(t *testing.T) discover.Server {
+				return sdkWrapped(t, `exec "$0"`, "-H", "Authorization: Bearer "+sdkArgCanary)
+			},
+			want: []string{"Authorization: Bearer " + sdkArgCanary, "Bearer " + sdkArgCanary, sdkArgCanary},
+		},
+		{
+			// The expanded arg, not the configured one. The lookup gives only
+			// sdkExpandSecret, so "x-" + sdkExpandSecret comes from the argv.
+			name: "secret flag value after expansion",
+			server: func(t *testing.T) discover.Server {
+				s := sdkWrapped(t, `exec "$0"`, "--api-key", "x-${MCPMOAT_TEST_VALUE}")
+				s.Client = discover.ClientClaudeCode
+				return s
+			},
+			want:    []string{"x-" + sdkExpandSecret, sdkExpandSecret},
+			notWant: []string{"x-${MCPMOAT_TEST_VALUE}", "${MCPMOAT_TEST_VALUE}"},
+		},
+		{
+			// RedactArgs shows these args, so they stay readable.
+			name: "plain args are not secrets",
+			server: func(t *testing.T) discover.Server {
+				return sdkWrapped(t, `exec "$0"`, "-y", "@modelcontextprotocol/server-filesystem", "/home/me/proj", "--port", "8080")
+			},
+			notWant: []string{"@modelcontextprotocol/server-filesystem", "server-filesystem", "@modelcontextprotocol", "/home/me/proj", "8080"},
+		},
+		{
+			// 7 bytes is under the limit, 8 bytes is at it.
+			name: "short argv values are dropped",
+			server: func(t *testing.T) discover.Server {
+				return sdkWrapped(t, `exec "$0"`, "--token", "SEVEN77", "--api-key=EIGHT888")
+			},
+			want:    []string{"EIGHT888"},
+			notWant: []string{"SEVEN77"},
+		},
+		{
+			// The command is argv[0]: a token in its path is a secret too.
+			name: "token segment in the command",
+			server: func(t *testing.T) discover.Server {
+				dir := filepath.Join(t.TempDir(), sdkCmdSegment)
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				command := filepath.Join(dir, "benign")
+				if err := os.Symlink(inspecttest.Fixture(t, "benign"), command); err != nil {
+					t.Fatal(err)
+				}
+				s := sdkBenign(t)
+				s.Command = command
+				return s
+			},
+			want:    []string{sdkCmdSegment},
+			notWant: []string{"benign"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), sdkSecretsParent, 0)
+			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), tt.server(t))
+			if err != nil {
+				t.Fatalf("Inspect() error = %v, want nil", err)
+			}
+			// The values are fake test secrets, so the messages show them.
+			values := revealAll(got.Secrets)
+			for _, w := range tt.want {
+				if !slices.Contains(values, w) {
+					t.Errorf("Result.Secrets = %q, want it to hold %q", values, w)
+				}
+			}
+			for _, w := range tt.notWant {
+				if slices.Contains(values, w) {
+					t.Errorf("Result.Secrets = %q, want it not to hold %q", values, w)
+				}
+			}
+			for _, v := range values {
+				if len(v) < 8 {
+					t.Errorf("Result.Secrets holds %q, want only values of 8 bytes or more", v)
+				}
+			}
+			if len(tt.want) > 0 {
+				inspect.AssertResultMasked(t, got, tt.want...)
+			}
+		})
+	}
+}
+
+// revealAll returns the values of secrets in order.
+func revealAll(secrets []discover.Secret) []string {
+	values := make([]string, 0, len(secrets))
+	for _, s := range secrets {
+		values = append(values, s.Reveal())
+	}
+	return values
+}
+
+// TestSDKInspectStdioArgSecretEcho checks that Inspect removes an argv
+// secret from the error text when a stdio server echoes it (see
+// sdkEchoScript, which echoes $1). The secret is only in the argv, where no
+// env value and no looked-up value covers it. The last case echoes only the
+// last word of $1: the credential of the header line on its own.
+func TestSDKInspectStdioArgSecretEcho(t *testing.T) {
+	t.Parallel()
+
+	// lastWord echoes the text after the last space of $1. Codex does not
+	// expand, so the "${" of the script is not a placeholder.
+	lastWord := strings.Replace(sdkEchoScript, `"$1"`, `"${1##* }"`, 1)
+	tests := []struct {
+		name   string
+		script string
+		args   []string // $0, $1, ...
+	}{
+		{name: "value after equals", script: sdkEchoScript, args: []string{"sh", "--token=" + sdkArgCanary}},
+		{name: "header line", script: sdkEchoScript, args: []string{"-H", "Authorization: Bearer " + sdkArgCanary}},
+		{name: "credential of a header line", script: lastWord, args: []string{"-H", "Authorization: Bearer " + sdkArgCanary}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := discover.Server{
+				Name:      "echo",
+				Client:    discover.ClientCodex,
+				Transport: discover.TransportStdio,
+				Command:   "/bin/sh",
+				Args:      discover.NewArgs(append([]string{"-c", tt.script}, tt.args...)),
+			}
+			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), sdkSecretsParent, 0)
+			res, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
+
+			_, reason := sdkAssertFailed(t, res, err, inspect.KindProtocol)
+			sdkAssertNoLeak(t, err, sdkArgCanary)
+			// The echo must reach the reason or the cause, masked; else the
+			// test would pass on an error that dropped the server text.
+			text := reason
+			if cause := errors.Unwrap(err); cause != nil {
+				text += " | " + cause.Error()
+			}
+			if !strings.Contains(text, "unknown tenant ") || !strings.Contains(text, discover.Mask) {
+				t.Errorf("reason and cause = %q, want the echo with %q", text, discover.Mask)
+			}
 		})
 	}
 }

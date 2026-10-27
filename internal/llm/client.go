@@ -325,8 +325,8 @@ type chatMessage struct {
 
 // DialFunc opens a network connection, as net.Dialer.DialContext does.
 //
-// DialFunc is the type of Config.Dial, which is a TEST HOOK: production code
-// must not set it. A DialFunc must connect to the address that it is given
+// DialFunc is the type of Config.Dial, which is a test hook only: production
+// code must not set it. A DialFunc must connect to the address that it is given
 // and to no other address: the client gives it an address that it has
 // checked (for an http base URL, a loopback address from loopbackDial).
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -342,8 +342,8 @@ type resolver interface {
 //
 // The client sends requests only to the configured base URL. It never
 // follows a redirect and logs nothing. It tries a request again only when the
-// provider is busy (HTTP 429, 502, 503, 504 or 529), at most 3 requests for
-// one tool in total (see retryPolicy).
+// provider is busy (HTTP 429, 502, 503, 504 or 529), at most RetryMaxTries
+// (3) requests for one tool in total (see retryPolicy).
 type Client struct {
 	api   api
 	url   string
@@ -561,10 +561,11 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 // Classify sends a request that asks the model to rate in, and returns the
 // verdict. It sends only the system prompt, the verdict schema and the tool
 // message of in (see the package doc). When the provider is busy (HTTP 429,
-// 502, 503, 504 or 529), it waits and sends the same request again, at most 3
-// requests in total (see retryPolicy). When all of them fail, the error is
-// the one of the last request, the same as without retries. When the context
-// of the caller ends during a wait, Classify stops at once.
+// 502, 503, 504 or 529), it waits and sends the same request again, at most
+// RetryMaxTries (3) requests in total (see retryPolicy). When all of them
+// fail, the error is the one of the last request, the same as without
+// retries. When the context of the caller ends during a wait, Classify stops
+// at once.
 //
 // Each request has a timeout of requestTimeout. The verdict has Truncated
 // set when toolMessage cut the tool name or description. On an error, only
@@ -593,9 +594,11 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 
 // send sends one request with the tool message message and returns the
 // verdict of the model, without Truncated. It builds a new request and body
-// on each call, so sendWithRetry can call it again. Every error has fixed
-// text (see Classify).
-func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
+// on each call, so sendWithRetry can call it again. now gives the current
+// time, to turn a Retry-After date into a wait; sendWithRetry gives the now
+// of its retry policy. send calls now only after a non-2xx answer came, and
+// at most one time. Every error has fixed text (see Classify).
+func (c *Client) send(ctx context.Context, message string, now func() time.Time) (Verdict, error) {
 	body, err := encodeJSON(c.api.requestBody(c.model, message))
 	if err != nil {
 		return Verdict{}, err
@@ -629,8 +632,7 @@ func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 		// that must not reach the terminal. Only the Retry-After header is
 		// read, for the retry policy. It is never printed.
 		status := &StatusError{Code: resp.StatusCode}
-		status.retryAfter, status.hasRetryAfter = parseRetryAfter(
-			resp.Header.Get("Retry-After"), c.retry.withDefaults().now())
+		status.retryAfter, status.hasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), now())
 		return Verdict{}, status
 	}
 	if resp.ContentLength > MaxResponseBodyBytes {

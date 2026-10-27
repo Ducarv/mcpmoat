@@ -88,7 +88,7 @@ func (anthropicAPI) requestBody(model, message string) any {
 		Tools: []anthropicTool{{
 			Name:        anthropicToolName,
 			Description: anthropicToolDescription,
-			InputSchema: VerdictSchema(),
+			InputSchema: verdictSchema(),
 		}},
 		ToolChoice: anthropicChoice{Type: "tool", Name: anthropicToolName},
 	}

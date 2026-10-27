@@ -54,7 +54,8 @@ const (
 )
 
 // The limits of the LLM step that FR-17 sets. The tests use their own copy,
-// so a change of maxLLMTools or llmWorkers in scan_llm.go fails them.
+// so a change of maxLLMTools (scan_llm_plan.go) or llmWorkers (scan_llm.go)
+// fails them.
 const (
 	llmWantCap     = 500 // tools in one scan
 	llmWantWorkers = 4   // requests at the same time
@@ -2064,7 +2065,7 @@ func TestLLMRuleIDsValid(t *testing.T) {
 // knows, so the report and --fail-on handle an LLM finding like any other. An
 // LLM finding is never critical. Risk none and a risk that is not valid give
 // no severity. Package llm must not import internal/rules, so the map sits in
-// scan_llm.go and the check sits here, next to TestLLMRuleIDsValid.
+// scan_llm_rows.go and the check sits here, next to TestLLMRuleIDsValid.
 func TestLLMSeverity(t *testing.T) {
 	t.Parallel()
 
@@ -2111,10 +2112,20 @@ func (f failClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error
 	return llm.Verdict{}, errors.New("unexpected call")
 }
 
-// TestClassifyToolsContext checks classifyTools with a context that ended. With
-// no tool to classify, the step did nothing: it returns an empty result and no
-// error, so a signal after the inspection does not drop the report only with
-// --llm. With a tool, it returns the context error.
+// classifyTools is the LLM step without the stderr lines of llmStep: it runs
+// planLLMJobs on outcomes and then classifyPlan with the real time limit
+// llmStepTimeout. The code of scan calls the same two functions (see
+// llmStep), so the tests that call classifyTools run the code of a real
+// scan. It is a test helper: production code has no classifyTools.
+func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
+	return classifyPlan(ctx, planLLMJobs(outcomes), cl, ignore, llmStepTimeout)
+}
+
+// TestClassifyToolsContext checks planLLMJobs and classifyPlan (through the
+// classifyTools helper) with a context that ended. With no tool to classify,
+// the step did nothing: it returns an empty result and no error, so a signal
+// after the inspection does not drop the report only with --llm. With a tool,
+// it returns the context error.
 func TestClassifyToolsContext(t *testing.T) {
 	t.Parallel()
 

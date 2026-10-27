@@ -152,6 +152,97 @@ func RedactArgs(args []string) []string {
 	if args == nil {
 		return nil
 	}
+	// The zero argScanner does not collect the masked text.
+	var r argScanner
+	return r.scan(args)
+}
+
+// ArgSecrets returns the text of args that [RedactArgs] masks, as written:
+// each piece that RedactArgs replaces with [Mask], in the order of args. A
+// caller that sends text off the machine uses it to remove from that text the
+// secrets that a server got in its args and can echo (for example scan
+// --llm, through Result.Secrets in internal/inspect). The rules are the ones
+// of RedactArgs, and both functions run the same code, so the two cannot
+// differ.
+//
+// A piece is a whole argument ("ghp_x" after "--token", "-uadmin:pw"), the
+// value after "=" ("--api-key=x", "GITHUB_TOKEN=x") or one path segment
+// ("ghp_abc123" in "/data/ghp_abc123/x"). For a URL, the pieces are the parts
+// that RedactURL masks: the user info whole, and the password or, when there
+// is no password, the name (as written and unescaped); the secret path
+// segments and query parts (see SecretPathSegments and SecretQueryParts); and
+// the fragment. When RedactURL masks the URL whole, the piece is the whole
+// URL.
+//
+// A masked piece can be a header line or an auth value, as in -H
+// "Authorization: Bearer x". A server can echo the inner value alone, so
+// ArgSecrets also returns, after the piece: the value after "Name:" when the
+// text before the first ":" is a name ("Bearer x"), and the credential after
+// an auth scheme, a name followed by a space, when the credential has no
+// space ("x"). Both are trimmed of spaces.
+//
+// Each string is not empty. The result can hold a value more than one time,
+// and it holds short values too: the caller filters them. It is nil when
+// RedactArgs masks nothing. ArgSecrets never changes args.
+//
+// The result holds raw secret values. Never print, log, encode or store
+// them; compare them with text in memory only.
+func ArgSecrets(args []string) []string {
+	r := argScanner{collect: true}
+	r.scan(args)
+	return r.secrets
+}
+
+// argScanner runs the rules of RedactArgs over a list of args. When collect
+// is true, it also keeps the text that it masks in secrets, for ArgSecrets
+// (see mask). The zero value collects nothing, for RedactArgs. All the
+// redaction code is in its methods, so RedactArgs and ArgSecrets cannot
+// differ. An argScanner is used by one goroutine only.
+type argScanner struct {
+	collect bool
+	// secrets holds raw values from the args. Never print, log or encode
+	// them.
+	secrets []string
+}
+
+// mask returns Mask in place of s. When r collects, it keeps s and the inner
+// values of s as a header line or an auth value (see headerLineParts). It
+// keeps nothing for an empty s: there is no secret to remove.
+func (r *argScanner) mask(s string) string {
+	if r.collect && s != "" {
+		r.secrets = append(r.secrets, s)
+		r.secrets = append(r.secrets, headerLineParts(s)...)
+	}
+	return Mask
+}
+
+// headerLineParts returns the inner values of s, a masked text that can be a
+// header line or an auth value: the value after "Name:", when the text
+// before the first ":" is a name (see isName), and then the credential after
+// an auth scheme, a name followed by a space. Each part is trimmed of spaces
+// and is not empty. A credential has no space, so text such as "pid file
+// $HOME" gives no credential part, and its words are not removed one by one.
+// So "Authorization: Bearer x" gives "Bearer x" and "x", "X-Api-Key: v"
+// gives "v", and "Bearer x" gives "x". It returns nil for other text.
+func headerLineParts(s string) []string {
+	var parts []string
+	value := s
+	if name, rest, found := strings.Cut(s, ":"); found && isName(name) {
+		value = strings.TrimSpace(rest)
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if scheme, rest, found := strings.Cut(value, " "); found && isName(scheme) {
+		if cred := strings.TrimSpace(rest); cred != "" && !strings.ContainsAny(cred, " \t") {
+			parts = append(parts, cred)
+		}
+	}
+	return parts
+}
+
+// scan returns the RedactArgs result for args, which is not nil.
+func (r *argScanner) scan(args []string) []string {
 	out := make([]string, len(args))
 	// maskNext is true after a flag such as "--token" or "-H" with no
 	// "=value", or a flag that is masked whole with no "=value": its value
@@ -164,12 +255,15 @@ func RedactArgs(args []string) []string {
 		if maskNext && !startsNewFlag(arg) {
 			// arg can be the value, so it is masked. arg can also be a flag
 			// that masks its own value (Go-style "-token"), so if redactArg
-			// would mask the next argument, mask it here too.
-			_, maskNext = redactArg(arg)
-			out[i] = Mask
+			// would mask the next argument, mask it here too. A zero
+			// argScanner gives that answer: the whole arg is masked, so its
+			// parts are not kept on their own.
+			var probe argScanner
+			_, maskNext = probe.redactArg(arg)
+			out[i] = r.mask(arg)
 			continue
 		}
-		out[i], maskNext = redactArg(arg)
+		out[i], maskNext = r.redactArg(arg)
 	}
 	return out
 }
@@ -178,20 +272,20 @@ func RedactArgs(args []string) []string {
 // it. shown is the text to display. maskNext is true if the next argument
 // can be the value of arg and must be masked: arg is a flag such as
 // "--token", or a flag that is masked whole, with no "=value".
-func redactArg(arg string) (shown string, maskNext bool) {
+func (r *argScanner) redactArg(arg string) (shown string, maskNext bool) {
 	name, value, hasValue, ok := parseFlag(arg)
 	switch {
 	case !ok && strings.HasPrefix(arg, "-") && arg != "-" && arg != "--":
 		// "-uadmin:pw" or "-HX-Key:v": a value glued to a short flag, in a
 		// shape that is not a flag name.
-		return Mask, false
+		return r.mask(arg), false
 	case !ok:
-		return displayValue(arg), false
+		return r.displayValue(arg), false
 	case containsToken(name):
 		// "-p" + token, a token that starts with "-", or a long secret-like
 		// name such as "--s3-secret-access-key". With no "=value", the next
 		// argument can be the value, so mask it too (fail closed).
-		return Mask, !hasValue
+		return r.mask(arg), !hasValue
 	case !hasValue:
 		// "--token": the value is the next argument.
 		return arg, masksValue(name)
@@ -199,9 +293,9 @@ func redactArg(arg string) (shown string, maskNext bool) {
 	// "--name=value": keep everything up to and including "=".
 	prefix := arg[:len(arg)-len(value)]
 	if masksValue(name) {
-		return prefix + Mask, false
+		return prefix + r.mask(value), false
 	}
-	return prefix + displayValue(value), false
+	return prefix + r.displayValue(value), false
 }
 
 // masksValue reports whether the value of the flag called name is always
@@ -258,30 +352,30 @@ const minPaddedTokenLen = 16
 
 // displayValue returns a value for display: rule 1 of the RedactArgs doc
 // ("NAME=value"), then displayShape for the rest.
-func displayValue(s string) string {
+func (r *argScanner) displayValue(s string) string {
 	name, value, found := strings.Cut(s, "=")
 	if !found || !isName(name) {
-		return displayShape(s)
+		return r.displayShape(s)
 	}
 	if !isEnvName(name) {
 		// The text before "=" can be a secret and not a name: base64 text
 		// with "=" padding ("c2VjcmV0LXZhbHVlLTEyMzQ=") or a token followed
 		// by "=x" ("ghp_abc=1"). Mask all of it, NAME included.
 		if containsToken(name) {
-			return Mask
+			return r.mask(s)
 		}
 		if strings.Trim(value, "=") == "" && len(name) >= minPaddedTokenLen {
-			return Mask
+			return r.mask(s)
 		}
 	}
 	if IsSecretName(name) {
-		return name + "=" + Mask
+		return name + "=" + r.mask(value)
 	}
 	// displayShape, not displayValue: one level only. A URL value such as
 	// "U=https://h/?a=1" goes through RedactURL. Other text with a second
 	// "=" ("A=B=c") gives "A=" + Mask, because "=" is not a safe byte in a
 	// segment.
-	return name + "=" + displayShape(value)
+	return name + "=" + r.displayShape(value)
 }
 
 // isEnvName reports whether name has the usual form of an environment
@@ -304,25 +398,42 @@ func isEnvName(name string) bool {
 
 // displayShape applies rules 2 to 4 of the RedactArgs doc to s: it shows s
 // only if s has a safe shape, and returns Mask otherwise.
-func displayShape(s string) string {
+func (r *argScanner) displayShape(s string) string {
 	switch {
 	case s == "":
 		return "" // nothing to hide, and Mask would look like a value
 	case strings.Contains(s, "://") || strings.HasPrefix(s, "//"):
-		return RedactURL(s)
+		return r.displayURL(s)
 	case strings.Contains(s, ":") && strings.Contains(s, "@"):
 		// "user:pass@host" or a DSN: the password has no fixed place.
-		return Mask
+		return r.mask(s)
 	case hasSecretLabel(s):
 		// "x-auth-token:abc" is a header line with no space after ":".
-		return Mask
+		return r.mask(s)
 	case !hasSafeColon(s) || !hasSafeAts(s):
 		// "admin:pw", "scott/tiger@orcl": a ":" or "@" in a place that is
 		// not on the list.
-		return Mask
+		return r.mask(s)
 	default:
-		return maskSegments(s)
+		return r.maskSegments(s)
 	}
+}
+
+// displayURL returns RedactURL(s). When r collects, it keeps the parts of s
+// that RedactURL masks (see maskedURLParts), or all of s when RedactURL
+// masks it whole.
+func (r *argScanner) displayURL(s string) string {
+	shown := RedactURL(s)
+	if !r.collect {
+		return shown
+	}
+	if shown == Mask {
+		return r.mask(s)
+	}
+	for _, part := range maskedURLParts(s) {
+		r.mask(part)
+	}
+	return shown
 }
 
 // hasSecretLabel reports whether s has a ":" and the text before the first
@@ -445,17 +556,17 @@ func isVersionLabel(s string) bool {
 // maskSegments splits s at every "/" and "\", keeps the separators, and
 // passes each segment through displaySegment. A path such as
 // "/data/ghp_abc123/x" keeps its shape and loses only the token.
-func maskSegments(s string) string {
+func (r *argScanner) maskSegments(s string) string {
 	var b strings.Builder
 	start := 0 // index of the first byte of the current segment
 	for i := range len(s) {
 		if s[i] == '/' || s[i] == '\\' {
-			b.WriteString(displaySegment(s[start:i]))
+			b.WriteString(r.displaySegment(s[start:i]))
 			b.WriteByte(s[i])
 			start = i + 1
 		}
 	}
-	b.WriteString(displaySegment(s[start:]))
+	b.WriteString(r.displaySegment(s[start:]))
 	return b.String()
 }
 
@@ -466,11 +577,11 @@ func maskSegments(s string) string {
 // already checked where ":" and "@" are. Every other byte (space, quote,
 // brace, ";", ",", "=", "%", "*" and every non-ASCII byte) is a sign of a
 // shape we do not know, so the segment is masked.
-func displaySegment(seg string) string {
+func (r *argScanner) displaySegment(seg string) string {
 	if seg == "" || (onlyBytes(seg, "._:@+-~") && !containsToken(seg)) {
 		return seg
 	}
-	return Mask
+	return r.mask(seg)
 }
 
 // containsToken reports whether s looks like a token (see

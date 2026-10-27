@@ -506,10 +506,6 @@ const (
 	// e2eLLMBodyCanary is the body of the error answers of the fake
 	// provider. The binary never reads such a body, so it must never show.
 	e2eLLMBodyCanary = "e2e-llm-body-canary-5Wv7"
-	// e2eLLMTries is the number of requests that the binary sends for one
-	// tool when every answer is a retryable error: the first request and 2
-	// retries (the retry policy of internal/llm).
-	e2eLLMTries = 3
 	// e2eLLMHoldMax is the longest time that e2eLLMFailing holds an answer.
 	// It only ends the hold when the binary sends fewer requests than the
 	// test wants; the request count then fails the test.
@@ -578,7 +574,8 @@ func e2eLLMRepeat(n int) []string {
 }
 
 // TestE2ELLMProviderFailure checks a provider that answers 503 every time:
-// the binary tries each tool e2eLLMTries times, then scan still prints the
+// the binary tries each tool llm.RetryMaxTries times (the first request and
+// 2 retries: the retry policy of internal/llm), then scan still prints the
 // report, marks the JSON report incomplete and exits with 2. The error names
 // the status code only, never the key or the response body. Each answer has
 // Retry-After: 0, so the retries do not wait for the backoff.
@@ -594,7 +591,7 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			provider := e2eNetStart(t, e2eLLMFailing(t, "0", e2eLLMTries))
+			provider := e2eNetStart(t, e2eLLMFailing(t, "0", llm.RetryMaxTries))
 			const server = "benign-llm-fail"
 			home, work := benignHome(t, server)
 			args := append([]string{"scan", "--llm", "--llm-base-url", provider.srv.URL}, tt.args...)
@@ -633,8 +630,8 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 			}
 			_, reqs := provider.settle(t)
 			// e2eLLMAssertRequests also checks the key header of each try.
-			if got, want := e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary}), e2eLLMRepeat(e2eLLMTries); !slices.Equal(got, want) {
-				t.Errorf("tools sent = %v, want each tool %d times: %v", got, e2eLLMTries, want)
+			if got, want := e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary}), e2eLLMRepeat(llm.RetryMaxTries); !slices.Equal(got, want) {
+				t.Errorf("tools sent = %v, want each tool %d times: %v", got, llm.RetryMaxTries, want)
 			}
 		})
 	}

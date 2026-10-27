@@ -12,18 +12,20 @@ import (
 )
 
 // The production numbers of the retry policy. A zero field of retryPolicy
-// means the number here.
+// means the number here. RetryMaxTries and RetryAfterCap are exported only so
+// that the help text of a caller can show them; nothing outside this package
+// can change the policy.
 const (
-	// retryMaxTries is the number of requests for one tool IN TOTAL: the
-	// first request and 2 retries.
-	retryMaxTries = 3
+	// RetryMaxTries is the most requests that Classify sends for one tool:
+	// 3 tries in total, the first request and 2 retries.
+	RetryMaxTries = 3
 	// retryInitial is the first backoff wait, before jitter.
 	retryInitial = 1 * time.Second
 	// retryMax is the longest backoff wait, before jitter.
 	retryMax = 8 * time.Second
-	// retryAfterCap is the longest Retry-After wait that the client honours.
-	// A longer wait means no retry.
-	retryAfterCap = 30 * time.Second
+	// RetryAfterCap is the longest Retry-After wait that Classify honours. A
+	// longer wait means no retry: the error comes back at once.
+	RetryAfterCap = 30 * time.Second
 	// retryJitter is the randomization factor of the backoff: each wait is
 	// the base wait times a random value from 0.5 to 1.5.
 	retryJitter = 0.5
@@ -40,30 +42,30 @@ const statusOverloaded = 529
 // (also 400, 413 and 422, which are per tool), a request timeout and every
 // other transport error give no retry.
 //
-// The client sends at most maxTries requests for one tool (3 by default: the
-// first request and 2 retries). So a scan sends at most 3 times the number of
-// tools it rates: for 500 tools (the cap maxLLMTools of cmd/mcpmoat), at
-// most 1500 requests. That is the cost bound of --llm.
+// The client sends at most maxTries requests for one tool (RetryMaxTries by
+// default: the first request and 2 retries). So a scan sends at most 3 times
+// the number of tools that it rates. That is the cost bound of --llm.
 //
 // Between two tries the client waits for an exponential backoff with jitter:
 // the base wait starts at initialWait (1 s) and doubles up to maxWait (8 s),
 // and the jitter makes each wait 0.5 to 1.5 times the base wait. With 3
 // tries there are 2 waits, of about 1 s and 2 s. When the answer has a valid
 // Retry-After header, the client waits for that time instead. A Retry-After
-// that is longer than afterCap (30 s) means no retry: the error comes back
-// at once. All waits end when the context of the caller ends.
+// that is longer than afterCap (RetryAfterCap, 30 s) means no retry: the
+// error comes back at once. All waits end when the context of the caller
+// ends.
 //
 // The zero value is the production policy. Tests set small delays. Nothing
 // changes a policy after New, so it is safe to copy and to use at the same
 // time from many goroutines.
 type retryPolicy struct {
-	// maxTries is the number of requests in total. Zero means retryMaxTries.
+	// maxTries is the number of requests in total. Zero means RetryMaxTries.
 	maxTries uint
 	// initialWait is the first backoff wait. Zero means retryInitial.
 	initialWait time.Duration
 	// maxWait is the longest backoff wait. Zero means retryMax.
 	maxWait time.Duration
-	// afterCap is the longest Retry-After wait. Zero means retryAfterCap.
+	// afterCap is the longest Retry-After wait. Zero means RetryAfterCap.
 	afterCap time.Duration
 	// now gives the current time, to turn a Retry-After date into a wait.
 	// Nil means time.Now.
@@ -73,7 +75,7 @@ type retryPolicy struct {
 // withDefaults returns p with each zero field set to its production number.
 func (p retryPolicy) withDefaults() retryPolicy {
 	if p.maxTries == 0 {
-		p.maxTries = retryMaxTries
+		p.maxTries = RetryMaxTries
 	}
 	if p.initialWait == 0 {
 		p.initialWait = retryInitial
@@ -82,7 +84,7 @@ func (p retryPolicy) withDefaults() retryPolicy {
 		p.maxWait = retryMax
 	}
 	if p.afterCap == 0 {
-		p.afterCap = retryAfterCap
+		p.afterCap = RetryAfterCap
 	}
 	if p.now == nil {
 		p.now = time.Now
@@ -195,7 +197,7 @@ func (c *Client) sendWithRetry(ctx context.Context, message string) (Verdict, er
 	// backoff.Permanent stops at once, backoff.RetryAfter waits for the given
 	// time, and a plain error waits for the backoff time.
 	op := func() (Verdict, error) {
-		v, err := c.send(ctx, message)
+		v, err := c.send(ctx, message, p.now)
 		if err == nil {
 			return v, nil
 		}

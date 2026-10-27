@@ -14,13 +14,14 @@
 // # What is sent
 //
 // One request for each tool. When the provider is busy (HTTP 429, 502, 503,
-// 504 or 529), the client sends the same request again, at most 3 requests
-// for one tool in total (see retryPolicy). Each try has its own time limit
-// (requestTimeout); the time limit of the whole LLM step is in cmd/mcpmoat.
+// 504 or 529), the client sends the same request again, at most
+// [RetryMaxTries] requests for one tool in total (see retryPolicy). Each try
+// has its own time limit (requestTimeout); the time limit of the whole LLM
+// step is in cmd/mcpmoat.
 // The model output is capped: 200 tokens for Anthropic, and
 // max_completion_tokens for the default OpenAI base URL only (see
 // newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
-// verdict schema ([VerdictSchema]) and one user message that toolMessage
+// verdict schema (verdictSchema) and one user message that toolMessage
 // builds. That message holds only:
 //
 //   - the tool name, cut to [MaxToolNameBytes];
@@ -31,7 +32,9 @@
 //
 // Before the cut, toolMessage replaces each value in [Input.Secrets] of at
 // least 8 bytes (minSecretBytes) with [discover.Mask] in the name and the
-// description (redactSecrets). It marks every byte of every match first,
+// description (redactPrefix). For a value that is not valid UTF-8, it also
+// removes the form that a JSON decoder gives, with one U+FFFD for each
+// invalid byte (secretValues). It marks every byte of every match first,
 // also of matches that overlap, so no part of a secret stays. The values are
 // the secret values that inspect gave to the server (inspect.Result.Secrets),
 // so a token that a server echoes in its tool text does not reach the

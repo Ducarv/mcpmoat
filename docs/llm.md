@@ -43,22 +43,42 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
   tool schemas and `pins.json`. The key goes only in the auth header of the provider.
-- **Secret values are removed from the tool text:** a server that got a token through its env or
-  headers can put that token into a tool name or description. So before the cut, mcpmoat replaces
-  each secret value that it gave to the server with `********` in the name and the description of
-  the tools of that server. The values are the env values and the header values of the server
-  config, the credential in a header value with an auth scheme (the token in `Bearer <token>`, or
-  the password in a `Basic` value), the user info and the secret query and path parts of the URL,
-  and the values of the expanded placeholders. A value of one server is removed only from the
-  tools of that server. When mcpmoat replaced a value, the user message also has
-  `"redacted": true`. The fixed instruction text tells the model that `********` is removed text
-  and not an instruction. The limits:
+- **Secret values are removed from the tool text:** a server that got a token through its env,
+  headers or args can put that token into a tool name or description. So before the cut, mcpmoat
+  replaces each secret value that it gave to the server with `********` in the name and the
+  description of the tools of that server. The values are the env values and the header values of
+  the server config, the credential in a header value with an auth scheme (the token in
+  `Bearer <token>`, or the password in a `Basic` value), the user info and the secret query and
+  path parts of the URL, and the values of the expanded placeholders. For a stdio server, they are
+  also the parts of the command and the args (after the expansion) that the report hides with
+  `********` when it shows the command: the value of a secret-like flag (`--api-key V`,
+  `--token=V`), the value in `-e NAME=V`, a header line such as `Authorization: Bearer tok` (the
+  line and the credential), an arg that is hidden whole (a DSN, `user:pass` or a token-like
+  value), the secret parts of a URL and a hidden path segment. Package names and other plain args
+  are not removed. A value of one server is removed only from the tools of that server. For a
+  value that is not valid UTF-8 (it can come from your environment), mcpmoat also removes the form
+  that the server sends in JSON, with one U+FFFD for each invalid byte. When a `********` starts in
+  the part of the name or the description that mcpmoat can send (the first 512 bytes of the name
+  or the first 16 KiB of the description, plus one byte), the user message also has
+  `"redacted": true`, also when a cut then removes the `********`. A value after that part is never
+  sent, so it does not set the flag. The fixed instruction text tells the model that `********` is
+  removed text and not an instruction. The limits:
   - A value shorter than 8 bytes is not removed, because it would also hide ordinary words such as
     `true` or `json`.
   - An encoded form of a value is not removed, for example the value in base64, URL-encoded, or
     split with spaces.
   - A header value of 8 bytes or more is removed also when it is not secret, for example
     `application/json`. The model then sees `********` in place of that text.
+  - The args fail closed: mcpmoat also removes some arg text that is not secret, because the
+    report hides it too, for example a long random-looking path segment (such as a segment of the
+    macOS `$TMPDIR`), a nix hash, a UUID or a name with spaces. When such text is in a tool
+    description, the model sees `********` in its place, and the message has `"redacted": true`.
+  - Some secrets in args are not found, so they are not removed: a value after a flag whose name
+    does not look secret (`--db mypassword`), a plain positional value (`hunter2`), a short path
+    segment, or a value glued to a short flag (`-phunter2`).
+  - A secret that starts or ends with `*`, or that holds a whole `********`, can show again across
+    a `********`. For example, the secret `abcdefg*` shows when the text has `abcdefg` just before
+    another secret.
   - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
     removed a secret.
   - The report on your terminal and the `--json` output show the tool name as the server sent it.
@@ -131,8 +151,12 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   ```
 
 - **Advisory only:** a model can be wrong. No LLM finding does not mean that a tool is safe. A
-  hostile tool description can try to talk the model into a low rating. LLM findings only add to
-  the rule findings. They never remove or change a rule finding, and they never change the pins.
+  hostile tool description can try to talk the model into a low rating. It can also make the
+  provider refuse it (HTTP 400, 413 or 422) or make the model answer unusable. The tool then gets
+  a `medium` finding at most (`MOAT-LLM-002`, or the `MOAT-LLM-001` floor of a cut tool), below
+  the default `--fail-on high`. So a hostile server can keep its LLM rating from reaching `high`.
+  The rule findings still apply, and the LLM row still shows. LLM findings only add to the rule
+  findings. They never remove or change a rule finding, and they never change the pins.
 - **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
   that is hidden in a parameter description of a schema.
 - **Your API key and the servers:** mcpmoat does not pass the key to a server through the server
@@ -153,7 +177,8 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
   - The time limit of the step (10 minutes). The running requests stop, and stderr says
     `mcpmoat scan: the LLM step stopped after 10 minutes; 12 tools were not classified`. When a
-    provider failure came first, stderr shows that failure instead. A signal (Ctrl-C) is not this
+    provider failure came first, stderr shows that failure instead. A provider failure that came
+    at almost the same time as the limit can show as the time limit. A signal (Ctrl-C) is not this
     case: it prints no report (see [Exit codes](exit-codes.md)).
   - The provider refused every tool that it answered: at least one tool got HTTP 400, 413 or 422,
     and no tool got a 2xx answer (a verdict, or a model answer that cannot be used). A wrong model

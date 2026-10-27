@@ -3,6 +3,7 @@ package inspect_test
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -216,7 +217,9 @@ func TestSDKInspectHiddenEnvOthers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.wantSecrets...)
+			// The want is exact, so the hidden value is not in the list.
+			wantSecrets := append(slices.Clone(tt.wantSecrets), sdkPathSecrets(t, s.Command, filepath.Join(dir, "env"))...)
+			sdkAssertResult(t, got, inspecttest.BenignResult(), inspect.WantSecrets(wantSecrets...)...)
 
 			vars, _ := sdkReadEnvFile(t, filepath.Join(dir, "env"))
 			for k, v := range tt.want {
