@@ -27,8 +27,8 @@ const (
 	exitError    = 2 // execution or usage error
 )
 
-// defaultPinsLockWait is the time that scan and pin --accept wait for the lock
-// on the pins directory in a real run (see cli.pinsLockWait). Another run
+// defaultPinsLockWait is the time that scan and pin --accept wait for the pins
+// lock (pins.json.lock) in a real run (see cli.pinsLockWait). Another run
 // holds the lock only while it reads, changes and saves pins.json, so a short
 // wait is enough.
 const defaultPinsLockWait = 10 * time.Second
@@ -79,7 +79,7 @@ type cli struct {
 	// used up at once: no request starts.
 	llmStepTimeout time.Duration
 	// pinsLockWait is how long scan and pin --accept wait for another run that
-	// holds the lock on the pins directory, before they stop with exit code 2
+	// holds the pins lock (pins.json.lock), before they stop with exit code 2
 	// (see readPinsLocked). runWithContext sets it to defaultPinsLockWait.
 	// Tests that build a cli directly keep the zero value: try once, no wait.
 	pinsLockWait time.Duration

@@ -2,12 +2,14 @@ package main
 
 // In-process tests of the save step of "pin --accept": the notice for a new
 // pins file, the lock on the pins directory and its release before the
-// output, the size limit of pins.json (ErrStoreFull), the warning when another
-// run changed the pins of the server while pin showed the diff, and a pins
-// file that was removed meanwhile. They use the helpers of
-// pins_helpers_test.go, also the near-full pins file of writeNearFullPins and
-// the lock probe (lockProbeWriter). Only TestPinAcceptStoreFull does not run
-// in parallel: it builds a pins file of almost 32 MiB.
+// output, the size limit of pins.json (ErrStoreFull) and the share of the
+// project servers (ErrProjectShareFull), the warning when another run changed
+// the pins of the server while pin showed the diff, and a pins file that was
+// removed meanwhile. They use the helpers of pins_helpers_test.go, also the
+// near-full pins files of writeNearFullPins and writeNearFullProjectShare and
+// the lock probe (lockProbeWriter). Only TestPinAcceptStoreFull and
+// TestPinAcceptProjectShareFull do not run in parallel: they build a pins
+// file of almost 32 MiB and of 16 MiB.
 
 import (
 	"bytes"
@@ -270,6 +272,52 @@ func TestPinAcceptStoreFull(t *testing.T) {
 	wantNames := append(fillerNames(), "tiny")
 	if names := bigPinsServerNames(t, e.pinsPath()); !slices.Equal(names, wantNames) {
 		t.Errorf("pinned servers = %q, want %q (the fillers and tiny, not big)", names, wantNames)
+	}
+}
+
+// TestPinAcceptProjectShareFull checks "pin --accept" for a new project server
+// that does not fit in the share of the project servers (#219,
+// pins.ProjectShareMiB): pins.json holds project servers up to nearFullGap
+// bytes below their share (writeNearFullProjectShare), and the server of
+// --config is a project server (discover reads a --config file as a project
+// file). Exit code 2, the share line with the fix for project servers, no
+// "accepted" line, and pins.json unchanged. The control: a server of the user
+// scope (~/.claude.json) with the same tools is still accepted, because the
+// share does not apply to it and the file has room.
+//
+// It does not call t.Parallel, for the reason of TestPinAcceptStoreFull: the
+// file is about 16 MiB.
+func TestPinAcceptProjectShareFull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a 16 MiB pins file; slow under -race")
+	}
+	e := newPinEnv(t, oneServer("projbig"))
+	writeServers(t, e.home, ".claude.json", oneServer("userbig"))
+	writeNearFullProjectShare(t, e.pinsPath())
+	before := fileDigest(t, e.pinsPath())
+	fake := fakeServers(map[string][]inspect.Tool{"projbig": {bigStoreTool()}, "userbig": {bigStoreTool()}})
+
+	got := e.pin(fake, "--accept", "projbig")
+
+	const share = "mcpmoat pin: cannot pin projbig: the project servers use all of their share of the pins file (16 MiB); " +
+		"remove project servers you no longer use from pins.json\n"
+	assertPinRun(t, got, scanWant{code: exitError, stderr: []string{share}})
+	if !strings.HasSuffix(got.stderr, share) {
+		t.Errorf("stderr = %q, want it to end with %q", got.stderr, share)
+	}
+	assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
+	assertContainsNone(t, "stderr", got.stderr, []string{"the pins file is full", "no pins file was found", "cannot save"})
+	if after := fileDigest(t, e.pinsPath()); after != before {
+		t.Errorf("pins.json changed after a refused accept, want it byte for byte the same")
+	}
+
+	// The control: no --config, so pin finds userbig in ~/.claude.json.
+	user := e.raw(fake, "pin", "--accept", "userbig")
+
+	assertPinRun(t, user, scanWant{code: exitOK, stdout: []string{"accepted userbig: 1 new, 0 changed, 0 removed\n"}, stderr: []string{noExpectNote}})
+	wantNames := append(projectFillerNames(), "userbig")
+	if names := bigPinsServerNames(t, e.pinsPath()); !slices.Equal(names, wantNames) {
+		t.Errorf("pinned servers = %q, want %q (the project fillers and userbig, not projbig)", names, wantNames)
 	}
 }
 

@@ -204,6 +204,7 @@ func TestScanReasonsFitShortCell(t *testing.T) {
 		"reasonNotPinnable":    reasonNotPinnable,
 		"reasonRelativeSource": reasonRelativeSource,
 		"reasonStoreFull":      reasonStoreFull,
+		"reasonShareFull":      reasonShareFull,
 	}
 	for name, reason := range reasons {
 		if n := utf8.RuneCountInString(reason); n > report.MaxShortCellRunes {

@@ -73,8 +73,9 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 	return path, true
 }
 
-// readPinsLocked reads the pins store like readPins, but with the lock on the
-// pins directory (pins.LoadLocked), for a run that changes and saves the pins.
+// readPinsLocked reads the pins store like readPins, but with the pins lock
+// (pins.LoadLocked locks the file pins.json.lock in the pins directory), for a
+// run that changes and saves the pins.
 // It waits up to c.pinsLockWait for another process that holds the lock. It
 // returns the store and the release function of the lock. The path of
 // pins.json (for printNewPinsFile) is store.Path().
@@ -104,12 +105,12 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 //     lock error) gives the "cannot read the pins file" line only.
 //
 // An error of the pins directory or its parents is a read error also when ctx
-// has ended: the lock is on an open handle of the pins directory, so
-// LoadLocked checks and opens the directory before the lock step, and only the
-// lock step checks ctx. LoadLocked does not check ctx after it takes the lock,
+// has ended: LoadLocked checks and opens the directory and the lock file
+// before the lock step, and only the lock step checks ctx. An error of the
+// lock file (an unsafe mode, for example) is a read error for the same reason. LoadLocked does not check ctx after it takes the lock,
 // so a read error after that point also stays a read error.
 //
-// When the file system cannot lock the pins directory, LoadLocked goes on
+// When the file system cannot lock the lock file, LoadLocked goes on
 // without the lock. readPinsLocked then prints one warning: a parallel run can
 // still lose an update.
 //
@@ -153,17 +154,16 @@ func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store
 // like a first run. So the caller saves nothing.
 //
 // It only checks and prints nothing. When it returns true, the caller prints
-// pinsRemovedText on stderr and exits with 2. A caller that holds the lock on
-// the pins directory releases the lock first, so a blocked stderr never holds
-// the lock.
+// pinsRemovedText on stderr and exits with 2. A caller that holds the pins
+// lock releases it first, so a blocked stderr never holds the lock.
 func pinsRemovedWhileRunning(firstExisted bool, later *pins.Store) bool {
 	return firstExisted && !later.Existed()
 }
 
 // pinsFullText is the shared part of the three messages for a server that
 // does not fit in pins.json (pins.ErrStoreFull): "the pins file is full
-// (32 MiB)". scan uses it at report time (reasonStoreFull) and at save time
-// (savePinned), and pin uses it in saveAccepted. The size comes from
+// (32 MiB)". scan uses it at report time (reasonStoreFull), and through
+// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size comes from
 // pins.MaxFileSizeMiB, the limit that Set enforces, so the number is written
 // in one place.
 //
@@ -171,10 +171,30 @@ func pinsRemovedWhileRunning(firstExisted bool, later *pins.Store) bool {
 // time, so fmt.Sprintf builds the text once, when the program starts.
 var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSizeMiB)
 
+// pinsShareFullText is the text for a project server that does not fit in the
+// share of pins.json for project servers (pins.ErrProjectShareFull). Use
+// storeFullText to pick between it and pinsFullText. The size comes from
+// pins.ProjectShareMiB, the share that Set enforces. It is a var for the same
+// reason as pinsFullText.
+var pinsShareFullText = fmt.Sprintf("the project servers use all of their share of the pins file (%d MiB)", pins.ProjectShareMiB)
+
+// storeFullText returns the text for an error of Set that wraps
+// pins.ErrStoreFull: pinsShareFullText when a project server did not fit in
+// its share, else pinsFullText. A share refusal wraps both errors, so the
+// share check must come first.
+func storeFullText(err error) string {
+	if errors.Is(err, pins.ErrProjectShareFull) {
+		return pinsShareFullText
+	}
+	return pinsFullText
+}
+
 // pinsLockedText is the line that readPinsLocked prints after the read error
-// when another process held the lock on the pins directory for the whole wait.
-// The holder is normally another mcpmoat run, but any local process that can
-// open the directory can hold the lock. It is fixed text.
+// when another process held the pins lock (the file pins.json.lock in the pins
+// directory) for the whole wait. The holder is normally another mcpmoat run.
+// It can also be another process of the same user that opened the lock file:
+// the lock file has mode 0600, so only that user (and root) can open it. It is
+// fixed text.
 const pinsLockedText = "another process is using the pins file; run the command again in a moment"
 
 // pinsRemovedText is the line that scan and pin print when the pins file was
@@ -183,7 +203,7 @@ const pinsLockedText = "another process is using the pins file; run the command 
 const pinsRemovedText = "the pins file was removed while this command ran, so no pins were saved; run the command again"
 
 // saveFailure records an error of Set or Save that savePinned (scan) or
-// saveAccepted (pin) got while it held the lock on the pins directory. Neither
+// saveAccepted (pin) got while it held the pins lock. Neither
 // may print under the lock, so it keeps the failure here and prints it with
 // cmdErr after the release. what is the text before the error on that line,
 // for example "cannot save the pins file". The zero value means no failure.

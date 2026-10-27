@@ -51,6 +51,15 @@ func TestAcceptAdvice(t *testing.T) {
 		{name: "ambiguous with project", hint: acceptHint{name: "srv", digest: testDigest, ambiguous: true, project: "/p"}, config: "/c.json"},
 		{name: "config problem", hint: acceptHint{name: "srv", digest: testDigest}, configProblem: true},
 		{name: "config problem with config", hint: acceptHint{name: "srv", digest: testDigest}, config: "/c.json", configProblem: true},
+
+		// pins.json has no room for the tools: pin --accept would refuse the
+		// command, so the hint gives the prose steps with the digest.
+		{name: "pins file full", hint: acceptHint{name: "srv", digest: testDigest, storeFull: true},
+			wantText: "run pin --accept with this server name and --expect " + testDigest},
+		{name: "pins file full with config", hint: acceptHint{name: "srv", digest: testDigest, storeFull: true}, config: "/c.json",
+			wantText: "run pin --accept with this server name, --config with the file of this scan, and --expect " + testDigest},
+		{name: "pins file full with project", hint: acceptHint{name: "srv", digest: testDigest, project: "/p", storeFull: true},
+			wantText: "run pin --accept with this server name, --project with its project path, and --expect " + testDigest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,6 +112,8 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 		{name: "all", digest: testDigest, truncated: true, ignored: true, noText: true},
 		{name: "ambig", digest: testDigest, ambiguous: true},
 		{name: "badproject", digest: testDigest, project: "/my p"},
+		{name: "full", digest: testDigest, storeFull: true},
+		{name: "fullcut", digest: testDigest, truncated: true, storeFull: true},
 	}
 	tests := []struct {
 		name          string
@@ -138,10 +149,95 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 				if h.noText {
 					want += hintNoTextNote
 				}
+				if h.storeFull {
+					want += hintStoreFullNote
+				}
 				if lines[i] != want {
 					t.Errorf("line %d = %q, want %q", i, lines[i], want)
 				}
 			}
 		})
 	}
+}
+
+// TestWriteAcceptHintsStoreFull checks the exact "To accept" lines when
+// pins.json has no room for the tools of a server (storeFull, #220): the line
+// gives the prose steps and the digest, no "mcpmoat pin --accept" command, and
+// ends with hintStoreFullNote, after the notes for changes the user did not
+// see. A hint without storeFull keeps its command and gets no such note. The
+// name before the colon still goes through cutName: a name with control
+// characters is escaped, and a long name is cut.
+func TestWriteAcceptHintsStoreFull(t *testing.T) {
+	t.Parallel()
+
+	const steps = "run pin --accept with this server name and --expect " + testDigest
+	hostile := "bad\x1b[31m\u202ename"
+	long := strings.Repeat("n", maxWarnNameRunes+20)
+	tests := []struct {
+		name string
+		hint acceptHint
+		want string
+	}{
+		{
+			name: "full",
+			hint: acceptHint{name: "srv", digest: testDigest, storeFull: true},
+			want: "To accept srv: " + steps + hintStoreFullNote,
+		},
+		{
+			name: "not full keeps the command",
+			hint: acceptHint{name: "srv", digest: testDigest},
+			want: "To accept srv: mcpmoat pin --accept srv --expect " + testDigest,
+		},
+		{
+			name: "full after the notes of unseen changes",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true, ignored: true, noText: true, storeFull: true},
+			want: "To accept srv: " + steps + hintCutNote + hintIgnoredNote + hintNoTextNote + hintStoreFullNote,
+		},
+		{
+			name: "cut diff without full has no full note",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true},
+			want: "To accept srv: " + steps + hintCutNote,
+		},
+		{
+			name: "control characters in the name",
+			hint: acceptHint{name: hostile, digest: testDigest, storeFull: true},
+			want: "To accept " + cutName(hostile) + ": " + steps + hintStoreFullNote,
+		},
+		{
+			name: "long name",
+			hint: acceptHint{name: long, digest: testDigest, storeFull: true},
+			want: "To accept " + cutName(long) + ": " + steps + hintStoreFullNote,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var b strings.Builder
+			if err := writeAcceptHints(&b, []acceptHint{tt.hint}, "", false); err != nil {
+				t.Fatalf("writeAcceptHints() error = %v, want nil", err)
+			}
+			got := b.String()
+			if got != tt.want+"\n" {
+				t.Errorf("writeAcceptHints() = %q, want %q", got, tt.want+"\n")
+			}
+			assertTerminalSafe(t, got)
+			if tt.hint.storeFull && strings.Contains(got, "mcpmoat pin --accept") {
+				t.Errorf("writeAcceptHints() = %q holds a command, want none when pins.json is full", got)
+			}
+			if n := strings.Count(got, hintStoreFullNote); n != boolCount(tt.hint.storeFull) {
+				t.Errorf("writeAcceptHints() has the full note %d times, want %d", n, boolCount(tt.hint.storeFull))
+			}
+			if _, isCommand := acceptAdvice(tt.hint, "", false); tt.hint.storeFull && isCommand {
+				t.Errorf("acceptAdvice() isCommand = true, want false when pins.json is full")
+			}
+		})
+	}
+}
+
+// boolCount returns 1 for true and 0 for false.
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

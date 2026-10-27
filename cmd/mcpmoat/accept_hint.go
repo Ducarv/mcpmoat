@@ -33,6 +33,9 @@ type acceptHint struct {
 	// noText is true when a kept change of the server has a fixed note as its
 	// diff (pins.Change.DiffIsNote): the user saw no text of that change.
 	noText bool
+	// storeFull is true when pins.json has no room for the new tools of the
+	// server, so "pin --accept" would fail: the hint then prints no command.
+	storeFull bool
 }
 
 // The notes at the end of a "To accept" line. They are fixed text.
@@ -45,6 +48,9 @@ const (
 	// hintNoTextNote ends the line of a server with a change whose diff is a
 	// fixed note.
 	hintNoTextNote = " (a change has no diff text: review the tool first)"
+	// hintStoreFullNote ends the line of a server whose new tools do not fit
+	// in pins.json.
+	hintStoreFullNote = " (pins.json has no room for these tools: pin --accept fails until you remove other servers from it)"
 )
 
 // writeAcceptHints writes one line on w for each hint:
@@ -64,12 +70,14 @@ const (
 // digest, so the user must type the command: when the user did not see every
 // change (a cut diff, a change that --ignore hid, or a diff that is a fixed
 // note), when the name and --project do not select the server, when a config
-// file has a problem, or when the name, the project or configPath is not a bare
-// shell word. Before the colon the name is escaped and cut for the terminal.
-// The digest is made by mcpmoat from hex, so it needs no escape. The line ends
-// with hintCutNote, hintIgnoredNote or hintNoTextNote for each change that the
-// user did not see. writeAcceptHints returns the first write error: the caller
-// must check it, like for the report.
+// file has a problem, when pins.json has no room for the tools, or when the
+// name, the project or configPath is not a bare shell word. Before the colon
+// the name is escaped and cut for the terminal. The digest is made by mcpmoat
+// from hex, so it needs no escape. The line ends with hintCutNote,
+// hintIgnoredNote or hintNoTextNote for each change that the user did not see,
+// and then with hintStoreFullNote when pins.json has no room for the tools.
+// writeAcceptHints returns the first write error: the caller must check it,
+// like for the report.
 func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
 	for _, h := range hints {
 		text, _ := acceptAdvice(h, configPath, configProblem)
@@ -82,6 +90,9 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 		}
 		if h.noText {
 			line += hintNoTextNote
+		}
+		if h.storeFull {
+			line += hintStoreFullNote
 		}
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return err
@@ -96,11 +107,14 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 // text is the shell command from acceptCommand, and false when text is the prose
 // steps from acceptSteps. The text is a command only when the name, the project
 // and configPath are bare shell words, the user saw every change, the name
-// selects the server, and no config file has a problem. The JSON output reuses
-// this function, so the terminal and the JSON cannot disagree. It does no I/O.
+// selects the server, no config file has a problem, and pins.json has room for
+// the tools. A command that pin refuses would mislead the user, so a full
+// pins.json gives the prose steps; they still hold the digest. The JSON output
+// reuses this function, so the terminal and the JSON cannot disagree. It does
+// no I/O.
 func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
 	text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem {
+	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.storeFull {
 		return acceptSteps(h, configPath, configProblem), false
 	}
 	return text, true

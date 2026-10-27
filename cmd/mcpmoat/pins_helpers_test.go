@@ -29,8 +29,9 @@ import (
 // pin_lock_test.go and pins_diff_test.go; other scan tests use some of them
 // too) and of e2e_test.go and e2e_pins_test.go, which run the real binary. The
 // helpers are the pinEnv world, the fake servers, the checks of the output,
-// the lock helpers (holdPinsLock and lockProbeWriter), and the near-full pins
-// file (writeNearFullPins and bigStoreTool).
+// the lock helpers (holdPinsLock and lockProbeWriter), the near-full pins
+// file (writeNearFullPins and bigStoreTool), and the near-full share of the
+// project servers (fillNearFullProjectShare and writeNearFullProjectShare).
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -74,14 +75,28 @@ func (e *pinEnv) assertNoPinsFile(t *testing.T, after string) {
 	}
 }
 
+// pinsLockFileName is the name of the pins lock file in the folder of
+// pins.json: the pins file name plus ".lock". It copies the unexported
+// lockSuffix of internal/pins.
+const pinsLockFileName = "pins.json.lock"
+
 // readOnlyPinsDir makes the folder of pins.json read-only, so that a save
-// fails but a read finds no file. It skips the test when the user can write
-// there anyway.
+// fails but a read finds no file. It first creates the pins lock file
+// (pinsLockFileName) with mode 0600: the locked read cannot create it in a
+// read-only folder, and without it the run fails at the read and not at the
+// save. It skips the test when the user can write there anyway.
 func readOnlyPinsDir(t *testing.T, e *pinEnv) {
 	t.Helper()
 	skipWithoutModeBits(t)
 	dir := filepath.Dir(e.pinsPath())
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, pinsLockFileName), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600) //nolint:gosec // G304: path is under the test's own t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
@@ -732,12 +747,14 @@ func withoutPinsFileNotice(t *testing.T, stderr, cmd, path string) string {
 	return strings.Join(kept, "")
 }
 
-// holdPinsLock takes the lock on the pins directory of the pins file path, as
-// another mcpmoat run would, and returns the function that releases it. It
-// also registers the release with t.Cleanup; a second call does nothing. It
-// fails the test when pins.LoadLocked fails, and skips the test when the
-// system cannot lock the directory (pins.Store.RanWithoutLock), because then no
-// run can be "locked by another run".
+// holdPinsLock takes the lock on the pins lock file of the pins file path
+// (pins.json.lock, see pinsLockFileName) with pins.LoadLocked, as another
+// mcpmoat run would, and returns the function that releases it. LoadLocked
+// creates a missing lock file with mode 0600. holdPinsLock also registers the
+// release with t.Cleanup; a second call does nothing. It fails the test when
+// pins.LoadLocked fails, and skips the test when the system cannot lock the
+// pins lock file (pins.Store.RanWithoutLock), because then no run can be
+// "locked by another run".
 func holdPinsLock(t *testing.T, path string) (release func()) {
 	t.Helper()
 	store, release, err := pins.LoadLocked(t.Context(), path, 0)
@@ -747,7 +764,7 @@ func holdPinsLock(t *testing.T, path string) (release func()) {
 	}
 	if store.RanWithoutLock() {
 		release()
-		t.Skip("the system cannot lock the pins directory here")
+		t.Skip("the system cannot lock the pins lock file here")
 	}
 	return release
 }
@@ -765,7 +782,7 @@ type lockProbe struct {
 
 // lockProbeWriter is a stdout or stderr for scan or pin that checks, from
 // inside the command, whether the command still holds the lock on the pins
-// directory when it prints a line. On each write that holds one of the texts
+// lock file when it prints a line. On each write that holds one of the texts
 // in match, it calls pins.LoadLocked on path with no wait, as another run
 // would, records the result, and releases the lock again before it writes to
 // w. The test checks the records after the command returns (see
@@ -809,7 +826,7 @@ func (p *lockProbeWriter) Write(b []byte) (int, error) {
 // assertLockFreeAt fails the test unless p tried the lock exactly once for each
 // text of want, in order, and found it free each time: the command had
 // released the lock before it printed those lines. It skips the test when the
-// system cannot lock the pins directory, because then a free lock proves
+// system cannot lock the pins lock file, because then a free lock proves
 // nothing.
 func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
 	t.Helper()
@@ -821,7 +838,7 @@ func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
 	}
 	for i, probe := range probes {
 		if probe.ranWithoutLock {
-			t.Skip("the system cannot lock the pins directory here")
+			t.Skip("the system cannot lock the pins lock file here")
 		}
 		if i < len(want) && !strings.Contains(probe.line, want[i]) {
 			t.Errorf("lock attempt %d ran at the write %q, want the write of %q", i+1, probe.line, want[i])
@@ -847,9 +864,10 @@ func readIfExists(t *testing.T, path string) ([]byte, bool) {
 	return data, true
 }
 
-// The helpers from here to bigPinsServerNames build and read a pins file near
-// its size limit. The tests of the size limit in scan_pins_lock_test.go and
-// pin_lock_test.go use them.
+// The helpers from here to writeNearFullPins build a pins file near its size
+// limit, and bigPinsServerNames reads it. The tests of the size limit in
+// scan_pins_lock_test.go, scan_pins_budget_test.go and pin_lock_test.go use
+// them.
 
 // nearFullGap is the free space that writeNearFullPins leaves below
 // pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
@@ -902,6 +920,13 @@ func fillerPins(canonical string) pins.ServerPins {
 // and the file with mode 0600, as the CLI requires.
 func saveFillers(t *testing.T, path string, canonicals ...string) int {
 	t.Helper()
+	return saveFillersAs(t, path, fillerIdentity, canonicals...)
+}
+
+// newPinsStore returns the empty store of pins.Load for path, a file that
+// must not exist yet. It fails the test on an error.
+func newPinsStore(t *testing.T, path string) *pins.Store {
+	t.Helper()
 	store, err := pins.Load(path)
 	if err != nil {
 		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
@@ -909,8 +934,17 @@ func saveFillers(t *testing.T, path string, canonicals ...string) int {
 	if store.Existed() {
 		t.Fatalf("pins.Load(%q): the file exists, want a new store", path)
 	}
+	return store
+}
+
+// saveFillersAs is saveFillers with the identity of filler i from idOf, so
+// that the fillers can be servers of the user scope (fillerIdentity) or of a
+// project (projectFillerIdentity).
+func saveFillersAs(t *testing.T, path string, idOf func(int) pins.Identity, canonicals ...string) int {
+	t.Helper()
+	store := newPinsStore(t, path)
 	for i, c := range canonicals {
-		if err := store.Set(fillerIdentity(i), fillerPins(c)); err != nil {
+		if err := store.Set(idOf(i), fillerPins(c)); err != nil {
 			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
 		}
 	}
@@ -936,6 +970,15 @@ func saveFillers(t *testing.T, path string, canonicals ...string) int {
 // texts share one string, so the memory use stays near the size of the file.
 func writeNearFullPins(t *testing.T, path string) {
 	t.Helper()
+	if size := saveFillers(t, path, nearFullCanonicals(t)...); size != pins.MaxFileSize-nearFullGap {
+		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, pins.MaxFileSize-nearFullGap)
+	}
+}
+
+// nearFullCanonicals returns the canonical texts of the nearFullServers
+// fillers of writeNearFullPins, measured as its doc says.
+func nearFullCanonicals(t *testing.T) []string {
+	t.Helper()
 	one := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a")
 	two := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a", "a")
 	entry := two - one // one entry with a one-byte text
@@ -950,9 +993,125 @@ func writeNearFullPins(t *testing.T, path string) {
 		canonicals[i] = long[:n]
 	}
 	canonicals[nearFullServers-1] = long
+	return canonicals
+}
 
-	if size := saveFillers(t, path, canonicals...); size != want {
-		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, want)
+// fillPinsFileNearFull adds the fillers of writeNearFullPins to the pins file
+// at path, which must exist, and saves it. The servers that the file held
+// before stay, and their entries take room from nearFullGap. A test can so
+// pin its servers with a cheap scan on a small file first, and fill the file
+// after that with one read of a small file and one Save, instead of a scan
+// that reads and writes a file of almost 32 MiB.
+func fillPinsFileNearFull(t *testing.T, path string) {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
+	}
+	if !store.Existed() {
+		t.Fatalf("pins.Load(%q): no file, want the file of an earlier run", path)
+	}
+	for i, c := range nearFullCanonicals(t) {
+		if err := store.Set(fillerIdentity(i), fillerPins(c)); err != nil {
+			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
+		}
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+}
+
+// The helpers from here to writeNearFullProjectShare fill the share of the
+// project servers (pins.ProjectShareMiB, 16 MiB) and leave the rest of the
+// file free. The tests of the project share in scan_pins_budget_test.go and
+// pin_lock_test.go use them.
+
+// nearFullProjectFillers is the number of project filler servers of
+// fillNearFullProjectShare. With 9 and the 16 MiB share, each entry is about
+// 1.8 MiB, below the limit of one server (2 MiB). If the share grows, raise
+// this number, as for nearFullServers.
+const nearFullProjectFillers = 9
+
+// projectFillerIdentity returns the identity of the project filler server i:
+// a server of a project config (it has a ProjectPath), so its entry counts
+// toward the project share. The names have the same length, so every entry
+// has the same fixed bytes, also the probe entry of fillNearFullProjectShare
+// (i = nearFullProjectFillers).
+func projectFillerIdentity(i int) pins.Identity {
+	return pins.Identity{
+		Client:      "fixture",
+		Source:      "/fixture/proj/.mcp.json",
+		ProjectPath: "/fixture/proj",
+		Name:        fmt.Sprintf("proj-fill-%02d", i),
+	}
+}
+
+// projectFillerNames returns the names of the nearFullProjectFillers project
+// filler servers.
+func projectFillerNames() []string {
+	names := make([]string, nearFullProjectFillers)
+	for i := range names {
+		names[i] = projectFillerIdentity(i).Name
+	}
+	return names
+}
+
+// fillNearFullProjectShare adds nearFullProjectFillers project filler servers
+// to store, so that the entries of the project servers take exactly
+// nearFullGap bytes less than the share (pins.ProjectShareMiB). A project
+// server whose entry is larger than the room that is left then does not fit
+// (pins.ErrProjectShareFull), and a server of the user scope still fits: the
+// file itself stays near half of pins.MaxFileSize. store must hold no project
+// server yet; a project server that the caller adds later takes room too.
+//
+// It uses the measured trick of writeNearFullPins: the share counts the bytes
+// that one entry takes in the saved file, so the file sizes of one and two
+// fillers with a one-byte text give the bytes of one entry. The filler texts
+// share one string, so the memory use stays near the size of the share. Only
+// Set runs here, no Save, so a test that does not need the file stays cheap.
+// At the end, two Set calls on clones check the room: a probe entry of
+// exactly nearFullGap bytes fits, and one byte more is refused with
+// pins.ErrProjectShareFull.
+func fillNearFullProjectShare(t *testing.T, store *pins.Store) {
+	t.Helper()
+	one := saveFillersAs(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), projectFillerIdentity, "a")
+	two := saveFillersAs(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), projectFillerIdentity, "a", "a")
+	entry := two - one // one entry with a one-byte text
+
+	want := pins.ProjectShareMiB<<20 - nearFullGap
+	textBytes := want - nearFullProjectFillers*(entry-1)
+	n := textBytes / nearFullProjectFillers
+	long := strings.Repeat("a", n+textBytes%nearFullProjectFillers)
+	for i := range nearFullProjectFillers {
+		text := long[:n]
+		if i == nearFullProjectFillers-1 {
+			text = long
+		}
+		if err := store.Set(projectFillerIdentity(i), fillerPins(text)); err != nil {
+			t.Fatalf("Store.Set(project filler %d) error = %v, want nil", i, err)
+		}
+	}
+
+	probe := projectFillerIdentity(nearFullProjectFillers)
+	fits := strings.Repeat("a", nearFullGap-(entry-1))
+	if err := store.Clone().Set(probe, fillerPins(fits)); err != nil {
+		t.Fatalf("a probe entry of %d bytes: Set error = %v, want nil (the size model of the share changed)", nearFullGap, err)
+	}
+	if err := store.Clone().Set(probe, fillerPins(fits+"a")); !errors.Is(err, pins.ErrProjectShareFull) {
+		t.Fatalf("a probe entry of %d bytes: Set error = %v, want pins.ErrProjectShareFull (the size model of the share changed)", nearFullGap+1, err)
+	}
+}
+
+// writeNearFullProjectShare writes a valid pins.json at path, which must not
+// exist yet, with the project fillers of fillNearFullProjectShare: the
+// project share has nearFullGap bytes of room, and the file is about 16 MiB,
+// half of the cost of writeNearFullPins.
+func writeNearFullProjectShare(t *testing.T, path string) {
+	t.Helper()
+	store := newPinsStore(t, path)
+	fillNearFullProjectShare(t, store)
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
 	}
 }
 

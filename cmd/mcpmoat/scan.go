@@ -476,6 +476,15 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // the new pins (see savePinned). A save error never hides the report. The
 // "pinned N tools" notices come after a successful save.
 //
+// The save comes after the report on purpose: the user must see the report
+// before the pins are saved. So the "complete" field of the --json document
+// (see writeScanOutput) cannot cover the save. A document with
+// "complete": true and exit code 2 means that the pin save failed, for
+// example: another process held the pins lock, the pins file was removed
+// during the run, a server no longer fit, the pins directory was unsafe or
+// changed, or a signal stopped the run before the save. The reason is on
+// stderr.
+//
 // The exit code comes from scanExitCode (docs/exit-codes.md is the contract,
 // and the usage text in cli.go summarises it). A config file problem, a pin
 // error or an incomplete LLM step gives exit code 2, also when there are
@@ -626,12 +635,21 @@ func (c *cli) runToolAndLLMSteps(ctx context.Context, setup scanSetup, outcomes 
 // error. fileEntries is the number of entries that scan read from
 // .mcpmoat-ignore: the JSON report holds it. configPath is the --config value,
 // or empty. configProblem is true when a config file has a problem.
+//
+// The JSON document has a "complete" field (report.ScanReport.Complete). It
+// is true when the report holds every result of the scan steps: no config
+// file problem, no failed pin step and no incomplete LLM step. It does not
+// cover the pin save: reportScan saves the new pins after this write, so
+// "complete": true with exit code 2 means that the save failed (see
+// reportScan).
 func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, fileEntries int, configPath string, configProblem bool) error {
 	if setup.jsonOut {
 		mode := report.ModeNoConnect
 		if setup.connect != nil {
 			mode = report.ModeConnect
 		}
+		// Only the scan steps count here. The pin save runs after this
+		// write, so its result cannot be in the document.
 		complete := !steps.pinFailed && !configProblem && !steps.llmIncomplete
 		return c.writeScanJSON(scanJSONInput{
 			version:       c.build.version,
@@ -692,7 +710,7 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 //
 // The scan took a long time since it read pins.json first (it connected to the
 // servers), and another scan or "pin --accept" may have changed the file. So
-// savePinned reads the file again, with the lock on the pins directory (see
+// savePinned reads the file again, with the pins lock (see
 // readPinsLocked), and holds the lock until the save is done. No other run
 // that locks can read or save between this read and this save, so no update is
 // lost. Only a file system that cannot lock leaves that window open, and
@@ -714,8 +732,9 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 // and returns false (see pinsRemovedWhileRunning).
 //
 // Another run can also have made the file larger after the report, so a
-// server that fitted then may not fit now (pins.ErrStoreFull from Set). That
-// server is not pinned and gets a warning on stderr. The other servers are
+// server that fitted then may not fit now (pins.ErrStoreFull from Set, or
+// pins.ErrProjectShareFull for a project server). That server is not pinned
+// and gets a warning on stderr (see storeFullText). The other servers are
 // still saved, and savePinned returns false, so scan exits with 2 and the
 // refusal is never silent.
 func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
@@ -756,7 +775,7 @@ type pinSave struct {
 	// warnings holds the text of each warning, without the prefix.
 	warnings []string
 	// full is true when Set refused at least one server with
-	// pins.ErrStoreFull.
+	// pins.ErrStoreFull (also for a project share refusal, which wraps it).
 	full bool
 	// fail is the error of Set or Save, if any.
 	fail saveFailure
@@ -779,8 +798,10 @@ func setNewPins(store *pins.Store, pinned []pinnedServer) pinSave {
 		err := store.Set(ps.id, ps.snap)
 		if errors.Is(err, pins.ErrStoreFull) {
 			// The store did not change, so the other servers can still be
-			// saved. This one is not pinned: say so, and exit with 2.
-			res.warnings = append(res.warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), pinsFullText))
+			// saved. This one is not pinned: say so, and exit with 2. A
+			// project server refused for its share also matches
+			// ErrStoreFull; storeFullText names the share then.
+			res.warnings = append(res.warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), storeFullText(err)))
 			res.full = true
 			continue
 		}
