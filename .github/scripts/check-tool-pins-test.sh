@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests check-tool-pins.sh on changed copies of the files that it reads. The
 # tool-pins job in ci.yml runs it. You can also run it on your machine,
-# from any directory: see CONTRIBUTING.md, Checks.
+# from any directory: see CONTRIBUTING.md, Checks. It needs bash, awk, sed, cmp,
+# mktemp and find, because check-tool-pins.sh needs them.
 # shellcheck disable=SC2016 # the sed expressions and the call hold a literal $
 set -euo pipefail
 
@@ -215,6 +216,15 @@ wf_pin_other_key() {
   printf 'name: extra\njobs:\n  x:\n    outputs:\n      GORELEASER_VERSION: %s\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$gr_ver" >"$wf/$1"
 }
 
+# anchor_poc turns the GoReleaser check step of ci.yml into an anchor and adds a
+# job that uses the alias. The alias line names nothing, and the new job has no
+# pin of its own.
+anchor_poc() {
+  awk '/- name: Check the GoReleaser config/ { print "      - &gr"; sub(/- name:/, "  name:") } { print }' "$wf/ci.yml" >"$wf/ci.yml.new" &&
+    mv "$wf/ci.yml.new" "$wf/ci.yml" &&
+    printf '  alias-job:\n    runs-on: ubuntu-latest\n    steps:\n      - *gr\n' >>"$wf/ci.yml"
+}
+
 # The real files must pass.
 check_case "real files" 0 "" true
 
@@ -317,7 +327,7 @@ $w_with"
 # (c) Flow style, and (g) other styles that the check cannot read.
 check_case "goreleaser-action: flow style" 1 "a line names goreleaser-action in a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: latest}}"
 check_case "goreleaser-action: flow style, good version" 1 "a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: \${{ env.GORELEASER_VERSION }}}}"
-check_case "goreleaser-action: anchor before the action" 1 "a style this check cannot read" step_workflow extra.yml "      - uses: &a goreleaser/goreleaser-action@x
+check_case "goreleaser-action: anchor before the action" 1 "line uses a YAML anchor, alias or merge key" step_workflow extra.yml "      - uses: &a goreleaser/goreleaser-action@x
 $w_with"
 check_case "goreleaser-action: uses value on the next line" 1 "a style this check cannot read" step_workflow extra.yml "      - uses:
           goreleaser/goreleaser-action@x
@@ -443,6 +453,60 @@ check_case "comment: no space after the quoted pin" 1 "not a full version" appen
 check_case "comment: key quoted in the version input" 0 "" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           \"version\": \"\${{ env.GORELEASER_VERSION }}\"  # pinned"
+
+# YAML anchors, aliases and merge keys are not allowed. An alias line names
+# nothing, so the checks above could not see the step that it repeats.
+refs="line uses a YAML anchor, alias or merge key"
+check_case "yaml: anchor on the pinned step and an alias in a second job" 1 "ci.yml: $refs: \"- &gr\"" anchor_poc
+check_case "yaml: anchor on a key" 1 "extra.yml: $refs: \"name: &a v\"" step_workflow extra.yml "      - run: echo hi
+        name: &a v"
+check_case "yaml: anchor on a list item" 1 "$refs" step_workflow extra.yml "      - &a
+        run: echo hi"
+check_case "yaml: alias as a list item" 1 "$refs" step_workflow extra.yml "      - *gr"
+check_case "yaml: alias as a value" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        env: *e"
+check_case "yaml: alias with a comment" 1 "$refs" step_workflow extra.yml "      - *gr # note"
+check_case "yaml: alias in a flow list" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        needs: [a, *b]"
+check_case "yaml: merge key with an alias" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        <<: *x"
+check_case "yaml: merge key with a map" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        <<: {a: b}"
+check_case "yaml: alias after a block scalar" 1 "$refs" step_workflow extra.yml "      - run: |
+          echo hi
+      - *gr"
+check_case "yaml: alias in govulncheck.yml" 1 "govulncheck.yml: $refs" append "$wf/govulncheck.yml" '      - *gr'
+check_case "yaml: alias in a .yaml workflow" 1 "extra.yaml: $refs" step_workflow extra.yaml "      - *gr"
+check_case "yaml: the line shows in the message" 1 "\"env: &e {a: b}\"" step_workflow extra.yml "      - run: echo hi
+        env: &e {a: b}"
+check_case "yaml: a comment may hold an alias" 0 "" step_workflow extra.yml "      # - *gr
+      - run: echo hi # key: &a"
+check_case "yaml: quoted & and * in values" 0 "" step_workflow extra.yml "      - name: \"x: &a *b\"
+        run: echo 'k: *b' ; echo \"k: &a\""
+check_case "yaml: grep with a glob" 0 "" step_workflow extra.yml "      - run: grep -r '*.sh' ."
+check_case "yaml: && in a run line" 0 "" step_workflow extra.yml "      - run: a && b"
+check_case "yaml: branches with a quoted star" 0 "" step_workflow extra.yml "        branches: ['*']"
+check_case "yaml: paths with a quoted glob" 0 "" step_workflow extra.yml "        paths: ['**/*.md']"
+check_case "yaml: expression" 0 "" step_workflow extra.yml "      - run: echo \${{ matrix.os }} \${{ a && b }}
+        if: \${{ matrix.os == 'x' }}"
+check_case "yaml: quoted star as a list item" 0 "" step_workflow extra.yml "        branches:
+          - '*'
+          - \"**\""
+check_case "yaml: block scalar with & and *" 0 "" step_workflow extra.yml "      - run: |
+          cmd &
+          echo *
+          *foo
+          k: *bar
+          - *baz
+          <<: *x
+
+          wait
+      - run: echo hi"
+check_case "yaml: folded block scalar with a star" 0 "" step_workflow extra.yml "      - run: >-
+          echo
+          *foo"
+check_case "yaml: list item block scalar with a star" 0 "" step_workflow extra.yml "      - |
+        *foo"
 
 # The names that govulncheck.yml may have, with the needs line of its job.
 check_case "needs: govulncheck once more" 0 "" append "$wf/govulncheck.yml" '    needs: govulncheck'

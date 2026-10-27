@@ -14,6 +14,13 @@
 # - A job with a goreleaser-action step has the pin in its own env:.
 # - A file under .github/actions that names goreleaser-action fails. Extend
 #   this check before you add such a file.
+# - A workflow line with a YAML anchor, alias or merge key fails, because an
+#   alias line can repeat a step without naming it.
+# Not covered: other ways to install GoReleaser or govulncheck, such as
+# docker://goreleaser/goreleaser, a remote reusable workflow, brew install, go
+# install, a composite action outside .github/actions, or a $GITHUB_ENV write
+# that builds the name from pieces. Review is the control for these. A later
+# issue can widen the check.
 # The tool-pins job in ci.yml runs it. You can also run it on your machine,
 # from any directory: see CONTRIBUTING.md, Checks. check-tool-pins-test.sh
 # tests it.
@@ -78,6 +85,55 @@ done
 wf_files=()
 for file in "$wf"/*.yml "$wf"/*.yaml; do
   if [ -e "$file" ]; then wf_files+=("$file"); fi
+done
+
+# yaml_refs prints the lines of a file that use a YAML anchor (&name), an alias
+# (*name) or a merge key (<<:). An alias can hide a goreleaser-action step in a
+# line that names nothing. The rule is narrow, to avoid false alarms in shell
+# text. A line matches when, outside quotes and comments, a token &name or
+# *name stands after "- ", after ": ", or after [ { or a comma, and ends at a
+# space, a comma, a bracket or the end of the line. The line "<<:" matches too.
+# The body of a block scalar (a key with | or >, such as run: |) is skipped.
+# Known limit: an unquoted apostrophe in a plain value can hide text after it.
+yaml_refs() {
+  code_of "$1" | awk '
+    BEGIN {
+      q = "\047"
+      ref_re = "(^(- +)+|: +|[[{,] *)[&*][A-Za-z0-9_-]+([],} ]|$)"
+      block_re = "^[|>][-+0-9]* *$"
+    }
+    /^[[:space:]]*$/ { next }
+    {
+      match($0, /^ */)
+      indent = RLENGTH
+      if (inblock) {
+        if (indent > blockind) next
+        inblock = 0
+      }
+      line = $0; sub(/^ */, "", line)
+      shown = line
+      gsub(/"[^"]*"/, "\"\"", line)
+      gsub(q "[^" q "]*" q, "\"\"", line)
+      sub(/ +#.*$/, "", line)
+      rest = line; dashes = 0
+      while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; sub(/^- +/, "", rest) }
+      if (rest ~ /^<<:/ || line ~ ref_re) print shown
+      # A block scalar starts when the line ends with : | or - | and so on.
+      # Its body is indented deeper than the key (or the dash, for - |).
+      val = rest; sub(/^.*: +/, "", val)
+      if (val ~ block_re || rest ~ block_re) {
+        inblock = 1
+        blockind = (rest ~ block_re) ? indent : indent + dashes
+      }
+    }
+  '
+}
+
+# An anchor, an alias or a merge key can hide a step from the checks below.
+for file in "${wf_files[@]}"; do
+  refs=$(yaml_refs "$file")
+  [ -z "$refs" ] ||
+    fail "$(basename "$file"): line uses a YAML anchor, alias or merge key: \"${refs%%$'\n'*}\". Write the workflows without them."
 done
 
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
