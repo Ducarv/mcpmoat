@@ -2,7 +2,8 @@
 # Tests check-tool-pins.sh on changed copies of the files that it reads. The
 # ci-scripts job in ci.yml runs it. You can also run it on your machine,
 # from any directory: see CONTRIBUTING.md, Checks. It needs bash and the
-# standard tools awk, sed, grep, find, paste, sort, cmp, mktemp and ln.
+# standard tools that check-tool-pins.sh needs, and also cp, mv, mkdir, head,
+# basename, cmp, mktemp and ln.
 # shellcheck disable=SC2016 # the sed expressions and the call hold a literal $
 set -euo pipefail
 
@@ -258,12 +259,12 @@ check_case "call: variable set in the run line" 1 "govulncheck.yml has no call l
 check_case "call: go install @latest and the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's|run: go run|run: go install golang.org/x/vuln/cmd/govulncheck@latest \&\& go run|'
 check_case "call: inline comment after the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 # x@'
 check_case "call: || true after the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 || true@'
-check_case "continuation line after the call" 1 "govulncheck.yml has a line that continues the call line" after_call "$wf/govulncheck.yml" '          || true'
-check_case "continuation line after the call in release.yml" 1 "release.yml has a line that continues the call line" after_call "$wf/release.yml" '          || true'
+check_case "continuation line after the call" 1 "govulncheck.yml: line uses a YAML form this check cannot read" after_call "$wf/govulncheck.yml" '          || true'
+check_case "continuation line after the call in release.yml" 1 "release.yml: line uses a YAML form this check cannot read" after_call "$wf/release.yml" '          || true'
 check_case "continue-on-error in a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '        continue-on-error: true'
 check_case "continue-on-error as the first key of a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '      - continue-on-error: true'
 check_case "govulncheck-action step" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      - uses: golang/govulncheck-action@v1'
-check_case "bare govulncheck: line after the call" 1 "is not the pin, the call line or a name" after_call "$wf/govulncheck.yml" '          govulncheck:'
+check_case "bare govulncheck: line after the call" 1 "govulncheck.yml: line uses a YAML form this check cannot read" after_call "$wf/govulncheck.yml" '          govulncheck:'
 check_case "job ID govulncheck in ci.yml" 1 "is not the pin, the call line or a name" append "$wf/ci.yml" '  govulncheck:'
 check_case "call: no call in release.yml" 1 "release.yml has no call line" sub "$wf/release.yml" '/govulncheck@/d'
 check_case "comment names govulncheck@v1.2.3" 0 "" append "$wf/release.yml" '# see govulncheck@v1.2.3'
@@ -568,6 +569,50 @@ check_case "yaml: apostrophe in a double-quoted value is fine" 0 "" step_workflo
         run: echo hi"
 check_case "yaml: closed quotes at the start of a value are fine" 0 "" step_workflow extra.yml "      - name: 'a'
         run: \"echo hi\""
+
+# A dash line with nothing after it, a doubled single quote that does not close
+# the text, and a plain value that goes on in a deeper line.
+check_case "yaml: dash line with a comment only" 1 "$refs" step_workflow extra.yml "      -   # note
+          name: x
+          run: echo hi"
+check_case "yaml: dash line with trailing spaces only" 1 "$refs" step_workflow extra.yml "      -   
+          name: x
+          run: echo hi"
+check_case "yaml: doubled single quote keeps the text open" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          args: 'release''
+          version: \${{ env.GORELEASER_VERSION }}
+          end'"
+check_case "yaml: doubled single quote inside a closed text is fine" 0 "" step_workflow extra.yml "      - name: 'it''s fine'
+        run: echo hi"
+check_case "yaml: version input goes on in a deeper line" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          version: \${{ env.GORELEASER_VERSION }}
+            || >=2.0.0"
+# pin_goes_on writes a workflow whose pin line is followed by a deeper line.
+pin_goes_on() {
+  job_workflow extra.yml "" "      - run: echo hi" &&
+    awk '{ print } /GORELEASER_VERSION:/ { print "        || >=2.0.0" }' "$wf/extra.yml" >"$wf/extra.yml.new" &&
+    mv "$wf/extra.yml.new" "$wf/extra.yml"
+}
+check_case "yaml: pin line goes on in a deeper line" 1 "$refs" pin_goes_on
+check_case "yaml: plain list item goes on in a deeper line" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        needs:
+          - a
+            b"
+check_case "yaml: nested keys and block scalars are fine" 0 "" step_workflow extra.yml "      - name: x
+        with:
+          a: b
+          c:
+            - d
+            - e: f
+              g: h
+        run: |
+          echo hi
+            indented
+      - run: echo done"
+check_case "yaml: single-quoted backslash after a double-quoted text is fine" 0 "" step_workflow extra.yml "      - run: printf \"%s\" 'a\\\\n'"
+check_case "govulncheck: call line at another indent" 1 "has no call line" sub "$wf/govulncheck.yml" 's/^ +(run: go run)/          \\1/'
 
 # GitHub may run a workflow whose name starts with a dot, and a plain * skips it.
 check_case "workflow file with a dot name" 1 "the step" step_workflow .hidden.yml "      - uses: goreleaser/goreleaser-action@x

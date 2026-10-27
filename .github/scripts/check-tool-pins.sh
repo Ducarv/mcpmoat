@@ -16,9 +16,10 @@
 #   this check before you add such a file.
 # - A workflow line with a YAML form that this check cannot read fails: an
 #   anchor, alias or merge key (an alias line can repeat a step without naming
-#   it), a tag, a tab, a backslash inside double quotes (an escape can spell
-#   goreleaser-action without its plain text) and a quote that does not close
-#   on its line. See yaml_refs for the exact rules.
+#   it), a tag, a tab, a line with only a dash, a backslash inside double
+#   quotes (an escape can spell goreleaser-action without its plain text), a
+#   line that continues the plain value before it, and a quote that does not
+#   close on its line. See yaml_refs for the exact rules.
 # Not covered: other ways to install GoReleaser or govulncheck, such as
 # docker://goreleaser/goreleaser, a remote reusable workflow, brew install, go
 # install, a composite action outside .github/actions, or a $GITHUB_ENV write
@@ -102,7 +103,13 @@ done
 # - a tab, which YAML reads as a space in some places and not in others.
 # - a backslash inside a double-quoted text, because "\x6e" can spell a letter.
 # - a quote at the start of a value that does not close on the line (a text
-#   that goes on in the next line can hold a line that looks like a pin).
+#   that goes on in the next line can hold a line that looks like a pin). A
+#   doubled single quote inside single quotes is an escape and does not close.
+# - a line with a dash and nothing else (or a comment). YAML then starts the
+#   keys of the item on the next line, at a column that the checks do not know.
+# - a line that is indented deeper than the key of the line before it, when
+#   that line has a plain value. YAML joins the two lines into one text, so a
+#   line that looks like a version input or a pin can be part of another value.
 # Quoted texts and comments are not searched, and the body of a block scalar (a
 # key with | or >, such as run: |) is skipped. A plain value that has ", *" or
 # "{*" in it matches the first rule, so put such a value in quotes.
@@ -127,13 +134,20 @@ yaml_refs() {
       }
       line = $0; sub(/^ */, "", line)
       shown = line
-      escaped = shown ~ /"[^"]*\\/
+      # A double-quoted text without a backslash is fine. A backslash in one
+      # that is left after that is an escape.
+      esc = shown
+      gsub(/"[^"\\]*"/, "Q", esc)
+      escaped = esc ~ /"[^"]*\\/
       gsub(/"[^"]*"/, "Q", line)
+      gsub(q q, "", line)
       gsub(q "[^" q "]*" q, "Q", line)
       sub(/ +#.*$/, "", line)
       rest = line; dashes = 0
       while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; sub(/^- +/, "", rest) }
-      if (escaped || rest ~ /^<< *:/ || line ~ ref_re || line ~ tag_re || line ~ open_re || line ~ /\t/) print shown
+      bare = line ~ /^(- *)+$/
+      joined = prev_value && indent > prev_col
+      if (escaped || bare || joined || rest ~ /^<< *:/ || line ~ ref_re || line ~ tag_re || line ~ open_re || line ~ /\t/) print shown
       # A block scalar starts when the line ends with : | or - | and so on.
       # Its body is indented deeper than the key (or the dash, for - |).
       val = rest; sub(/^.*: +/, "", val)
@@ -141,6 +155,10 @@ yaml_refs() {
         inblock = 1
         blockind = (rest ~ block_re) ? indent : indent + dashes
       }
+      # A key with a plain value, or a plain list item. A key without a value
+      # (key:) has children, so a deeper line is normal after it.
+      prev_value = (rest ~ /: +[^ ]/ || (dashes > 0 && rest != "" && rest !~ /:( |$)/)) && !inblock
+      prev_col = (rest ~ /: +[^ ]/) ? indent + dashes : indent
     }
   '
 }
@@ -312,7 +330,7 @@ done
 vuln_want=$(pins GOVULNCHECK_VERSION "$wf/ci.yml")
 need_one_in_ci govulncheck "$vuln_want"
 # shellcheck disable=SC2016 # the $ is regex text, not a variable
-run_re='^ *run: go run "golang\.org/x/vuln/cmd/govulncheck@\$GOVULNCHECK_VERSION" \./\.\.\.$'
+run_re='^ {8}run: go run "golang\.org/x/vuln/cmd/govulncheck@\$GOVULNCHECK_VERSION" \./\.\.\.$'
 
 # listed succeeds when $1 is the name of a workflow in the list.
 listed() {
@@ -355,18 +373,8 @@ for f in "${workflows[@]}"; do
     grep -vE "$names" || true)
   [ -z "$other" ] || fail "$f.yml has a govulncheck line that is not the pin, the call line or a name: $(one_line <<<"$other")"
 
-  # YAML continues a value on a line that is indented deeper. Such a line after
-  # the call line could add "|| true" or arguments.
-  call_indent=-1
-  while IFS= read -r line; do
-    [ -n "${line//[[:space:]]/}" ] || continue
-    indent=${line%%[! ]*}
-    if [ "$call_indent" -ge 0 ] && [ "${#indent}" -gt "$call_indent" ]; then
-      fail "$f.yml has a line that continues the call line: $line"
-    fi
-    call_indent=-1
-    if [[ $line =~ $run_re ]]; then call_indent=${#indent}; fi
-  done <<<"$code"
+  # A line that is indented deeper than the call line would continue its value,
+  # for example with "|| true". yaml_refs fails on such a line.
 
   if grep -qE '^ *(- )?continue-on-error:' <<<"$code"; then
     fail "$f.yml uses continue-on-error. A step that cannot fail would hide a vulnerability."
