@@ -2,6 +2,7 @@ package pins
 
 import (
 	"cmp"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -12,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
@@ -27,8 +30,10 @@ import (
 const CurrentVersion = 1
 
 // maxFileSize is the largest pins.json that Load reads and Save writes, in
-// bytes of indented JSON. It is a ceiling for the whole file: servers that
-// together hold more than this make Save fail (see maxServerSize).
+// bytes of indented JSON. It is a ceiling for the whole file. Set refuses a
+// server whose entry would make the file larger than this (ErrStoreFull), so
+// the servers that fit are still saved and only the refused server is not
+// pinned (see maxServerSize).
 const maxFileSize = 32 << 20
 
 // maxServerSize is the largest entry of one server that Load and Set accept,
@@ -38,15 +43,26 @@ const maxFileSize = 32 << 20
 // the file alone.
 //
 // The cap does not stop several servers together: maxFileSize divided by
-// maxServerSize is 16, so 16 hostile servers at full size make Save fail for
-// the whole file, and then no server is pinned. The caller must report that
-// error. It is a known ceiling, not a silent loss.
+// maxServerSize is 16, so about 16 servers at full size fill the file. Set
+// then refuses the next server that does not fit with ErrStoreFull, and the
+// servers that are already in the store are still saved. The caller must
+// report the refused server: it is not pinned, and that is a known ceiling,
+// not a silent loss.
 const maxServerSize = 2 << 20
+
+// indent is the indent of one level of the JSON that Save writes.
+const indent = "  "
 
 // ErrUnsupportedVersion means that pins.json has a format version that this
 // mcpmoat does not know, because the file is newer. Load never reads such a
 // file, so an old binary cannot overwrite it. Test for it with errors.Is.
 var ErrUnsupportedVersion = errors.New("unsupported pins.json version")
+
+// ErrStoreFull means that Set refused a server because its entry would make
+// the pins file larger than maxFileSize (32 MiB). The store did not change, so
+// the other servers can still be saved. The refused server is not pinned, and
+// the caller must report it. Test for it with errors.Is.
+var ErrStoreFull = errors.New("the pins file would be too large")
 
 // Identity names one MCP server in the pins store.
 //
@@ -92,14 +108,52 @@ type ServerPins map[string]Pin
 // Store holds the pins of all servers and the path of the pins file.
 //
 // A Store is safe for use by several goroutines. Two processes that save to
-// the same path do not corrupt the file (the write is atomic), but the last
-// writer wins. So a run can drop the first pins that a parallel run saved,
-// and the next run then sees that server as new, with no alert.
+// the same path do not corrupt the file (the write is atomic), but without a
+// lock the last writer wins. So a run can drop the first pins that a parallel
+// run saved, and the next run then sees that server as new, with no alert. A
+// run that loads with LoadLocked, saves, and only then releases the lock
+// cannot lose the update of another such run (see LoadLocked for the limits).
+//
+// The Store knows the size of the file that Save would write. Set uses it to
+// refuse a server that would make the file larger than maxFileSize
+// (ErrStoreFull), so one large server cannot stop the others from being
+// saved: only the refused server is not pinned.
 type Store struct {
 	path string
 
-	mu      sync.Mutex // guards servers
+	// existed and unlocked are set once, before Load or LoadLocked returns
+	// the Store, and never change after that. So they need no mutex.
+	existed  bool // the pins file was on disk (see Existed)
+	unlocked bool // LoadLocked ran without the lock (see Unlocked)
+
+	mu      sync.Mutex // guards servers, sizes and entryBytes
 	servers map[Identity]ServerPins
+
+	// sizes holds, for each key of servers, the bytes that the entry of that
+	// server takes in the file that Save writes (see entrySize). entryBytes
+	// is the sum of all values in sizes. fileSize adds the fixed bytes around
+	// the entries, so the Store knows the size of the file without encoding
+	// it. Load and Set keep sizes and entryBytes up to date.
+	sizes      map[Identity]int
+	entryBytes int
+}
+
+// Existed reports whether Load or LoadLocked found the pins file on disk. It is
+// false when the Store is new and empty because there was no file: a first
+// run, or a file that was deleted. The two look the same to Load, so the CLI
+// uses Existed to print a notice when Save creates a new pins file. A deleted
+// file is then not silent: every server would look new, with no alert. A
+// zero-value Store returns false.
+func (s *Store) Existed() bool {
+	return s.existed
+}
+
+// Unlocked reports whether LoadLocked went on without the lock, because the
+// operating system or the file system cannot lock the pins directory. Then a
+// parallel run can still lose an update, and the CLI prints one warning. A
+// Store from Load returns false, because Load takes no lock at all.
+func (s *Store) Unlocked() bool {
+	return s.unlocked
 }
 
 // fileFormat is the shape of pins.json, version 1. Every key is required and
@@ -149,19 +203,31 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 	return filepath.Join(base, "mcpmoat", "pins.json"), nil
 }
 
-// Load reads the pins file at path.
+// Load reads the pins file at path. It takes no lock, so it is for a run that
+// only reads. A run that reads, changes and saves the pins must use
+// LoadLocked, or a parallel run can lose its update (the last writer wins).
 //
 // A missing file (or a missing directory) is the first run: Load returns an
-// empty Store that saves to path.
+// empty Store that saves to path, and Store.Existed returns false. Load does
+// not create the directory.
 //
-// Load refuses a pins directory or a pins.json that another user owns or that
-// its group or others can write, with an error that wraps ErrInsecurePermissions
-// (see Save). It checks the directory by path before it reads the file. It checks
-// the file on the open file descriptor after the read and before it parses the
-// data, so the checked file is the file that was read. A pins.json that the
-// user may not open gets the same check by path, so that another owner shows as
-// ErrInsecurePermissions and not as "permission denied". Parent directories, for
-// example ~/.config, are not checked.
+// Load refuses an unsafe path with an error that wraps ErrInsecurePermissions
+// (see Save). The checks run in this order:
+//   - The parent directories of the pins directory, for example ~/.config
+//     (checkParents). This check is by path, by design: when no other user
+//     can write a parent, no other user can swap the path.
+//   - The pins directory, on the handle of the directory that Load reads from
+//     (checkDirHandle): another owner, a mode that lets the group or others
+//     write, or (macOS only) an ACL that lets a user or group write.
+//   - pins.json, on the open file (checkFileHandle), with the same rules as
+//     the directory. This runs before the type and size checks and before the
+//     read, so Load never reads the bytes of an unsafe file.
+//
+// The directory is opened once, as an os.Root, and the file is opened through
+// it, so the checked directory and file are the ones that Load reads. A pins
+// directory or a pins.json that the user may not open gets the owner check by
+// path (checkDirPerm through dirOpenError, or checkFilePermByPath), so that
+// another owner shows as ErrInsecurePermissions and not as "permission denied".
 //
 // Any other problem is an error, also a missing or null key or a server that
 // Set would refuse. Load never replaces a bad file with an empty store,
@@ -169,18 +235,250 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // path and the position of the problem, and never hold file content. A file
 // with a newer format version gives an error that wraps ErrUnsupportedVersion.
 //
-// A pins.json symlink is refused (safefile.ErrOutsideRoot) when it is
-// absolute or leaves its directory. A symlink with a missing target (the file,
-// its directory or a parent of the directory) and a directory path that is
-// not a directory are errors, not a first run. Save replaces a pins.json
-// symlink with a regular file.
+// A pins.json that is a symlink is refused with an error that wraps
+// ErrInsecurePermissions, also when its target is in the pins directory. A
+// symlink that is absolute or leaves the directory is refused before that
+// (safefile.ErrOutsideRoot). A symlink with a missing target (the file, its
+// directory or a parent of the directory) and a directory path that is not a
+// directory are errors, not a first run. A symlink to the pins directory, or a
+// symlink in a parent, is followed: the checks above see the target.
 func Load(path string) (*Store, error) {
-	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
+	dir, name := filepath.Dir(path), filepath.Base(path)
 
-	if err := checkDirPerm(filepath.Dir(path)); err != nil {
+	if err := checkParents(dir); err != nil {
+		// Wrap with %w, so errors.Is still finds ErrInsecurePermissions.
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	root, err := safefile.OpenRoot(dir)
+	if err != nil {
+		if safefile.IsMissing(err) {
+			return firstRun(newStore(path), path)
+		}
+		return nil, dirOpenError(path, dir, err)
+	}
+	defer func() {
+		// Closing the root does not close the files opened through it.
+		_ = root.Close()
+	}()
+
+	// "." is the root directory itself. The handle is the directory that the
+	// file is opened from, so the checks below see that directory and not
+	// whatever the path names now.
+	d, err := root.Open(".")
+	if err != nil {
+		return nil, dirOpenError(path, dir, err)
+	}
+	defer func() {
+		// The handle is read-only, so a close error is not useful.
+		_ = d.Close()
+	}()
+	if err := checkDirHandle(dir, d); err != nil {
 		return nil, err
 	}
-	data, info, found, err := safefile.ReadBoundedRegularFileInfo(filepath.Dir(path), filepath.Base(path), maxFileSize)
+
+	s, err := loadFromRoot(path, root, name)
+	if err != nil {
+		return nil, err
+	}
+	if !s.existed {
+		// The directory may have changed since it was opened, so check the
+		// path as a first run (see checkFirstRun).
+		return firstRun(s, path)
+	}
+	return s, nil
+}
+
+// LoadLocked is Load with an exclusive lock, for a run that reads, changes and
+// saves the pins. It returns the Store, a release function and an error. The
+// caller must hold the lock from the load through Save, and call release after
+// Save (or when it decides not to save):
+//
+//	store, release, err := pins.LoadLocked(ctx, path, wait)
+//	defer release()
+//
+// release is never nil, also when err is not nil (then it does nothing), so
+// the caller can always defer it. Calling it twice is safe. It releases the
+// lock and closes the directory handle.
+//
+// What is locked: the open handle of the pins directory, with an advisory
+// flock(2). LoadLocked does not use a separate lock file: that needs no extra
+// file, has no symlink or FIFO risk at a lock path, and works when the
+// directory is read-only (mode 0500), because a read-only handle can be
+// locked. To lock the same directory on every run, LoadLocked creates a
+// missing pins directory (mode 0o700) before it locks it. A run that then
+// saves nothing leaves this empty private directory behind.
+//
+// While another run holds the lock, LoadLocked tries again until wait has
+// passed, and then returns an error that wraps ErrLocked. A wait of zero or
+// less tries once. When ctx ends first, the error wraps ctx.Err(), for example
+// context.Canceled. Test both with errors.Is.
+//
+// Limits of the lock:
+//   - It is advisory: it stops only other runs that lock too. Load takes no
+//     lock, and mcpmoat v0.1.0 does not lock at all, so a run of v0.1.0 in
+//     parallel with this version can still lose an update.
+//   - It belongs to the open file description, not to the process. So one
+//     process must not call LoadLocked twice at the same time: the second call
+//     waits for the first, until wait has passed, and then returns ErrLocked.
+//   - When the operating system or the file system cannot lock the directory
+//     (for example some network file systems, or Windows), LoadLocked goes on
+//     without the lock and Store.Unlocked returns true. The caller must warn
+//     the user once.
+//
+// The checks, the errors and the first run are the same as in Load. The one
+// difference: a missing pins.json in the directory (which exists now) is
+// always a first run or a deleted file, so Store.Existed returns false and
+// there is no error.
+func LoadLocked(ctx context.Context, path string, wait time.Duration) (*Store, func(), error) {
+	return loadLocked(ctx, path, locker{wait: wait})
+}
+
+// loadLocked is LoadLocked with the locker l, so a test can inject a busy or
+// an unsupported lock.
+//
+// The results are named, so the deferred cleanup below can see whether the
+// function returns an error.
+func loadLocked(ctx context.Context, path string, l locker) (s *Store, release func(), err error) {
+	// noop is the release function for an error: release is never nil, so the
+	// caller can defer it before it checks err.
+	noop := func() {}
+	dir, name := filepath.Dir(path), filepath.Base(path)
+
+	if err := checkParents(dir); err != nil {
+		return nil, noop, fmt.Errorf("read %s: %w", path, err)
+	}
+	if err := ensurePinsDir(path, dir); err != nil {
+		return nil, noop, err
+	}
+
+	root, err := safefile.OpenRoot(dir)
+	if err != nil {
+		// The directory exists after ensurePinsDir, so a missing one here was
+		// removed or replaced meanwhile, or it is not a directory. checkFirstRun
+		// gives the better text for a path that is not a directory.
+		if safefile.IsMissing(err) {
+			if frErr := checkFirstRun(path); frErr != nil {
+				return nil, noop, frErr
+			}
+		}
+		return nil, noop, dirOpenError(path, dir, err)
+	}
+	d, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, noop, dirOpenError(path, dir, err)
+	}
+
+	// unlockDir releases the lock. It starts as a no-op, and is set below when
+	// the lock is taken. releaseAll is a closure: it reads unlockDir when it
+	// runs, so it sees that later value.
+	unlockDir := func() {}
+	// releaseAll undoes the steps in reverse order: first the lock, then the
+	// handle that holds the lock, then the root. sync.OnceFunc makes a second
+	// call do nothing, so the caller can call release twice.
+	releaseAll := sync.OnceFunc(func() {
+		unlockDir()
+		// Both are read-only, so a close error is not useful.
+		_ = d.Close()
+		_ = root.Close()
+	})
+	// On any error below, release everything before the return, so no handle
+	// or lock leaks. The deferred function runs after the return statement
+	// has set err.
+	defer func() {
+		if err != nil {
+			releaseAll()
+		}
+	}()
+
+	if err := checkDirHandle(dir, d); err != nil {
+		return nil, noop, err
+	}
+
+	unlockFn, locked, err := l.lock(ctx, d)
+	// lock never returns a nil function, so unlockDir is always callable.
+	unlockDir = unlockFn
+	if err != nil {
+		// Wrap with %w, so errors.Is still finds ErrLocked or context.Canceled.
+		return nil, noop, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	s, err = loadFromRoot(path, root, name)
+	if err != nil {
+		return nil, noop, err
+	}
+	// locked is false with no error when the directory cannot be locked: the
+	// run goes on without the lock.
+	s.unlocked = !locked
+	return s, releaseAll, nil
+}
+
+// ensurePinsDir creates the pins directory dir of the pins file path when it
+// is missing, so LoadLocked always has a directory to lock. It runs
+// checkFirstRun first: a missing directory must be a real first run, not, for
+// example, a symlink with a missing target or a path below a regular file.
+// Its error already names path. MkdirAll uses mode 0o700, as Save does, and
+// the umask can only remove bits from it. checkDirHandle checks the result.
+func ensurePinsDir(path, dir string) error {
+	_, err := os.Stat(dir)
+	if !safefile.IsMissing(err) {
+		// The directory exists, or Stat failed for another reason. Then
+		// OpenRoot reports the problem with the right text.
+		return nil
+	}
+	if err := checkFirstRun(path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		return fmt.Errorf("read %s: create the pins directory: %w", path, err)
+	}
+	return nil
+}
+
+// newStore returns an empty Store that saves to path. existed and unlocked
+// are false: the caller sets them when it read a file or ran without a lock.
+func newStore(path string) *Store {
+	return &Store{
+		path:    path,
+		servers: make(map[Identity]ServerPins),
+		sizes:   make(map[Identity]int),
+	}
+}
+
+// dirOpenError wraps err, the error from opening the pins directory dir (with
+// safefile.OpenRoot or root.Open(".")), for the pins file path.
+//
+// A pins directory that another user owns, with mode 0700, cannot be opened,
+// and err is only "permission denied". The owner problem has a fix hint, so
+// for a permission error dirOpenError runs checkDirPerm, by path, only to get
+// a better error text. checkFilePermByPath does the same for pins.json. When
+// checkDirPerm finds nothing, the original error is returned.
+func dirOpenError(path, dir string, err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		if permErr := checkDirPerm(dir); permErr != nil {
+			return fmt.Errorf("read %s: %w", path, permErr)
+		}
+	}
+	return fmt.Errorf("read %s: %w", path, err)
+}
+
+// loadFromRoot reads and decodes the pins file name in root, the os.Root of
+// the pins directory. path is the full path of the file, for the Store and the
+// error texts. The caller has already checked the directory (checkParents and
+// checkDirHandle) and closes root. Load and LoadLocked share this function, so
+// the two cannot read the file in different ways.
+//
+// A missing file gives an empty Store with existed set to false and no error.
+// The caller decides whether that is a first run. A pins.json symlink with a
+// missing target is an error, not a missing file: the real file is gone, and
+// Save would replace the symlink. A file that is found gives a Store with
+// existed set to true. See Load for the checks and the errors.
+func loadFromRoot(path string, root *os.Root, name string) (*Store, error) {
+	s := newStore(path)
+
+	// The name file, not f: f is the decoded fileFormat below.
+	file, found, err := safefile.OpenFileInRoot(root, name)
 	if err != nil {
 		// A pins.json that another user owns, with mode 0600, cannot be opened.
 		// The owner problem has a fix hint, so report it before "permission denied".
@@ -192,14 +490,22 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !found {
-		if err := checkFirstRun(path); err != nil {
-			return nil, err
+		// os.Root reports a symlink with a missing target as not found. Lstat
+		// does not follow the symlink, so it sees the entry itself. Any other
+		// Lstat result means that nothing is there: a missing file. This is
+		// the same check and text as in checkFirstRunWith, done on root.
+		if fi, lerr := root.Lstat(name); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("read %s: the target of the symlink is missing", path)
 		}
 		return s, nil
 	}
-	// info comes from the open file, so the owner and the mode belong to the
-	// bytes that we parse. There is no path race and no "missing" case.
-	if err := checkFilePerm(path, info); err != nil {
+	defer func() {
+		// The file is read-only, so a close error is not useful.
+		_ = file.Close()
+	}()
+
+	data, err := readChecked(path, root, name, file)
+	if err != nil {
 		return nil, err
 	}
 	if err := checkVersion(path, data); err != nil {
@@ -227,45 +533,137 @@ func Load(path string) (*Store, error) {
 		if _, dup := s.servers[id]; dup {
 			return nil, fmt.Errorf("parse %s: servers[%d]: duplicate server identity", path, i)
 		}
+		size, err := entrySize(id, *srv.Tools)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
+		}
 		// The decoder made this map, and nothing else holds it.
 		s.servers[id] = *srv.Tools
+		s.sizes[id] = size
+		s.entryBytes += size
+	}
+	s.existed = true
+	return s, nil
+}
+
+// firstRun returns s, the empty Store, when the missing pins file is a real
+// first run (see checkFirstRun). Otherwise it returns the error of
+// checkFirstRun and no Store.
+func firstRun(s *Store, path string) (*Store, error) {
+	if err := checkFirstRun(path); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
 
-// checkFirstRun returns an error when safefile did not find the pins file but
-// the path is not simply missing. safefile reports a symlink with a missing
-// target, and a directory path that is not a directory, as not found. Then the
-// real file is gone, which is not a first run, and Save would replace the link
-// or fail after the scan.
+// readChecked checks the open pins.json file and then reads it. file was
+// opened as name through root, the os.Root of the pins directory, and path is
+// for the error texts only. The caller closes file.
+//
+// The checks run in this order:
+//   - file must be the directory entry name itself: a symlink, or an entry
+//     that changed after the open, gives an error that wraps
+//     ErrInsecurePermissions. The owner of a symlink target is not relevant,
+//     so this check runs first.
+//   - The owner, the mode and (macOS only) the ACL of file (checkFileHandle).
+//     This runs before the type and size checks, so an unsafe file that is
+//     also too large gives ErrInsecurePermissions and not ErrTooLarge.
+//   - The type and the size, then the bounded read (safefile.ReadOpened).
+func readChecked(path string, root *os.Root, name string, file *os.File) ([]byte, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	// os.Root follows a symlink that stays in the directory, so file can be
+	// the target of a pins.json symlink. Lstat does not follow a symlink at
+	// the end of the name: it describes the directory entry itself.
+	// os.SameFile compares the identity of the files (the device and inode
+	// numbers on Unix), not their names. So the two differ when the entry is
+	// a symlink (the link and its target are two files), or when another
+	// file replaced the entry after the open. An entry that is gone was
+	// swapped too.
+	swapped := fmt.Errorf("pins file %s is a symlink or was swapped while it was opened (fix: replace the symlink with the file): %w",
+		path, ErrInsecurePermissions)
+	entry, err := root.Lstat(name)
+	if safefile.IsMissing(err) {
+		return nil, swapped
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !os.SameFile(info, entry) {
+		return nil, swapped
+	}
+
+	if err := checkFileHandle(path, file, info); err != nil {
+		return nil, err
+	}
+	data, err := safefile.ReadOpened(file, maxFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// checkFirstRun is checkFirstRunWith with os.Lstat and os.Stat. Load calls it
+// when it did not find the pins file.
+func checkFirstRun(path string) error {
+	return checkFirstRunWith(path, os.Lstat, os.Stat)
+}
+
+// checkFirstRunWith returns an error when safefile did not find the pins file
+// but the path is not simply missing. safefile reports a symlink with a
+// missing target, and a directory path that is not a directory, as not found.
+// Then the real file is gone, which is not a first run, and Save would replace
+// the link or fail after the scan.
+//
+// lstat and stat are os.Lstat and os.Stat in production. They are parameters,
+// so a test can fake a file system state that is hard to make, for example a
+// path where nothing exists.
+//
+// It walks up from the directory of path to the nearest part of the path that
+// exists. Then:
+//   - It is a directory, or a symlink to a directory: a first run, no error.
+//     Save creates the missing directories under it.
+//   - It is a file, or a symlink with a missing target: an error that names
+//     that part, "... is not a directory, or it is a symlink with a missing
+//     target". The text is the same when the pins directory itself is a file
+//     and when a parent of it is a file.
+//   - Nothing on the path exists: an error. A real first run always has an
+//     existing ancestor, for example the home directory.
 //
 // The path can change between the read and these checks. Only a process that
 // can write the directory or one of its parents can do that, and it could
 // change pins.json directly, so the race is accepted.
-func checkFirstRun(path string) error {
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+func checkFirstRunWith(path string, lstat, stat func(string) (fs.FileInfo, error)) error {
+	if fi, err := lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("read %s: the target of the symlink is missing", path)
 	}
-	// Find the nearest directory on the path that exists. Lstat does not
-	// follow a symlink at the end, so a dangling symlink (for example
-	// ~/.config to a volume that is not mounted) is found here, and the Stat
-	// below refuses it. Save creates the missing directories under it.
+	// Find the nearest part of the path that exists. Lstat does not follow a
+	// symlink at the end, so a dangling symlink (for example ~/.config to a
+	// volume that is not mounted) is found here, and the stat below refuses
+	// it. A part below a file gives ENOTDIR, not "not exist": safefile.IsMissing
+	// accepts both, so the walk goes on up to the file, and the stat below
+	// names the file.
 	dir := filepath.Dir(path)
 	for {
-		_, err := os.Lstat(dir)
+		_, err := lstat(dir)
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !safefile.IsMissing(err) {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return nil // Nothing on the path exists.
+			// filepath.Dir of the root directory is the root directory, so the
+			// walk is at the top and nothing on the path exists.
+			return fmt.Errorf("read %s: no directory on the path exists", path)
 		}
 		dir = parent
 	}
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+	if fi, err := stat(dir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("read %s: %s is not a directory, or it is a symlink with a missing target", path, dir)
 	}
 	return nil
@@ -318,9 +716,17 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 //
 // Set refuses a server that Load would refuse: an empty server name, an empty
 // tool name, an empty hash, an empty canonical text, text that is not valid
-// UTF-8, or an entry larger than maxServerSize (2 MiB) as compact JSON. Every
-// error from Set is such a refusal. Then the store does not change, and the
-// caller can still save the other servers. The errors hold no tool names,
+// UTF-8, or an entry larger than maxServerSize (2 MiB) as compact JSON.
+//
+// Then Set refuses a server whose entry would make the file that Save writes
+// larger than maxFileSize (32 MiB), with an error that wraps ErrStoreFull. A
+// change that does not make the file larger is always accepted, for example a
+// smaller replacement of a server. So one large server cannot stop the others
+// from being saved: the servers that fit are saved, and the refused server is
+// not pinned.
+//
+// Every error from Set is such a refusal. Then the store does not change, and
+// the caller can still save the other servers. The errors hold no tool names,
 // because the server chose them, and no server context: the caller adds it.
 //
 // The server chose the data that Set refuses, so a hostile server can make
@@ -334,16 +740,149 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	if err := ValidateServer(id, c); err != nil {
 		return err
 	}
+	size, err := entrySize(id, c)
+	if err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A zero-value Store has a nil map, and writing to a nil map panics.
+	// Compute the size of the file with the new entry before the store
+	// changes. A replaced server gives back the bytes of its old entry. A
+	// missing key in sizes gives 0.
+	_, replaced := s.servers[id]
+	count := len(s.servers)
+	if !replaced {
+		count++
+	}
+	entries := s.entryBytes - s.sizes[id] + size
+	before := fileSize(len(s.servers), s.entryBytes)
+	after := fileSize(count, entries)
+	// Refuse only growth: a Store that Load read from a compact file near the
+	// limit can already be over it, and a change that makes it smaller must
+	// still be possible.
+	if after > maxFileSize && after > before {
+		return fmt.Errorf("%w: %d bytes with this server, more than the %d MiB limit",
+			ErrStoreFull, after, maxFileSize>>20)
+	}
+
+	// A zero-value Store has nil maps, and writing to a nil map panics.
 	if s.servers == nil {
 		s.servers = make(map[Identity]ServerPins)
 	}
+	if s.sizes == nil {
+		s.sizes = make(map[Identity]int)
+	}
 	s.servers[id] = c
+	s.sizes[id] = size
+	s.entryBytes = entries
 	return nil
+}
+
+// Clone returns a copy of s. Set on the copy never changes s. The scan uses it
+// to test, before it prints the report, whether a server still fits in the
+// file (Set returns ErrStoreFull when not), without a change to the real
+// store.
+//
+// Clone copies the servers map and the sizes map, because Set writes to
+// them: with shared maps, a Set on the copy would change s too. The pins map
+// of each server is shared, not copied. That is safe, because the Store never
+// changes such a map in place: Set stores a new copy, Get returns a copy, and
+// Save only reads it.
+//
+// The copy has the same path, Existed and Unlocked as s, and a mutex of its
+// own. It does not hold a lock of LoadLocked: that lock belongs to the caller.
+// A Save of the copy writes the same file as a Save of s, so save only one of
+// them.
+func (s *Store) Clone() *Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// A struct literal, not *s: a copy of s would copy the mutex too, and go
+	// vet (copylocks) refuses that. The new mutex is the zero value, unlocked.
+	return &Store{
+		path:       s.path,
+		existed:    s.existed,
+		unlocked:   s.unlocked,
+		servers:    maps.Clone(s.servers),
+		sizes:      maps.Clone(s.sizes),
+		entryBytes: s.entryBytes,
+	}
+}
+
+// fileSize returns the number of bytes that Save writes for count servers
+// whose entries take entryBytes together (see entrySize).
+//
+// Save encodes fileFormat with an indent of two spaces per level and adds a
+// newline at the end. With servers, the file is:
+//
+//	{
+//	  "version": 1,
+//	  "servers": [
+//	    {
+//	      ...
+//	    },
+//	    {
+//	      ...
+//	    }
+//	  ]
+//	}
+//
+// With no server, the array is empty and stays on one line:
+//
+//	{
+//	  "version": 1,
+//	  "servers": []
+//	}
+//
+// The texts below are these lines, so the sum is exact.
+func fileSize(count, entryBytes int) int {
+	// `{`, then the version member, then the start of the servers member, up
+	// to its "[".
+	head := len("{\n"+indent+`"version": `) + len(strconv.Itoa(CurrentVersion)) +
+		len(",\n"+indent+`"servers": `)
+	if count == 0 {
+		return head + len("[]\n}\n")
+	}
+	// entryBytes counts ",\n" after each entry, but the last entry has no
+	// comma: it is followed by "\n  ]". So one byte comes off.
+	return head + len("[\n") + entryBytes - len(",") + len(indent+"]\n}\n")
+}
+
+// entrySize returns the bytes that the entry of the server id takes in the
+// file that Save writes: the indent of depth 2 before its "{", the encoded
+// entry, and the ",\n" after it (fileSize corrects the last entry).
+//
+// The entry is encoded with the options of Save. In the file, every line of
+// the entry after the first starts with the indent of depth 2 (two levels).
+// WithIndentPrefix adds that prefix after each newline of the entry, but not
+// before the first line, so entrySize adds the indent before the "{" itself.
+// A newline in a JSON string is written as \n, so it gets no prefix.
+//
+// The encoder writes to a byteCounter, so a large entry is counted and not
+// kept in memory.
+func entrySize(id Identity, tools ServerPins) (int, error) {
+	var w byteCounter
+	err := json.MarshalWrite(&w, newFileServer(id, tools),
+		jsontext.WithIndent(indent), jsontext.WithIndentPrefix(indent+indent), json.Deterministic(true))
+	if err != nil {
+		// Not wrapped: the error text of encoding/json can hold a tool name.
+		return 0, errors.New("the server pins cannot be encoded as JSON")
+	}
+	return len(indent+indent) + w.n + len(",\n"), nil
+}
+
+// byteCounter is an io.Writer that counts the bytes written to it and drops
+// them.
+type byteCounter struct {
+	n int
+}
+
+// Write adds len(p) to the count. It never fails.
+func (c *byteCounter) Write(p []byte) (int, error) {
+	c.n += len(p)
+	return len(p), nil
 }
 
 // cloneOrEmpty returns a copy of p. A nil p gives an empty map, not nil.
@@ -362,26 +901,36 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // Save refuses an existing pins directory that another user owns or that its
 // group or others can write, with an error that wraps ErrInsecurePermissions.
 // It checks after it created a missing directory. It never changes the mode of
-// an existing directory. Save does not check the
-// old pins.json, because the rename replaces it: callers read the file with
-// Load first, so the file check has run. Parent directories, for example
-// ~/.config, are not checked.
+// an existing directory. Save checks the directory by path (checkDirPerm), not
+// on an open handle as Load does, and it does not read the ACL, so a swap of
+// the path between the check and the write is not detected. Save does not
+// check the old pins.json, because the rename replaces it: callers read the
+// file with Load first, so the file check has run, and a pins.json symlink
+// has made Load fail. Save does not check the parent directories, for example
+// ~/.config, again: Load checked them by path (checkParents).
 //
 // Load and Set check each server, so Save checks only the whole file: it
 // refuses data larger than maxFileSize (32 MiB), the limit of Load, and the old
 // file stays.
 //
-// Save writes indented JSON, so the limit applies to that form. A compact file
-// near the limit, for example from a hand edit, loads but cannot be saved.
+// The limit is a ceiling for all servers together. Set already refuses a
+// server that would push the file over it (ErrStoreFull), so one large server
+// cannot stop the others from being saved: the refused server is simply not
+// pinned, and the caller reports it. The check in Save is a backstop.
 //
-// The limit is a ceiling for all servers together. Set caps one server at
-// maxServerSize (2 MiB), so 16 servers at full size, which hostile servers can
-// send, make the file larger than maxFileSize and Save fails for the whole
-// file. Then no server is saved. The caller must report the error and must not
+// Save writes indented JSON, so the limit applies to that form. A compact file
+// near the limit, for example from a hand edit, loads but cannot be saved. Then
+// Save fails for the whole file. The caller must report the error and must not
 // treat the run as pinned.
 //
+// Save takes no lock itself. It is safe against a parallel run only when the
+// Store came from LoadLocked and the caller still holds that lock: then no
+// other locking run can read or save between the load and this write. A Store
+// from Load, or from LoadLocked when Store.Unlocked is true, can still lose a
+// parallel update (the last writer wins).
+//
 // Save of a zero-value Store is an error, because it has no path: make a
-// Store with Load.
+// Store with Load or LoadLocked.
 func (s *Store) Save() error {
 	// The lock also covers the write, so two Saves of one Store run one at a
 	// time and the last call writes the last state.
@@ -400,7 +949,8 @@ func (s *Store) Save() error {
 
 	// Deterministic sorts the map keys. encoding/json/v2 does not escape <, >
 	// and &, so such a tool name keeps its size in the file.
-	data, err := json.Marshal(f, jsontext.WithIndent("  "), json.Deterministic(true))
+	// entrySize uses the same options: keep the two the same.
+	data, err := json.Marshal(f, jsontext.WithIndent(indent), json.Deterministic(true))
 	if err != nil {
 		// Not wrapped: the error text of encoding/json can hold a tool name.
 		return fmt.Errorf("save %s: the pins cannot be encoded as JSON", s.path)
@@ -444,8 +994,9 @@ func compareIdentity(a, b Identity) int {
 // ValidateServer checks the rules that Load and Set share, also the size cap
 // of one server (maxServerSize). It returns the error that Set would return for
 // the same pins, so a caller can learn whether a server can be pinned without a
-// store. The errors do not hold tool names, because a server that we do not
-// trust chose them.
+// store. It does not check the size of the whole file (ErrStoreFull): that
+// needs the store, so use Set on a Clone of the store for it. The errors do not
+// hold tool names, because a server that we do not trust chose them.
 func ValidateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
 		return errors.New("the server name is empty")
