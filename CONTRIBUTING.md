@@ -59,7 +59,7 @@ to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XX
 
 If you change a workflow, a tool pin or a script in `.github/scripts/`, also run these checks. They
 need [ShellCheck](https://www.shellcheck.net/), no network and no token. Run them from the
-repository root. The `shellcheck` line uses a path from the root. The test scripts find the root
+repository root. The `shellcheck` line uses a path from the root. The other scripts find the root
 themselves, so you can run them from any directory.
 
 ```sh
@@ -119,7 +119,8 @@ fails when the GoReleaser pins do not follow these rules:
 - A file under `.github/actions` that names the action fails, so that a new local action cannot
   skip the rule.
 - A workflow line that uses a YAML form the check cannot read fails: an anchor, alias or merge key,
-  a tag (`!!str`), a tab, a backslash inside a double-quoted text, or a quote that does not close on
+  a tag (`!!str`), a tab, a line with only a dash, a backslash inside a double-quoted text, a line
+  that is indented deeper than the plain value before it, or a quote that does not close on
   its line. These forms can hide a step. If a plain value has `, *` or `{*` in it, put the value in
   quotes.
 - The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a

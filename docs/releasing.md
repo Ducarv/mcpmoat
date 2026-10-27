@@ -61,9 +61,10 @@ commit, not with the index. It fails on any new file there, on a changed `verify
 (the check compares its bytes with the tagged commit, and ignores git replace refs and attribute
 filters), and on a file that is marked assume-unchanged or skip-worktree. This is hardening, not a
 boundary. The script `.github/scripts/release-guard-test.sh` tests this step in the `ci-scripts`
-job. The step does not catch a build that writes the git config, the index or the git object store
-(the files under `.git`), `$GITHUB_PATH` or `$GITHUB_ENV`, or that leaves a background process. A
-separate publish job with a fresh checkout is the real fix, and issue #174 tracks it.
+job. The step does not catch a build that writes a git config (the repository, global or system
+config), the index or the git object store (the files under `.git`), `$GITHUB_PATH` or
+`$GITHUB_ENV`, or that leaves a background process. A separate publish job with a fresh checkout is
+the real fix, and issue #174 tracks it.
 
 The next step, "Verify and publish the release", runs `.github/scripts/verify-and-publish.sh`. It
 checks that the draft release holds exactly the files in `dist/*.tar.gz` and `dist/checksums.txt`.
@@ -126,8 +127,9 @@ schedule only from the file on `dev`.
   branch that you pick. A run that you start by hand notifies you.
 - A failed run, scheduled or started by hand, runs the job `notify-failure`. A timeout of the scan
   counts as a failure, and a timeout can end the scan as cancelled, so the job also runs when the
-  scan job is cancelled. A run that you cancel by hand can also run it. The issue body then says
-  "failed or was cancelled".
+  scan job is cancelled. A run that you cancel by hand can also run it. The job cannot tell a
+  timeout from a cancel by hand, so the issue body and the comment always say "failed or was
+  cancelled".
 - The job opens the issue "Weekly vulnerability check failed" with the `security` label. If an open
   issue with that exact title exists, the job adds a comment with the link to the run. So a check
   that fails every week adds comments to one issue. It does not open a new issue each week. One
