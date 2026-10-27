@@ -373,13 +373,18 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
    problem, then `mcpmoat pin: fix the config file or choose one with --config <file>`, and exits
    with 2. It inspects nothing and writes nothing.
 2. It reads `pins.json` (`pins.Load`). A bad file exits with 2 before any server starts. It reads
-   the file again, with no lock, before step 4, and a third time, with the lock, in step 6.
+   the file again, with no lock, before step 4, and a third time, with the lock, in step 6. This
+   is the first read of the command. When the pins file existed at the first read of the command
+   and a later read does not find it, `pin` saves nothing (steps 4 and 6).
 3. It inspects that one server with `--timeout`, with the same inspector as `scan`. A server that
    fails, times out or is refused exits with 2, and nothing is written. The inspection warnings go
    to stderr, like in `scan`.
 4. It makes the pins of the tools (`pins.Snapshot`) and compares them with the pins of the read
    without the lock (`pins.Compare`). It prints the diff of each changed tool and of each new tool
-   on stdout (`report.WriteDiffs`).
+   on stdout (`report.WriteDiffs`). When the pins file existed at the first read of the command
+   but this read does not find it, the file was removed while the server ran. Then `pin` prints no
+   diff (every tool would look new), saves nothing, prints `pinsRemovedText` and exits with 2
+   (`pinsRemovedWhileRunning`).
    A server that is not pinned yet has no pins, so `pin` shows every tool as a new tool, with only
    added lines. A diff that was cut at the size limit gives the same stderr warning as in `scan`.
 5. With `--expect`, it computes `pins.Digest` of the snapshot and compares it with the flag value
@@ -394,9 +399,10 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
    pins of this server only (`Store.Set`) on that store, saves the file, and then releases the
    lock. It releases the lock right after the save, before it prints any line, so a blocked stdout
    or stderr never holds the lock. The diffs of step 4 come from the read without the lock, so a
-   slow reader of stdout (a pager) never holds the lock. When the file existed at the read for the
-   diffs but not at the locked read, it was removed while `pin` ran: `pin` saves nothing, prints
-   `pinsRemovedText` and exits with 2 (`pinsRemovedWhileRunning`). When the entry of this server
+   slow reader of stdout (a pager) never holds the lock. When the file existed at the first read
+   of the command (or at the read for the diffs) but not at the locked read, it was removed while
+   `pin` ran: `pin` saves nothing, prints `pinsRemovedText` and exits with 2
+   (`pinsRemovedWhileRunning`). When the entry of this server
    changed between the two reads, `pin` warns that the diff is against the older pins. The counts
    of step 7 come from the locked store. Other servers keep their pins, and so do entries that
    another run wrote. A `pins.json` problem exits with 2. When `Set` refuses the server with
@@ -652,8 +658,9 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   created a new file (`Store.Existed` is false), `scan` and `pin --accept` print one line on stderr
   (`printNewPinsFile`, the text is in [Pins and rug pulls](pins.md)). On a first run the line is
   expected. On a later run it tells the user that every server was pinned again with no alert.
-  When the first read of the run found the file but the locked read does not, the file was removed
-  while the run went on. Then the run saves nothing and exits with 2 (`pinsRemovedWhileRunning`),
+  When the pins file existed at the first read of the command but a later read does not find it
+  (the locked read, or for `pin --accept` also the read for the diffs), the file was removed while
+  the run went on. Then the run saves nothing and exits with 2 (`pinsRemovedWhileRunning`),
   because a save would drop every older pin. A real first run is not changed by this.
 - Lock: `scan` and `pin --accept` read `pins.json` again just before they save with `LoadLocked`
   (`readPinsLocked` in `cmd/mcpmoat/pins_shared.go`), and hold the lock through `Set` and `Save`.

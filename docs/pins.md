@@ -12,10 +12,14 @@
   stderr after the save: `mcpmoat <cmd>: no pins file was found, so a new one was created at
   <path>; if this is not your first run, the old file was removed or moved`. On your first run
   this is expected. On a later run it means that the old file is gone, so every server was pinned
-  again with no alert. Find out who removed the file before you trust the new pins. If the file
-  existed when the run started but is gone when it saves, the run saves nothing, prints
-  `mcpmoat <cmd>: the pins file was removed while this command ran, so no pins were saved; run the
-  command again` and exits with code 2. A real first run does not get this line.
+  again with no alert. Find out who removed the file before you trust the new pins. If the pins
+  file existed at the first read of the command, before any server starts, but a later read does
+  not find it, the run saves nothing, prints `mcpmoat <cmd>: the pins file was removed while this
+  command ran, so no pins were saved; run the command again` and exits with code 2. When
+  `pin --accept` finds this before it shows the diff, it shows no diff. A real first run does not
+  get this line. This check looks only at whether the file exists. If another run deletes the file
+  and a second run creates a new one while this run is still working, this run does not notice,
+  but the second run prints the new pins file line.
 - **Owner and mode:** mcpmoat refuses a pins directory or a `pins.json` that another user owns or
   that group or others can write to. `scan` and `pin --accept` then exit with code 2. The error
   names the path and the mode, and gives a hint. For a mode problem, run `chmod go-w -- '<path>'`.

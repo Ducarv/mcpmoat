@@ -93,9 +93,9 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
 - Another process still holds the lock on the pins directory after 10 seconds. The command prints
   two lines on stderr: the read error, then a line that tells you to run the command again (see
   [Pins and rug pulls](pins.md)).
-- `pins.json` existed at the first read, but it was removed while the command ran. The command
-  saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A real first
-  run is not affected.
+- `pins.json` existed at the first read of the command, but it was removed while the command ran.
+  The command saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A
+  real first run is not affected.
 - At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
   the file larger after the report. `scan` prints a warning for that server and still saves the
   other servers (see [Pins and rug pulls](pins.md)).

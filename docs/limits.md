@@ -44,6 +44,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   pins directory. On macOS it also checks the ACL of the pins directory and `pins.json`, but not the
   ACL of a parent, so an allow entry for another user on `~/.config` or `~` (for example
   `delete_child`) is not detected. On Windows the owner, mode and parent checks are skipped.
+- The check for a removed `pins.json` looks only at whether the file exists. If another run deletes
+  the file and a second run creates a new one while the first run is still working, the first run
+  does not notice. The second run prints the new pins file notice, so you are still told.
 - Another local user can hold the advisory lock on a pins directory with mode `0755`. Then `scan`
   and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
 - `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
