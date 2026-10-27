@@ -30,7 +30,8 @@ var ErrInvalidOutput = errors.New("invalid LLM output")
 type Risk string
 
 // The risk levels. There is no critical level: the model alone can never
-// give the highest severity.
+// give the highest severity. The mapping from a risk level to the severity
+// of a finding lives in cmd/mcpmoat (llmSeverity).
 const (
 	// RiskNone means that the model saw no risk. It does not mean that the
 	// tool is safe.
@@ -51,23 +52,6 @@ func (r Risk) Valid() bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// Severity returns the severity of a finding for r: "low", "medium" or
-// "high". These are the names of rules.Severity and of the report. The cap is
-// "high", never "critical". For RiskNone and for an invalid Risk, ok is false
-// and there is no finding.
-func (r Risk) Severity() (severity string, ok bool) {
-	switch r {
-	case RiskLow:
-		return "low", true
-	case RiskMedium:
-		return "medium", true
-	case RiskHigh:
-		return "high", true
-	default:
-		return "", false
 	}
 }
 
@@ -181,7 +165,7 @@ const (
 // parseVerdict reads the model output data as one verdict. The rules are
 // strict, because the output is untrusted:
 //
-//   - data has at most MaxVerdictBytes bytes;
+//   - data has at most maxVerdictBytes bytes;
 //   - data is exactly one JSON object, with optional white space around it,
 //     and nothing after it;
 //   - the object has exactly the keys "risk" and "category", each one time,
@@ -196,8 +180,8 @@ const (
 // Every error wraps ErrInvalidOutput and has fixed text. No byte of data
 // reaches the error.
 func parseVerdict(data []byte) (Verdict, error) {
-	if len(data) > MaxVerdictBytes {
-		return Verdict{}, invalidOutput(fmt.Sprintf("longer than %d bytes", MaxVerdictBytes))
+	if len(data) > maxVerdictBytes {
+		return Verdict{}, invalidOutput(fmt.Sprintf("longer than %d bytes", maxVerdictBytes))
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := expectDelim(dec, '{'); err != nil {

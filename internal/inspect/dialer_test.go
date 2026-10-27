@@ -76,7 +76,7 @@ func (c *pdConn) Close() error {
 	return c.Conn.Close()
 }
 
-// pdDialer is a stub dialFunc. A dial to an address in fail returns that
+// pdDialer is a stub DialFunc. A dial to an address in fail returns that
 // error; every other dial returns a new pdConn. It is safe for concurrent
 // use.
 type pdDialer struct {
@@ -99,7 +99,7 @@ func newPDDialer(t *testing.T) *pdDialer {
 	return d
 }
 
-// dial has the dialFunc signature.
+// dial has the DialFunc signature.
 func (d *pdDialer) dial(_ context.Context, _, address string) (net.Conn, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -794,7 +794,7 @@ func (c *heConn) Close() error {
 	return c.Conn.Close()
 }
 
-// heDialer is a stub dialFunc. Before it makes a connection to an address,
+// heDialer is a stub DialFunc. Before it makes a connection to an address,
 // it runs the behaviour of that address, if there is one: a non-nil error
 // fails the dial. The behaviour gets the dial context, so it can block until
 // the context ends. heDialer is safe for concurrent use.
@@ -823,7 +823,7 @@ func newHEDialer(t *testing.T, behave map[string]func(ctx context.Context) error
 	return d
 }
 
-// dial has the dialFunc signature.
+// dial has the DialFunc signature.
 func (d *heDialer) dial(ctx context.Context, _, address string) (net.Conn, error) {
 	deadline, ok := ctx.Deadline()
 	d.mu.Lock()

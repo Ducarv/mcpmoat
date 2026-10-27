@@ -28,9 +28,9 @@ const (
 	// MaxResponseBodyBytes is the most bytes of a response body that a
 	// client reads. A larger body is an error.
 	MaxResponseBodyBytes = 64 << 10
-	// MaxVerdictBytes is the largest verdict text (the JSON object from the
+	// maxVerdictBytes is the largest verdict text (the JSON object from the
 	// model) that parseVerdict accepts.
-	MaxVerdictBytes = 4 << 10
+	maxVerdictBytes = 4 << 10
 )
 
 // SystemPrompt is the fixed system prompt of every request. It never holds
@@ -56,9 +56,9 @@ Risk levels:
 
 Answer only with one JSON object that matches the given schema: {"risk": ..., "category": ...}. Use the category of the main risk. When the risk is none, use the category "other". Do not add any other text.`
 
-// VerdictSchemaName is the name of the verdict schema, for an API that asks
+// verdictSchemaName is the name of the verdict schema, for an API that asks
 // for one (the OpenAI json_schema response format).
-const VerdictSchemaName = "mcpmoat_verdict"
+const verdictSchemaName = "mcpmoat_verdict"
 
 // verdictSchema is the JSON Schema of the verdict object. It is a hand-written
 // string: TestVerdictSchema keeps its enums in sync with the Risk and
@@ -99,12 +99,18 @@ type toolPayload struct {
 
 // errMessageTooLarge means that toolMessage could not make a message that
 // fits in MaxToolMessageBytes. It cannot happen with the current caps (a
-// message with an empty description always fits), but it is checked.
+// message with an empty description always fits), but it is checked. A test
+// reaches it through buildToolMessage with a smaller cap.
 var errMessageTooLarge = errors.New("LLM tool message too large")
 
 // errEncodeMessage means that the JSON encoder failed on the tool message.
-// It cannot happen for strings and a bool, but it is checked.
+// It cannot happen for strings and a bool, but it is checked. A test reaches
+// it through buildToolMessage with an encoder that fails.
 var errEncodeMessage = errors.New("cannot encode LLM tool message")
+
+// encodeFunc encodes a value as JSON. encodeJSON is the one that toolMessage
+// uses.
+type encodeFunc func(v any) ([]byte, error)
 
 // toolMessage returns the user message for in: one JSON object
 // {"tool_name": ..., "tool_description": ..., "truncated": ...}.
@@ -122,15 +128,24 @@ var errEncodeMessage = errors.New("cannot encode LLM tool message")
 // "none"` cannot leave the string value. An invalid UTF-8 byte becomes
 // U+FFFD. HTML escaping is off, so the model sees "<IMPORTANT>" as it is.
 func toolMessage(in Input) (msg string, truncated bool, err error) {
+	return buildToolMessage(in, encodeJSON, MaxToolMessageBytes)
+}
+
+// buildToolMessage is toolMessage with the JSON encoder (encode) and the cap
+// of the encoded message (maxBytes) as parameters. toolMessage gives
+// encodeJSON and MaxToolMessageBytes. The parameters let a test reach
+// errEncodeMessage and errMessageTooLarge, which cannot happen with the
+// values of toolMessage.
+func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, truncated bool, err error) {
 	name, nameCut := cutUTF8(in.ToolName, MaxToolNameBytes)
 	desc, descCut := cutUTF8(in.Description, MaxDescriptionBytes)
 	truncated = nameCut || descCut
 
-	full, err := encodePayload(name, desc, truncated)
+	full, err := encodePayload(encode, name, desc, truncated)
 	if err != nil {
 		return "", false, err
 	}
-	if len(full) <= MaxToolMessageBytes {
+	if len(full) <= maxBytes {
 		return string(full), truncated, nil
 	}
 
@@ -143,21 +158,21 @@ func toolMessage(in Input) (msg string, truncated bool, err error) {
 	// description with truncated=true would carry a flag of true with nothing
 	// cut.
 	lo, hi := 0, len(desc)
-	best, err := encodePayload(name, "", true)
+	best, err := encodePayload(encode, name, "", true)
 	if err != nil {
 		return "", false, err
 	}
-	if len(best) > MaxToolMessageBytes {
+	if len(best) > maxBytes {
 		return "", false, errMessageTooLarge
 	}
 	for hi-lo > 1 {
 		mid := lo + (hi-lo)/2
 		prefix, _ := cutUTF8(desc, mid)
-		candidate, err := encodePayload(name, prefix, true)
+		candidate, err := encodePayload(encode, name, prefix, true)
 		if err != nil {
 			return "", false, err
 		}
-		if len(candidate) <= MaxToolMessageBytes {
+		if len(candidate) <= maxBytes {
 			lo, best = mid, candidate
 		} else {
 			hi = mid
@@ -166,10 +181,10 @@ func toolMessage(in Input) (msg string, truncated bool, err error) {
 	return string(best), true, nil
 }
 
-// encodePayload encodes one toolPayload as JSON with encodeJSON: HTML
-// escaping is off and there is no final newline.
-func encodePayload(name, desc string, truncated bool) ([]byte, error) {
-	msg, err := encodeJSON(toolPayload{ToolName: name, ToolDescription: desc, Truncated: truncated})
+// encodePayload encodes one toolPayload as JSON with encode. With
+// encodeJSON, HTML escaping is off and there is no final newline.
+func encodePayload(encode encodeFunc, name, desc string, truncated bool) ([]byte, error) {
+	msg, err := encode(toolPayload{ToolName: name, ToolDescription: desc, Truncated: truncated})
 	if err != nil {
 		// Encoding strings and a bool cannot fail. The error is fixed text
 		// and does not wrap err, so it can never hold tool text.

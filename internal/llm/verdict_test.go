@@ -51,7 +51,7 @@ func TestParseVerdictValid(t *testing.T) {
 		{name: "keys in other order", input: `{"category":"tool-shadowing","risk":"none"}`, want: Verdict{Risk: RiskNone, Category: CategoryToolShadowing}},
 		{name: "white space around", input: " \n\t{ \"risk\" : \"high\" ,\r\n \"category\" : \"other\" }\n ", want: Verdict{Risk: RiskHigh, Category: CategoryOther}},
 		{name: "escaped key", input: `{"\u0072isk":"low","category":"other"}`, want: Verdict{Risk: RiskLow, Category: CategoryOther}},
-		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", MaxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{Risk: RiskLow, Category: CategoryOther}},
+		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", maxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{Risk: RiskLow, Category: CategoryOther}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestParseVerdictInvalid(t *testing.T) {
 		{name: "unclosed object", input: `{"risk":"high","category":"other"`},
 		{name: "leading text", input: canary + valid},
 		{name: "markdown fence", input: "```json\n" + valid + "\n```"},
-		{name: "over max length", input: valid + strings.Repeat(" ", MaxVerdictBytes-len(valid)) + " "},
+		{name: "over max length", input: valid + strings.Repeat(" ", maxVerdictBytes-len(valid)) + " "},
 		{name: "huge", input: `{"risk":"high","category":"` + strings.Repeat(canary, 1000) + `"}`},
 		{name: "invalid UTF-8 in value", input: `{"risk":"high` + "\xff" + `","category":"other"}`},
 		{name: "invalid UTF-8 outside value", input: "\xff" + valid},
@@ -171,44 +171,10 @@ func FuzzParseVerdict(f *testing.F) {
 		if v.Truncated {
 			t.Fatalf("parseVerdict(%q) set Truncated, want it set only by Classify", data)
 		}
-		if len(data) > MaxVerdictBytes {
-			t.Fatalf("parseVerdict accepted %d bytes, max %d", len(data), MaxVerdictBytes)
+		if len(data) > maxVerdictBytes {
+			t.Fatalf("parseVerdict accepted %d bytes, max %d", len(data), maxVerdictBytes)
 		}
 	})
-}
-
-func TestRiskSeverity(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		risk   Risk
-		want   string
-		wantOK bool
-	}{
-		{risk: RiskNone, want: "", wantOK: false},
-		{risk: RiskLow, want: "low", wantOK: true},
-		{risk: RiskMedium, want: "medium", wantOK: true},
-		{risk: RiskHigh, want: "high", wantOK: true},
-		{risk: "critical", want: "", wantOK: false},
-		{risk: "", want: "", wantOK: false},
-		{risk: "HIGH", want: "", wantOK: false},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.risk), func(t *testing.T) {
-			t.Parallel()
-			got, ok := tt.risk.Severity()
-			if got != tt.want || ok != tt.wantOK {
-				t.Errorf("%q.Severity() = %q, %v; want %q, %v", tt.risk, got, ok, tt.want, tt.wantOK)
-			}
-		})
-	}
-
-	// The model alone can never give the highest severity.
-	for _, r := range risks {
-		if got, _ := r.Severity(); got == "critical" {
-			t.Errorf("%q.Severity() = critical", r)
-		}
-	}
 }
 
 func TestRiskAndCategoryValid(t *testing.T) {

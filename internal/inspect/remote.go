@@ -86,7 +86,7 @@ type RemoteOptions struct {
 	// that Remote makes. Nil means a net.Dialer. The pinned dialer calls it
 	// only after the DNS pin and the address guard. It has no effect when
 	// baseTransport is set. SDKInspector.Inspect passes SDKOptions.Dial.
-	dial dialFunc
+	dial DialFunc
 
 	// secrets are more strings that classify removes from error text, on
 	// top of the ones that Remote finds in srv (header values, URL user

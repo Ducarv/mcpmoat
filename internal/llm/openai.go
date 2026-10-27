@@ -72,7 +72,7 @@ func (openAIAPI) requestBody(model, message string) any {
 		ResponseFormat: openAIResponseFormat{
 			Type: "json_schema",
 			JSONSchema: openAIJSONSchema{
-				Name:   VerdictSchemaName,
+				Name:   verdictSchemaName,
 				Strict: true,
 				Schema: VerdictSchema(),
 			},
@@ -88,7 +88,7 @@ func (openAIAPI) setAuth(h http.Header, key discover.Secret) {
 // parseResponse reads a Chat Completions response. The verdict is the
 // content string of the message of the one choice.
 //
-// A body that is not the API envelope gives ErrBadResponse: a body that is
+// A body that is not the API envelope gives errBadResponse: a body that is
 // not a JSON object, a top-level "error" that is not null, or a "choices"
 // that is missing or null. An envelope whose message is not usable gives
 // ErrInvalidOutput: an empty "choices" array or more than one choice, a
@@ -101,7 +101,7 @@ func (openAIAPI) parseResponse(body []byte) (Verdict, error) {
 		return Verdict{}, err
 	}
 	if resp.Choices == nil {
-		return Verdict{}, ErrBadResponse
+		return Verdict{}, errBadResponse
 	}
 	choices := *resp.Choices
 	if len(choices) == 0 {

@@ -4,7 +4,7 @@ Guidance for Claude Code sessions in this repository.
 
 ## Project summary
 
-mcpmoat is an offline Go CLI that scans MCP servers for malicious or tampered tools (`mcpmoat scan`).
+mcpmoat is an offline Go CLI (unless you opt in to `--llm`) that scans MCP servers for malicious or tampered tools (`mcpmoat scan`).
 The source of truth is **[docs/PRD.md](docs/PRD.md)**. Issues cite its IDs: FR-01 to FR-17, NFR-01 to
 NFR-07, threats T1 to T5, milestones M1 to M8. Read the cited section before you start an issue.
 

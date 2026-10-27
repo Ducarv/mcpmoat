@@ -37,7 +37,7 @@ type dialRecorder struct {
 	addrs []string
 }
 
-// dial has the dialFunc signature.
+// dial has the DialFunc signature.
 func (r *dialRecorder) dial(ctx context.Context, network, address string) (net.Conn, error) {
 	r.mu.Lock()
 	r.addrs = append(r.addrs, address)

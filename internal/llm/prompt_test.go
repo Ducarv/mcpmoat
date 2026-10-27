@@ -3,6 +3,8 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -226,7 +228,7 @@ func TestToolMessageWorstCaseSize(t *testing.T) {
 			// The client puts the message in the request body as a JSON
 			// string, next to the system prompt, the schema and a model name.
 			body, err := json.Marshal(map[string]any{
-				"model":  strings.Repeat("m", MaxModelBytes),
+				"model":  strings.Repeat("m", maxModelBytes),
 				"system": SystemPrompt,
 				"schema": VerdictSchema(),
 				"messages": []map[string]string{
@@ -255,7 +257,7 @@ func TestToolMessageNeverTooLarge(t *testing.T) {
 	worst := []string{"\x00", "\x01", "\x1f", "\xff", "\x80", `"`, `\`, "\u2028", "\U0001F600"}
 	for _, s := range worst {
 		name, _ := cutUTF8(strings.Repeat(s, MaxToolNameBytes), MaxToolNameBytes)
-		msg, err := encodePayload(name, "", true)
+		msg, err := encodePayload(encodeJSON, name, "", true)
 		if err != nil {
 			t.Fatalf("encodePayload(%q) error = %v", s, err)
 		}
@@ -267,6 +269,132 @@ func TestToolMessageNeverTooLarge(t *testing.T) {
 		if _, _, err := toolMessage(in); err != nil {
 			t.Errorf("toolMessage(name and description of %q) error = %v, want nil", s, err)
 		}
+	}
+}
+
+// TestToolMessageUsesDefaults checks that toolMessage is buildToolMessage
+// with encodeJSON and MaxToolMessageBytes, and builds the normal message.
+func TestToolMessageUsesDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{name: "plain", in: Input{ToolName: "read_file", Description: "Reads <a> & b."}, want: `{"tool_name":"read_file","tool_description":"Reads <a> & b.","truncated":false}`},
+		{name: "over the cap", in: Input{ToolName: "t", Description: strings.Repeat(`"`, 30000)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			msg, truncated, err := toolMessage(tt.in)
+			if err != nil {
+				t.Fatalf("toolMessage() error = %v", err)
+			}
+			if tt.want != "" && msg != tt.want {
+				t.Errorf("toolMessage() = %s, want %s", msg, tt.want)
+			}
+			bMsg, bTruncated, bErr := buildToolMessage(tt.in, encodeJSON, MaxToolMessageBytes)
+			if bErr != nil || bMsg != msg || bTruncated != truncated {
+				t.Errorf("buildToolMessage() = (%d bytes, %v, %v), want toolMessage() = (%d bytes, %v, nil)", len(bMsg), bTruncated, bErr, len(msg), truncated)
+			}
+		})
+	}
+}
+
+// TestBuildToolMessageEncodeError reaches errEncodeMessage with an encoder
+// that fails on one call: the whole message, the message with an empty
+// description, or a message of the binary search.
+func TestBuildToolMessageEncodeError(t *testing.T) {
+	t.Parallel()
+
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100)}
+	empty, err := encodePayload(encodeJSON, in.ToolName, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cap makes the search run: the whole message is over it, and the
+	// message with an empty description fits with room for more.
+	maxBytes := len(empty) + 10
+
+	for _, failOn := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint("call ", failOn), func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			encode := func(v any) ([]byte, error) {
+				calls++
+				if calls == failOn {
+					return nil, errors.New("encoder failed: " + canary)
+				}
+				return encodeJSON(v)
+			}
+			msg, truncated, err := buildToolMessage(in, encode, maxBytes)
+			if !errors.Is(err, errEncodeMessage) {
+				t.Fatalf("buildToolMessage() error = %v, want errEncodeMessage", err)
+			}
+			if msg != "" || truncated {
+				t.Errorf("buildToolMessage() = (%q, %v), want empty and false", msg, truncated)
+			}
+			if strings.Contains(err.Error(), canary) {
+				t.Errorf("error %q holds the encoder error or tool text", err)
+			}
+			if calls != failOn {
+				t.Errorf("encoder calls = %d, want %d (stop at the first failure)", calls, failOn)
+			}
+		})
+	}
+}
+
+// TestBuildToolMessageTooLarge reaches errMessageTooLarge with a cap that even
+// the message with an empty description does not fit, and checks the bound.
+func TestBuildToolMessageTooLarge(t *testing.T) {
+	t.Parallel()
+
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000)}
+	empty, err := encodePayload(encodeJSON, in.ToolName, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		in       Input
+		maxBytes int
+		wantErr  bool
+		wantDesc string
+	}{
+		{name: "tiny cap", in: in, maxBytes: 10, wantErr: true},
+		{name: "empty input tiny cap", in: Input{}, maxBytes: 10, wantErr: true},
+		{name: "one under empty message", in: in, maxBytes: len(empty) - 1, wantErr: true},
+		{name: "exactly empty message", in: in, maxBytes: len(empty), wantDesc: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			msg, truncated, err := buildToolMessage(tt.in, encodeJSON, tt.maxBytes)
+			if tt.wantErr {
+				if !errors.Is(err, errMessageTooLarge) {
+					t.Fatalf("buildToolMessage() error = %v, want errMessageTooLarge", err)
+				}
+				if msg != "" || truncated {
+					t.Errorf("buildToolMessage() = (%q, %v), want empty and false", msg, truncated)
+				}
+				if strings.Contains(err.Error(), canary) {
+					t.Errorf("error %q holds tool text", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildToolMessage() error = %v", err)
+			}
+			if len(msg) > tt.maxBytes || !truncated {
+				t.Errorf("buildToolMessage() = (%d bytes, %v), want <= %d bytes and true", len(msg), truncated, tt.maxBytes)
+			}
+			if p := decodeMessage(t, msg); p.ToolDescription != tt.wantDesc || !p.Truncated {
+				t.Errorf("buildToolMessage() decodes to %+v, want description %q and truncated", p, tt.wantDesc)
+			}
+		})
 	}
 }
 

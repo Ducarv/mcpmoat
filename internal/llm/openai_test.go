@@ -85,8 +85,8 @@ func TestOpenAIRequestShape(t *testing.T) {
 		t.Errorf("response_format type = %q, want json_schema", got)
 	}
 	schema := decodeKeys(t, "json_schema", format["json_schema"], "name", "strict", "schema")
-	if got := decodeAs[string](t, "json_schema name", schema["name"]); got != VerdictSchemaName {
-		t.Errorf("json_schema name = %q, want %q", got, VerdictSchemaName)
+	if got := decodeAs[string](t, "json_schema name", schema["name"]); got != verdictSchemaName {
+		t.Errorf("json_schema name = %q, want %q", got, verdictSchemaName)
 	}
 	if got := string(schema["strict"]); got != "true" {
 		t.Errorf("json_schema strict = %s, want true", got)
@@ -149,7 +149,7 @@ func TestOpenAIParseResponseInvalid(t *testing.T) {
 		body    string
 		wantBad bool
 	}{
-		// Not the API envelope: ErrBadResponse.
+		// Not the API envelope: errBadResponse.
 		{name: "empty body", body: "", wantBad: true},
 		{name: "html", body: "<html>" + outputCanary + "</html>", wantBad: true},
 		{name: "array", body: `[` + choice + `]`, wantBad: true},

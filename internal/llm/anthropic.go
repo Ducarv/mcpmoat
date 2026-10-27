@@ -103,7 +103,7 @@ func (anthropicAPI) setAuth(h http.Header, key discover.Secret) {
 // parseResponse reads a Messages API response. The verdict is the input of
 // the one tool_use block named anthropicToolName.
 //
-// A body that is not the API envelope gives ErrBadResponse: a body that is
+// A body that is not the API envelope gives errBadResponse: a body that is
 // not a JSON object, a top-level "error" that is not null, a "type" that is
 // present and not "message", or a "content" that is missing or null. An
 // envelope whose message is not usable gives ErrInvalidOutput: a refusal, an
@@ -115,10 +115,10 @@ func (anthropicAPI) parseResponse(body []byte) (Verdict, error) {
 		return Verdict{}, err
 	}
 	if resp.Type != nil && *resp.Type != anthropicMessageType {
-		return Verdict{}, ErrBadResponse
+		return Verdict{}, errBadResponse
 	}
 	if resp.Content == nil {
-		return Verdict{}, ErrBadResponse
+		return Verdict{}, errBadResponse
 	}
 	switch resp.StopReason {
 	case "refusal":

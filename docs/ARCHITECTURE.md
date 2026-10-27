@@ -490,7 +490,7 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   the addresses that pass the DNS pin and the address guard, so the guard still applies. With a
   proxy, it sees the address of the proxy. It has no effect on stdio servers.
   `cmd/mcpmoat/network_test.go` uses it to prove that `scan` dials only the configured fixture
-  hosts.
+  hosts. Its type is `inspect.DialFunc`, which has the signature of `net.Dialer.DialContext`.
 
 Among the product packages, only `internal/inspect` imports the MCP SDK (the fixture servers under
 `testdata/` also use it). The depguard rule `mcp-sdk-only-in-inspect` in `.golangci.yml` enforces
@@ -788,9 +788,10 @@ Setup:
 - The base URL must be `https`, or `http` for a loopback host. The reason: the key must never
   cross a network in clear text.
 
-The dial hook: `llm.Config.Dial` is a test hook. It is nil in production, and nil uses a
-`net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host at connect
-time, requires that every address is a loopback address, and dials only those addresses. The check
+The dial hook: `llm.Config.Dial` is a test hook of type `llm.DialFunc`. It is nil in production,
+and nil uses a `net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host
+at connect time, requires that every address is a loopback address, and dials only those
+addresses. The check
 at connect time is needed because a name such as `localhost` is loopback only by its text: the
 system resolver can map it to another address. An address that does not answer gets a short
 timeout, so the next address is tried soon (for example when a firewall drops packets to `::1`).
@@ -820,6 +821,8 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 
 - A risk of `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity. The
   category goes in `related`. `none` gives no finding. The severity is never `critical`.
+  `llmSeverity` in `cmd/mcpmoat/scan_llm.go` is the one place that maps an `llm.Risk` to a
+  `rules.Severity`.
 - `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
   `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
   `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
@@ -840,6 +843,8 @@ failed step look like a complete scan. docs/llm.md and docs/exit-codes.md list t
 exit-code-2 cases (see [`--llm`](llm.md)
 and [Exit codes](exit-codes.md)). Every error of `internal/llm` has fixed text. It never
 holds the key, a URL, a header, a response body or model output.
+For a provider failure, `llmFailureText` in `cmd/mcpmoat` quotes `llm.Reason(err)`, the fixed
+reason text, for example `HTTP 401 (the API key was refused)`.
 
 `classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
 `To accept` line. The LLM rules share the exception of the pin rules: only `--ignore` drops LLM

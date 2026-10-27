@@ -66,16 +66,16 @@ func TestProviderDefaults(t *testing.T) {
 		wantURL   string
 		wantModel string
 	}{
-		{provider: ProviderAnthropic, wantURL: DefaultAnthropicBaseURL, wantModel: DefaultAnthropicModel},
-		{provider: ProviderOpenAI, wantURL: DefaultOpenAIBaseURL, wantModel: ""}, // no default model
+		{provider: ProviderAnthropic, wantURL: defaultAnthropicBaseURL, wantModel: DefaultAnthropicModel},
+		{provider: ProviderOpenAI, wantURL: defaultOpenAIBaseURL, wantModel: ""}, // no default model
 		{provider: "", wantURL: "", wantModel: ""},
 		{provider: "other", wantURL: "", wantModel: ""},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.provider), func(t *testing.T) {
 			t.Parallel()
-			if got := tt.provider.DefaultBaseURL(); got != tt.wantURL {
-				t.Errorf("%q.DefaultBaseURL() = %q, want %q", tt.provider, got, tt.wantURL)
+			if got := tt.provider.defaultBaseURL(); got != tt.wantURL {
+				t.Errorf("%q.defaultBaseURL() = %q, want %q", tt.provider, got, tt.wantURL)
 			}
 			if got := tt.provider.DefaultModel(); got != tt.wantModel {
 				t.Errorf("%q.DefaultModel() = %q, want %q", tt.provider, got, tt.wantModel)
@@ -84,7 +84,7 @@ func TestProviderDefaults(t *testing.T) {
 	}
 
 	// The default base URLs must pass the base URL check themselves.
-	for _, u := range []string{DefaultAnthropicBaseURL, DefaultOpenAIBaseURL} {
+	for _, u := range []string{defaultAnthropicBaseURL, defaultOpenAIBaseURL} {
 		if err := ValidateBaseURL(u); err != nil {
 			t.Errorf("ValidateBaseURL(%q) = %v, want nil", u, err)
 		}
@@ -106,13 +106,13 @@ func TestConfigResolve(t *testing.T) {
 			name:      "anthropic defaults",
 			cfg:       Config{Provider: ProviderAnthropic, APIKey: key},
 			wantModel: DefaultAnthropicModel,
-			wantURL:   DefaultAnthropicBaseURL,
+			wantURL:   defaultAnthropicBaseURL,
 		},
 		{
 			name:      "openai with model gets default URL",
 			cfg:       Config{Provider: ProviderOpenAI, Model: "gpt-4o-mini", APIKey: key},
 			wantModel: "gpt-4o-mini",
-			wantURL:   DefaultOpenAIBaseURL,
+			wantURL:   defaultOpenAIBaseURL,
 		},
 		{
 			name:      "trailing slash trimmed",
@@ -150,7 +150,7 @@ func TestConfigResolve(t *testing.T) {
 		},
 		{
 			name:    "model too long",
-			cfg:     Config{Provider: ProviderAnthropic, Model: strings.Repeat("m", MaxModelBytes+1), APIKey: key},
+			cfg:     Config{Provider: ProviderAnthropic, Model: strings.Repeat("m", maxModelBytes+1), APIKey: key},
 			wantErr: ErrInvalidModel,
 		},
 		{
@@ -246,8 +246,8 @@ func TestConfigValidateNeedsDefaults(t *testing.T) {
 func TestValidateBaseURL(t *testing.T) {
 	t.Parallel()
 
-	// exact2048 is a valid https URL of exactly MaxBaseURLBytes bytes.
-	exact2048 := "https://h/" + strings.Repeat("a", MaxBaseURLBytes-len("https://h/"))
+	// exact2048 is a valid https URL of exactly maxBaseURLBytes bytes.
+	exact2048 := "https://h/" + strings.Repeat("a", maxBaseURLBytes-len("https://h/"))
 
 	tests := []struct {
 		name string
@@ -332,7 +332,7 @@ func TestValidateKey(t *testing.T) {
 	}{
 		{name: "normal", key: "sk-ant-api03-abc_DEF.123~xyz"},
 		{name: "all visible ASCII", key: "!\"#$%&'()*+,-./0123456789:;<=>?@AZ[\\]^_`az{|}~"},
-		{name: "exactly max length", key: strings.Repeat("k", MaxKeyBytes)},
+		{name: "exactly max length", key: strings.Repeat("k", maxKeyBytes)},
 		{name: "empty", key: "", wantErr: ErrMissingKey},
 		{name: "space", key: canary + " x", wantErr: ErrInvalidKey},
 		{name: "leading space", key: " " + canary, wantErr: ErrInvalidKey},
@@ -344,7 +344,7 @@ func TestValidateKey(t *testing.T) {
 		{name: "NUL", key: canary + "\x00", wantErr: ErrInvalidKey},
 		{name: "non-ASCII", key: canary + "é", wantErr: ErrInvalidKey},
 		{name: "invalid UTF-8", key: canary + "\xff", wantErr: ErrInvalidKey},
-		{name: "too long", key: canary + strings.Repeat("k", MaxKeyBytes), wantErr: ErrInvalidKey},
+		{name: "too long", key: canary + strings.Repeat("k", maxKeyBytes), wantErr: ErrInvalidKey},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,7 +375,7 @@ func TestConfigMasksAPIKey(t *testing.T) {
 	cfg := Config{
 		Provider: ProviderAnthropic,
 		Model:    DefaultAnthropicModel,
-		BaseURL:  DefaultAnthropicBaseURL,
+		BaseURL:  defaultAnthropicBaseURL,
 		APIKey:   discover.NewSecret(canary),
 	}
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {

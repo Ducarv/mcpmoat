@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -673,12 +672,12 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		if v.Truncated && belowMedium(v.Risk) {
 			return truncatedRow(row), true
 		}
-		severity, hasRisk := v.Risk.Severity()
+		severity, hasRisk := llmSeverity(v.Risk)
 		if !hasRisk {
 			return report.FindingRow{}, false // risk none
 		}
 		row = llmRuleRow(row)
-		row.Severity = severity
+		row.Severity = string(severity)
 		row.Risk = v.Category.Text()
 		row.Related = string(v.Category)
 		return row, true
@@ -688,6 +687,25 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		// answerNotRun, answerStopped, answerProviderFailed and
 		// answerInternalFailed: the tool got no answer.
 		return report.FindingRow{}, false
+	}
+}
+
+// llmSeverity returns the severity of a finding for the LLM risk r, and true.
+// It is the one place that maps an llm.Risk to a rules.Severity: low, medium
+// and high map to the severity with the same name. The cap is high, never
+// critical: the model alone can never give the highest severity. For
+// llm.RiskNone and for a risk that is not valid, it returns false and there
+// is no finding.
+func llmSeverity(r llm.Risk) (rules.Severity, bool) {
+	switch r {
+	case llm.RiskLow:
+		return rules.SeverityLow, true
+	case llm.RiskMedium:
+		return rules.SeverityMedium, true
+	case llm.RiskHigh:
+		return rules.SeverityHigh, true
+	default:
+		return "", false
 	}
 }
 
@@ -771,25 +789,16 @@ func llmFailureLine(f *llmFailure) string {
 	return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
 }
 
-// llmFailureText returns the reason of a failed request to the provider. For
-// a status code it is "HTTP <code>", with a fixed hint for some codes:
-// "HTTP 401 (the API key was refused)" for 401 and 403 (llm.ErrAuth), and
-// "HTTP 302 (redirect refused)" for a 3xx. Else it is the error text. The
-// errors of package llm have fixed text. The text of llm.ErrProvider at the
-// start is cut, because the line already says "the LLM provider failed".
-// termsafe.Quote still escapes the text, because a classifier in a test can
-// return any error that wraps llm.ErrProvider.
+// llmFailureText returns the reason of a failed request to the provider: the
+// fixed text of llm.Reason. For a status code it is "HTTP <code>", with a
+// fixed hint for some codes: "HTTP 401 (the API key was refused)" for 401 and
+// 403, and "HTTP 302 (redirect refused)" for a 3xx. For another provider
+// error it is the fixed text of that error, for example "network error", and
+// for an unknown error it is "unknown error". The text of llm.ErrProvider at
+// the start is not in it, because the line already says "the LLM provider
+// failed". llm.Reason never uses the text of an unknown error, so the reason
+// never holds the key, the URL or a response body. termsafe.Quote still
+// escapes the text as a second guard.
 func llmFailureText(err error) string {
-	var status *llm.StatusError
-	if !errors.As(err, &status) {
-		return termsafe.Quote(strings.TrimPrefix(err.Error(), llm.ErrProvider.Error()+": "))
-	}
-	switch {
-	case errors.Is(err, llm.ErrAuth):
-		return fmt.Sprintf("HTTP %d (the API key was refused)", status.Code)
-	case status.Code >= 300 && status.Code < 400:
-		return fmt.Sprintf("HTTP %d (redirect refused)", status.Code)
-	default:
-		return fmt.Sprintf("HTTP %d", status.Code)
-	}
+	return termsafe.Quote(llm.Reason(err))
 }

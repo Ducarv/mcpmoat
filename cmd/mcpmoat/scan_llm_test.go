@@ -60,6 +60,15 @@ const (
 	llmWantWorkers = 4   // requests at the same time
 )
 
+// The values of package llm that the tests use. Package llm keeps them
+// unexported, so the tests use their own copy, and a change of them in
+// internal/llm/config.go fails the tests.
+const (
+	llmWantMaxKeyBytes      = 4096                        // the longest key that llm.ValidateKey accepts
+	llmWantAnthropicBaseURL = "https://api.anthropic.com" // the default base URL of anthropic
+	llmWantOpenAIBaseURL    = "https://api.openai.com/v1" // the default base URL of openai
+)
+
 // The fixed texts of an LLM finding in the terminal report.
 const (
 	llmHead001   = "MOAT-LLM-001  " + llm.Title + " [LLM]"
@@ -452,7 +461,7 @@ func TestScanLLMUsageErrors(t *testing.T) {
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
 		{name: "key with an escape", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\x1b[31m"},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
-		{name: "key too long", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + strings.Repeat("k", llm.MaxKeyBytes)},
+		{name: "key too long", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + strings.Repeat("k", llmWantMaxKeyBytes)},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: longer than 4096 bytes", keyName: true},
 		{name: "openai with a bad key", args: []string{"--llm", "--llm-provider", "openai", "--llm-model", "m1", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\t"},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
@@ -692,19 +701,19 @@ func TestScanLLMConfig(t *testing.T) {
 	}{
 		{
 			name:     "defaults",
-			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: llm.DefaultAnthropicBaseURL},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: llmWantAnthropicBaseURL},
 			wantHost: "api.anthropic.com",
 		},
 		{
 			name:     "anthropic with a model",
 			args:     []string{"--llm-provider", "anthropic", "--llm-model", "claude-test-1"},
-			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: "claude-test-1", BaseURL: llm.DefaultAnthropicBaseURL},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: "claude-test-1", BaseURL: llmWantAnthropicBaseURL},
 			wantHost: "api.anthropic.com",
 		},
 		{
 			name:     "openai",
 			args:     []string{"--llm-provider", "openai", "--llm-model", "gpt-test"},
-			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "gpt-test", BaseURL: llm.DefaultOpenAIBaseURL},
+			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "gpt-test", BaseURL: llmWantOpenAIBaseURL},
 			wantHost: "api.openai.com",
 		},
 		{
@@ -2024,25 +2033,44 @@ func TestLLMRuleIDsValid(t *testing.T) {
 	}
 }
 
-// TestLLMRiskSeveritiesValid checks that each risk with a finding gives a
-// severity that internal/rules knows, so the report and --fail-on handle an
-// LLM finding like any other. Package llm must not import internal/rules, so
-// the check sits here, next to TestLLMRuleIDsValid.
-func TestLLMRiskSeveritiesValid(t *testing.T) {
+// TestLLMSeverity checks llmSeverity: each risk with a finding gives the
+// severity of the same name, and that severity is one that internal/rules
+// knows, so the report and --fail-on handle an LLM finding like any other. An
+// LLM finding is never critical. Risk none and a risk that is not valid give
+// no severity. Package llm must not import internal/rules, so the map sits in
+// scan_llm.go and the check sits here, next to TestLLMRuleIDsValid.
+func TestLLMSeverity(t *testing.T) {
 	t.Parallel()
 
-	for _, risk := range []llm.Risk{llm.RiskLow, llm.RiskMedium, llm.RiskHigh} {
-		t.Run(string(risk), func(t *testing.T) {
+	tests := []struct {
+		name   string
+		risk   llm.Risk
+		want   rules.Severity
+		wantOK bool
+	}{
+		{"low", llm.RiskLow, rules.SeverityLow, true},
+		{"medium", llm.RiskMedium, rules.SeverityMedium, true},
+		{"high", llm.RiskHigh, rules.SeverityHigh, true},
+		{"none", llm.RiskNone, "", false},
+		{"empty", llm.Risk(""), "", false},
+		{"critical is not a risk", llm.Risk("critical"), "", false},
+		{"not valid", llm.Risk("risk-canary"), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			severity, ok := risk.Severity()
+			got, ok := llmSeverity(tt.risk)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("llmSeverity(%q) = (%q, %v), want (%q, %v)", tt.risk, got, ok, tt.want, tt.wantOK)
+			}
 			if !ok {
-				t.Fatalf("%q.Severity() ok = false, want true", risk)
+				return
 			}
-			if !rules.Severity(severity).Valid() {
-				t.Errorf("%q.Severity() = %q, which is not a valid rules.Severity", risk, severity)
+			if !got.Valid() {
+				t.Errorf("llmSeverity(%q) = %q, which is not a valid rules.Severity", tt.risk, got)
 			}
-			if rules.Severity(severity) == rules.SeverityCritical {
-				t.Errorf("%q.Severity() = %q, want a severity below critical", risk, severity)
+			if got == rules.SeverityCritical {
+				t.Errorf("llmSeverity(%q) = %q, want a severity below critical", tt.risk, got)
 			}
 		})
 	}

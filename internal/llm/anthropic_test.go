@@ -247,8 +247,8 @@ func checkParseError(t *testing.T, v Verdict, err error, wantBad bool) {
 	case err == nil:
 		t.Fatal("parseResponse() error = nil, want error")
 	case wantBad:
-		if !errors.Is(err, ErrBadResponse) || !errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
-			t.Errorf("parseResponse() error = %v, want ErrBadResponse only", err)
+		if !errors.Is(err, errBadResponse) || !errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
+			t.Errorf("parseResponse() error = %v, want errBadResponse only", err)
 		}
 	default:
 		if !errors.Is(err, ErrInvalidOutput) || errors.Is(err, ErrProvider) {
@@ -271,7 +271,7 @@ func TestAnthropicParseResponseInvalid(t *testing.T) {
 		body    string
 		wantBad bool
 	}{
-		// Not the API envelope: ErrBadResponse.
+		// Not the API envelope: errBadResponse.
 		{name: "empty body", body: "", wantBad: true},
 		{name: "html", body: "<html>" + outputCanary + "</html>", wantBad: true},
 		{name: "array", body: `[` + valid + `]`, wantBad: true},
@@ -368,7 +368,7 @@ func FuzzAnthropicParseResponse(f *testing.F) {
 }
 
 // checkFuzzResult fails unless exactly one of these holds: no error and a
-// valid verdict, or an error that is ErrInvalidOutput or ErrBadResponse.
+// valid verdict, or an error that is ErrInvalidOutput or errBadResponse.
 func checkFuzzResult(t *testing.T, v Verdict, err error) {
 	t.Helper()
 	if err == nil {
@@ -380,7 +380,7 @@ func checkFuzzResult(t *testing.T, v Verdict, err error) {
 	if v != (Verdict{}) {
 		t.Fatalf("parseResponse() verdict = %+v with error %v, want zero", v, err)
 	}
-	if errors.Is(err, ErrInvalidOutput) == errors.Is(err, ErrBadResponse) {
-		t.Fatalf("parseResponse() error = %v, want ErrInvalidOutput or ErrBadResponse", err)
+	if errors.Is(err, ErrInvalidOutput) == errors.Is(err, errBadResponse) {
+		t.Fatalf("parseResponse() error = %v, want ErrInvalidOutput or errBadResponse", err)
 	}
 }

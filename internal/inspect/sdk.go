@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"os"
 	"slices"
 	"strings"
@@ -48,7 +47,7 @@ type SDKOptions struct {
 	// the guard still applies, and a refused address never reaches Dial.
 	// With a proxy, Dial sees the address of the proxy. Dial must connect
 	// to the address that it gets. It has no effect on stdio servers.
-	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+	Dial DialFunc
 }
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It

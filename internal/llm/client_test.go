@@ -307,7 +307,7 @@ func TestClassifyRefusesRedirect(t *testing.T) {
 				if !errors.As(err, &se) || se.Code != code {
 					t.Fatalf("Classify() error = %v, want *StatusError{Code: %d}", err, code)
 				}
-				if !errors.Is(err, ErrProvider) || errors.Is(err, ErrAuth) || errors.Is(err, ErrInvalidOutput) {
+				if !errors.Is(err, ErrProvider) || errors.Is(err, errAuth) || errors.Is(err, ErrInvalidOutput) {
 					t.Errorf("Classify() error = %v, want ErrProvider only", err)
 				}
 				if !strings.Contains(err.Error(), "redirect refused") {
@@ -355,8 +355,8 @@ func TestClassifyStatusErrors(t *testing.T) {
 				if !errors.As(err, &se) || se.Code != tt.code {
 					t.Fatalf("Classify() error = %v, want *StatusError{Code: %d}", err, tt.code)
 				}
-				if got := errors.Is(err, ErrAuth); got != tt.wantAuth {
-					t.Errorf("errors.Is(err, ErrAuth) = %v, want %v", got, tt.wantAuth)
+				if got := errors.Is(err, errAuth); got != tt.wantAuth {
+					t.Errorf("errors.Is(err, errAuth) = %v, want %v", got, tt.wantAuth)
 				}
 				if !errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
 					t.Errorf("Classify() error = %v, want ErrProvider and not ErrInvalidOutput", err)
@@ -383,8 +383,8 @@ func TestStatusError(t *testing.T) {
 		{code: 301, wantText: "LLM provider request failed: HTTP 301 (redirect refused)", wantUnwrap: ErrProvider},
 		{code: 399, wantText: "LLM provider request failed: HTTP 399 (redirect refused)", wantUnwrap: ErrProvider},
 		{code: 400, wantText: "LLM provider request failed: HTTP 400", wantUnwrap: ErrProvider},
-		{code: 401, wantText: "LLM provider request failed: HTTP 401", wantUnwrap: ErrAuth},
-		{code: 403, wantText: "LLM provider request failed: HTTP 403", wantUnwrap: ErrAuth},
+		{code: 401, wantText: "LLM provider request failed: HTTP 401", wantUnwrap: errAuth},
+		{code: 403, wantText: "LLM provider request failed: HTTP 403", wantUnwrap: errAuth},
 		{code: 407, wantText: "LLM provider request failed: HTTP 407", wantUnwrap: ErrProvider},
 		{code: 500, wantText: "LLM provider request failed: HTTP 500", wantUnwrap: ErrProvider},
 	}
@@ -400,6 +400,138 @@ func TestStatusError(t *testing.T) {
 			}
 			if !errors.Is(err, ErrProvider) {
 				t.Error("errors.Is(err, ErrProvider) = false, want true")
+			}
+		})
+	}
+}
+
+func TestReason(t *testing.T) {
+	t.Parallel()
+	// wrap adds caller context, as a caller of Classify can do.
+	wrap := func(err error) error { return fmt.Errorf("x: %w", err) }
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "401", err: &StatusError{Code: 401}, want: "HTTP 401 (the API key was refused)"},
+		{name: "403", err: &StatusError{Code: 403}, want: "HTTP 403 (the API key was refused)"},
+		{name: "wrapped 401", err: wrap(&StatusError{Code: 401}), want: "HTTP 401 (the API key was refused)"},
+		{name: "wrapped 403", err: wrap(&StatusError{Code: 403}), want: "HTTP 403 (the API key was refused)"},
+		{name: "300", err: &StatusError{Code: 300}, want: "HTTP 300 (redirect refused)"},
+		{name: "302", err: &StatusError{Code: 302}, want: "HTTP 302 (redirect refused)"},
+		{name: "399", err: &StatusError{Code: 399}, want: "HTTP 399 (redirect refused)"},
+		{name: "wrapped 302", err: wrap(&StatusError{Code: 302}), want: "HTTP 302 (redirect refused)"},
+		{name: "400", err: &StatusError{Code: 400}, want: "HTTP 400"},
+		{name: "407", err: &StatusError{Code: 407}, want: "HTTP 407"},
+		{name: "503", err: &StatusError{Code: 503}, want: "HTTP 503"},
+		{name: "wrapped 503", err: wrap(&StatusError{Code: 503}), want: "HTTP 503"},
+		{name: "not loopback", err: errNotLoopback, want: "network error: host does not resolve to a loopback address"},
+		{name: "wrapped not loopback", err: wrap(errNotLoopback), want: "network error: host does not resolve to a loopback address"},
+		{name: "timeout", err: errTimeout, want: "network error: timed out after 30s"},
+		{name: "wrapped timeout", err: wrap(errTimeout), want: "network error: timed out after 30s"},
+		{name: "proxy refused", err: errProxyRefused, want: "network error: proxy setting from HTTP_PROXY or HTTPS_PROXY refused"},
+		{name: "wrapped proxy refused", err: wrap(errProxyRefused), want: "network error: proxy setting from HTTP_PROXY or HTTPS_PROXY refused"},
+		{name: "certificate", err: errCertificate, want: "network error: TLS certificate not trusted"},
+		{name: "wrapped certificate", err: wrap(errCertificate), want: "network error: TLS certificate not trusted"},
+		{name: "transport", err: errTransport, want: "network error"},
+		{name: "wrapped transport", err: wrap(errTransport), want: "network error"},
+		{name: "too large", err: errTooLarge, want: "response body larger than 65536 bytes"},
+		{name: "wrapped too large", err: wrap(errTooLarge), want: "response body larger than 65536 bytes"},
+		{name: "bad response", err: errBadResponse, want: "response is not a valid API response"},
+		{name: "wrapped bad response", err: wrap(errBadResponse), want: "response is not a valid API response"},
+		{name: "auth without status", err: errAuth, want: "the API key was refused"},
+		{name: "wrapped auth without status", err: wrap(errAuth), want: "the API key was refused"},
+		{name: "bare ErrProvider", err: ErrProvider, want: "unknown error"},
+		{name: "wrapped ErrProvider", err: wrap(ErrProvider), want: "unknown error"},
+		{name: "unknown wraps ErrProvider", err: fmt.Errorf("%w: %s", ErrProvider, llmBodyCanary), want: "unknown error"},
+		// errProxy alone does not wrap ErrProvider: only errProxyRefused is a
+		// request error.
+		{name: "proxy without transport", err: errProxy, want: "unknown error"},
+		{name: "request too large", err: errRequestTooLarge, want: "unknown error"},
+		{name: "invalid output", err: ErrInvalidOutput, want: "unknown error"},
+		{name: "context canceled", err: context.Canceled, want: "unknown error"},
+		{name: "other error", err: errors.New(llmBodyCanary), want: "unknown error"},
+		{name: "nil", err: nil, want: "unknown error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Reason(tt.err); got != tt.want {
+				t.Errorf("Reason(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReasonTypedNilStatusError checks that Reason does not panic on a nil
+// *StatusError in an error interface.
+func TestReasonTypedNilStatusError(t *testing.T) {
+	t.Parallel()
+	// A typed nil *StatusError, bare or wrapped, must not panic: the
+	// *StatusError methods are nil-safe, and Reason gives "unknown error".
+	for _, err := range []error{(*StatusError)(nil), fmt.Errorf("x: %w", (*StatusError)(nil))} {
+		if got := Reason(err); got != "unknown error" {
+			t.Errorf("Reason(%T) = %q, want %q", err, got, "unknown error")
+		}
+	}
+}
+
+// TestReasonNoLeak checks that Reason never copies the text of the error:
+// a canary in the text of a wrapper or of an unknown error never shows.
+func TestReasonNoLeak(t *testing.T) {
+	t.Parallel()
+	errs := []error{
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 401}),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 302}),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 503}),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, errTimeout),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, errTransport),
+		fmt.Errorf("%w: %s %s", ErrProvider, llmBodyCanary, llmTestKey),
+		errors.New(llmBodyCanary + " " + llmTestKey + " https://api.example.com"),
+		timeoutError{},
+	}
+	for _, err := range errs {
+		got := Reason(err)
+		for _, s := range []string{llmBodyCanary, llmTestKey, "://"} {
+			if strings.Contains(got, s) {
+				t.Errorf("Reason(%q) = %q, holds %q", err, got, s)
+			}
+		}
+	}
+}
+
+// The test hook Config.Dial is a DialFunc, and net.Dialer.DialContext is one.
+var _ DialFunc = Config{}.Dial
+var _ DialFunc = (&net.Dialer{}).DialContext
+
+// TestClassifyDialFuncOrNil checks that a client works with a DialFunc in
+// Config.Dial and with a nil Dial (the production default).
+func TestClassifyDialFuncOrNil(t *testing.T) {
+	t.Parallel()
+	var d net.Dialer
+	tests := []struct {
+		name string
+		dial DialFunc
+	}{
+		{name: "nil", dial: nil},
+		{name: "net.Dialer", dial: d.DialContext},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(ProviderAnthropic, RiskLow, CategoryOther)))
+			c, err := New(Config{Provider: ProviderAnthropic, Model: llmTestModel, BaseURL: srv.URL, APIKey: testSecret(), Dial: tt.dial})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			t.Cleanup(c.CloseIdleConnections)
+			got, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+			if err != nil {
+				t.Fatalf("Classify() error = %v", err)
+			}
+			if want := (Verdict{Risk: RiskLow, Category: CategoryOther}); got != want {
+				t.Errorf("Classify() = %+v, want %+v", got, want)
 			}
 		})
 	}
@@ -450,8 +582,8 @@ func TestClassifyResponseBodyCap(t *testing.T) {
 
 				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
 				if tt.wantTooLarge {
-					if !errors.Is(err, ErrTooLarge) || !errors.Is(err, ErrProvider) {
-						t.Fatalf("Classify() error = %v, want ErrTooLarge", err)
+					if !errors.Is(err, errTooLarge) || !errors.Is(err, ErrProvider) {
+						t.Fatalf("Classify() error = %v, want errTooLarge", err)
 					}
 					assertNoLeak(t, err, srv.URL)
 					return
@@ -469,7 +601,7 @@ func TestClassifyResponseBodyCap(t *testing.T) {
 
 // TestClassifyDeclaredLengthTooLarge checks that a Content-Length above the
 // cap is refused before the body is read: the body here is short, so a read
-// would end in a transport error, not ErrTooLarge.
+// would end in a transport error, not errTooLarge.
 func TestClassifyDeclaredLengthTooLarge(t *testing.T) {
 	t.Parallel()
 	body := anthropicReply(RiskLow, CategoryOther)
@@ -485,8 +617,8 @@ func TestClassifyDeclaredLengthTooLarge(t *testing.T) {
 	})
 	c := newTestClient(t, ProviderAnthropic, srv.URL)
 	_, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
-	if !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("Classify() error = %v, want ErrTooLarge", err)
+	if !errors.Is(err, errTooLarge) {
+		t.Fatalf("Classify() error = %v, want errTooLarge", err)
 	}
 }
 
@@ -708,11 +840,11 @@ func TestClassifyDialFailure(t *testing.T) {
 			}
 
 			_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
-			if !errors.Is(err, ErrTransport) || !errors.Is(err, ErrProvider) {
-				t.Fatalf("Classify() error = %v, want ErrTransport", err)
+			if !errors.Is(err, errTransport) || !errors.Is(err, ErrProvider) {
+				t.Fatalf("Classify() error = %v, want errTransport", err)
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidOutput) {
-				t.Errorf("Classify() error = %v, want only ErrTransport", err)
+				t.Errorf("Classify() error = %v, want only errTransport", err)
 			}
 			if n := dials.Load(); n != 1 {
 				t.Errorf("dials = %d, want 1 (no retry)", n)
@@ -849,7 +981,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   expired,
 			err:      urlErr(context.DeadlineExceeded),
 			wantText: "LLM provider request failed: network error: timed out after 30s",
-			wantIs:   []error{ErrTransport, ErrProvider},
+			wantIs:   []error{errTransport, ErrProvider},
 			wantNot:  []error{context.DeadlineExceeded},
 		},
 		{
@@ -858,7 +990,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   live,
 			err:      urlErr(timeoutError{}),
 			wantText: "LLM provider request failed: network error: timed out after 30s",
-			wantIs:   []error{ErrTransport},
+			wantIs:   []error{errTransport},
 		},
 		{
 			name:     "proxy",
@@ -866,7 +998,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   live,
 			err:      urlErr(errProxy),
 			wantText: "LLM provider request failed: network error: proxy setting from HTTP_PROXY or HTTPS_PROXY refused",
-			wantIs:   []error{ErrTransport, errProxy},
+			wantIs:   []error{errTransport, errProxy},
 		},
 		{
 			name:     "untrusted certificate",
@@ -874,7 +1006,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   live,
 			err:      urlErr(&tls.CertificateVerificationError{Err: errors.New("x509: " + llmBodyCanary)}),
 			wantText: "LLM provider request failed: network error: TLS certificate not trusted",
-			wantIs:   []error{ErrTransport},
+			wantIs:   []error{errTransport},
 		},
 		{
 			name:     "other",
@@ -882,7 +1014,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   live,
 			err:      urlErr(errors.New("dial tcp 127.0.0.1:1: connection refused " + llmBodyCanary)),
 			wantText: "LLM provider request failed: network error",
-			wantIs:   []error{ErrTransport},
+			wantIs:   []error{errTransport},
 		},
 		{
 			name:     "body read error",
@@ -890,7 +1022,7 @@ func TestTransportError(t *testing.T) {
 			reqCtx:   live,
 			err:      io.ErrUnexpectedEOF,
 			wantText: "LLM provider request failed: network error",
-			wantIs:   []error{ErrTransport},
+			wantIs:   []error{errTransport},
 			wantNot:  []error{io.ErrUnexpectedEOF},
 		},
 	}
@@ -968,8 +1100,8 @@ func TestClassifyUntrustedCertificate(t *testing.T) {
 			c := newTestClient(t, p, srv.URL)
 
 			_, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
-			if !errors.Is(err, ErrTransport) {
-				t.Fatalf("Classify() error = %v, want ErrTransport", err)
+			if !errors.Is(err, errTransport) {
+				t.Fatalf("Classify() error = %v, want errTransport", err)
 			}
 			if want := "LLM provider request failed: network error: TLS certificate not trusted"; err.Error() != want {
 				t.Errorf("Classify() error = %q, want %q", err, want)
@@ -1197,8 +1329,8 @@ func TestClassifyHTTPLoopbackOnly(t *testing.T) {
 					if err == nil || err.Error() != wantRefused {
 						t.Fatalf("Classify() = %+v, %v; want error %q", v, err, wantRefused)
 					}
-					if !errors.Is(err, ErrTransport) || !errors.Is(err, ErrProvider) {
-						t.Errorf("Classify() error = %v, want ErrTransport", err)
+					if !errors.Is(err, errTransport) || !errors.Is(err, ErrProvider) {
+						t.Errorf("Classify() error = %v, want errTransport", err)
 					}
 					if len(gotDials) != 0 {
 						t.Errorf("dials = %q, want none", gotDials)
@@ -1251,8 +1383,8 @@ func TestClassifyHTTPSNoLoopbackCheck(t *testing.T) {
 	t.Cleanup(c.CloseIdleConnections)
 
 	_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
-	if !errors.Is(err, ErrTransport) || errors.Is(err, errNotLoopback) {
-		t.Errorf("Classify() error = %v, want ErrTransport and not errNotLoopback", err)
+	if !errors.Is(err, errTransport) || errors.Is(err, errNotLoopback) {
+		t.Errorf("Classify() error = %v, want errTransport and not errNotLoopback", err)
 	}
 	if hosts, _ := r.calls(); len(hosts) != 0 {
 		t.Errorf("lookups = %q, want none", hosts)
@@ -1383,8 +1515,8 @@ func TestLoopbackDialAddrTimeout(t *testing.T) {
 		}
 		t.Cleanup(c.CloseIdleConnections)
 		_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
-		if err == nil || err.Error() != ErrTransport.Error() {
-			t.Fatalf("Classify() error = %v, want %q", err, ErrTransport)
+		if err == nil || err.Error() != errTransport.Error() {
+			t.Fatalf("Classify() error = %v, want %q", err, errTransport)
 		}
 		assertNoLeak(t, err, dialCanary, "::1", "11434", "localhost")
 	})
@@ -1606,8 +1738,8 @@ func TestProxyHelperProcess(t *testing.T) {
 		}
 	case "proxy", "noproxy":
 		_, err := classify("https://api.example.invalid", blocked)
-		if !errors.Is(err, ErrTransport) {
-			t.Errorf("Classify() error = %v, want ErrTransport", err)
+		if !errors.Is(err, errTransport) {
+			t.Errorf("Classify() error = %v, want errTransport", err)
 		}
 		want := []string{"proxy.test:3128"}
 		if mode == "noproxy" {

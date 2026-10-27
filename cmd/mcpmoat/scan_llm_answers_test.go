@@ -97,11 +97,13 @@ func TestScanLLMErrorSorting(t *testing.T) {
 		wantCalls int32
 	}{
 		{
-			name:       "provider error that wraps ErrProvider",
-			tools:      []string{"t1"},
-			replies:    map[string]llmReply{"t1": wrappedProvider},
-			failure:    providerFailure,
-			wantReason: "test: LLM provider request failed",
+			name:    "provider error that wraps ErrProvider",
+			tools:   []string{"t1"},
+			replies: map[string]llmReply{"t1": wrappedProvider},
+			failure: providerFailure,
+			// llm.Reason does not know this error, so the reason is the
+			// fixed "unknown error", never the text of the error.
+			wantReason: "unknown error",
 			wantCount:  "1",
 			wantCode:   exitError,
 			wantMedium: exitError,
@@ -537,10 +539,13 @@ func TestScanLLMInterruptedAfterLastAnswer(t *testing.T) {
 // the answerKind that sortAnswer must give it. A new error class must get its
 // own row here, so its kind is a conscious decision. sortAnswer fails closed:
 // only llm.ErrInvalidOutput gives a MOAT-LLM-002 row, and an error that it
-// does not know stops the step as an internal failure. The unexported local
-// errors of package llm (a request that is too large, a request that cannot
-// be built, a nil client, a refused proxy setting) wrap nothing, so the
-// "unknown error" row covers them.
+// does not know stops the step as an internal failure. The provider errors of
+// package llm (a refused key, a network error, a response that is too large
+// or not valid) are unexported, so the rows use what the client gives: a
+// *llm.StatusError, or an error that wraps llm.ErrProvider. The unexported
+// local errors of package llm (a request that is too large, a request that
+// cannot be built, a nil client, a refused proxy setting) wrap nothing, so
+// the "unknown error" row covers them.
 func TestSortAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -556,14 +561,15 @@ func TestSortAnswer(t *testing.T) {
 		{"context canceled", context.Canceled, answerStopped, false},
 		{"context deadline exceeded", context.DeadlineExceeded, answerStopped, false},
 		{"wrapped context canceled", fmt.Errorf("test: stopped: %w", context.Canceled), answerStopped, false},
-		{"auth", llm.ErrAuth, answerProviderFailed, true},
+		{"auth 403", &llm.StatusError{Code: http.StatusForbidden}, answerProviderFailed, true},
+		{"wrapped auth 401", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusUnauthorized}), answerProviderFailed, true},
 		{"status 401", &llm.StatusError{Code: http.StatusUnauthorized}, answerProviderFailed, true},
 		{"status 429", &llm.StatusError{Code: http.StatusTooManyRequests}, answerProviderFailed, true},
 		{"status 503", &llm.StatusError{Code: http.StatusServiceUnavailable}, answerProviderFailed, true},
 		{"status 307 redirect", &llm.StatusError{Code: http.StatusTemporaryRedirect}, answerProviderFailed, true},
-		{"transport", llm.ErrTransport, answerProviderFailed, true},
-		{"response too large", llm.ErrTooLarge, answerProviderFailed, true},
-		{"bad response", llm.ErrBadResponse, answerProviderFailed, true},
+		{"transport", fmt.Errorf("%w: network error", llm.ErrProvider), answerProviderFailed, true},
+		{"response too large", fmt.Errorf("%w: response body too large", llm.ErrProvider), answerProviderFailed, true},
+		{"bad response", fmt.Errorf("%w: response is not valid", llm.ErrProvider), answerProviderFailed, true},
 		{"provider", llm.ErrProvider, answerProviderFailed, true},
 		{"wrapped provider", fmt.Errorf("test: %w", llm.ErrProvider), answerProviderFailed, true},
 		{"unknown error", errors.New("local-error-canary"), answerInternalFailed, true},
@@ -797,7 +803,10 @@ func TestCloseClassifierNil(t *testing.T) {
 // TestLLMFailureLine checks the start of the stderr line of a failed LLM step:
 // only a provider failure names the provider, and an internal failure has
 // fixed text. A status code gets a fixed hint for 401 and 403 (the key) and
-// for a 3xx (the redirect), and no hint for other codes.
+// for a 3xx (the redirect), and no hint for other codes. Package llm keeps its
+// other provider errors unexported, so a provider error made here is not one
+// that llm.Reason knows: its reason is the fixed "unknown error", never the
+// text of the error.
 func TestLLMFailureLine(t *testing.T) {
 	t.Parallel()
 
@@ -817,7 +826,9 @@ func TestLLMFailureLine(t *testing.T) {
 		{"provider status 302", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusFound}}, "the LLM provider failed (HTTP 302 (redirect refused))"},
 		{"provider status 307", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusTemporaryRedirect}}, "the LLM provider failed (HTTP 307 (redirect refused))"},
 		{"provider status 400", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (HTTP 400)"},
-		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (network error)"},
+		{"provider bare", &llmFailure{kind: answerProviderFailed, err: llm.ErrProvider}, "the LLM provider failed (unknown error)"},
+		{"provider not known", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: network error", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
+		{"provider not known with a canary", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: reason-canary-Q8", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
