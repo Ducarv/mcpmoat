@@ -99,8 +99,8 @@ mcpmoat pin --accept <server> --expect <digest>
 ```
 
 **Ignore a finding.** Use `--ignore` or a `.mcpmoat-ignore` file. A cloned repository can hide findings
-with its own `.mcpmoat-ignore`, so read it first. The file cannot drop pin findings or, from the
-next release, LLM findings. Only `--ignore` can. See [docs/ignore.md](docs/ignore.md).
+with its own `.mcpmoat-ignore`, so read it first. The file cannot drop pin findings, the
+`MOAT-T1-023` budget finding or, from the next release, LLM findings. Only `--ignore` can. See [docs/ignore.md](docs/ignore.md).
 
 ```sh
 mcpmoat scan --ignore MOAT-T4-003

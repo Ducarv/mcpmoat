@@ -371,7 +371,7 @@ func TestUsageContent(t *testing.T) {
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
 		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
 		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
-		"The file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",

@@ -80,28 +80,33 @@ type pinnedServer struct {
 // not write it. If it could ignore a pin finding (MOAT-T2-*), a hostile
 // project could silence the rug-pull alarm for the user's own servers. If it
 // could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002), it could silence
-// the classifier for every server of a user who runs "scan --llm" there. So
-// the file never ignores these rules (see fileCannotIgnore). Only --ignore on
-// the command line does, because the user typed it.
+// the classifier for every server of a user who runs "scan --llm" there. If it
+// could ignore the budget finding (MOAT-T1-023), it could hide that a server
+// used up its rule time budget, so that the tools after the cut look clean.
+// So the file never ignores these rules (see fileCannotIgnore). Only --ignore
+// on the command line does, because the user typed it.
 type scanIgnores struct {
 	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
-	// the findings of the config rules. It does not drop the findings of the
-	// pin rules and of the LLM rules (see ignored).
+	// the findings of the config rules and of the tool rules. It does not drop
+	// the findings of the pin rules, of the LLM rules and of the budget rule
+	// (see ignored).
 	all rules.IgnoreList
 	// flags holds only the --ignore entries. It drops the findings of the pin
-	// rules and of the LLM rules.
+	// rules, of the LLM rules and of the budget rule.
 	flags rules.IgnoreList
 }
 
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
-// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID or llm.RuleIDInvalid.
-// Only --ignore drops the findings of these rules (see scanIgnores).
+// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid or
+// rules.RuleAnalysisBudget. Only --ignore drops the findings of these rules
+// (see scanIgnores).
 func fileCannotIgnore(id string) bool {
-	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid
+	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid || id == rules.RuleAnalysisBudget
 }
 
 // ignored reports whether the user asked to ignore the finding k. For a pin
-// rule or an LLM rule (see fileCannotIgnore) only the --ignore list counts.
+// rule, an LLM rule or the budget rule (see fileCannotIgnore) only the
+// --ignore list counts.
 // The second result is true when the .mcpmoat-ignore file has an entry that
 // matches k but is not applied, so that the caller can warn about it (see
 // warnFileCannotIgnore).
@@ -116,8 +121,8 @@ func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 }
 
 // warnFileCannotIgnore prints the warning that .mcpmoat-ignore has an entry
-// for the rule ruleID that is not applied (see scanIgnores). The pin step and
-// the LLM step print it once for each rule ID.
+// for the rule ruleID that is not applied (see scanIgnores). The pin step, the
+// tool rule step and the LLM step print it once for each rule ID.
 func (c *cli) warnFileCannotIgnore(ruleID string) {
 	c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
 		rules.IgnoreFileName, termsafe.Quote(ruleID))

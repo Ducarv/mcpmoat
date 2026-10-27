@@ -684,13 +684,14 @@ func TestScanToolsInterrupted(t *testing.T) {
 	}
 }
 
-// TestScanToolsBudgetIgnore checks that the ignore list drops a
-// rules.RuleAnalysisBudget row like any other rule row: --ignore and a
-// .mcpmoat-ignore entry for the rule, or for the rule and the server, drop it.
-// The row is about the whole server (its tool is ""), so an entry for one
-// tool of the server does not drop it (see rules.IgnoreList.Ignored). The
-// stderr warning of the used-up budget still prints when the row is dropped:
-// the user must still know that the tools were not fully checked.
+// TestScanToolsBudgetIgnore checks that only --ignore drops a
+// rules.RuleAnalysisBudget row. A .mcpmoat-ignore file can come from a cloned
+// repository, so an entry for the rule, or for the rule and the server, keeps
+// the row and prints the "cannot ignore" warning (see fileCannotIgnore). An
+// entry for one tool of the server, or for another server, does not match the
+// row, so it gives no warning. The stderr warning of the used-up budget still
+// prints when the row is dropped: the user must still know that the tools were
+// not fully checked.
 func TestScanToolsBudgetIgnore(t *testing.T) {
 	t.Parallel()
 
@@ -699,6 +700,8 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 	warning := budgetWarning("srv", budget, 2, 2)
 	ignoredLine := scanPrefix + "1 finding ignored: " + rules.RuleAnalysisBudget + " (1)"
 	budgetFinding := toolFinding{rules.RuleAnalysisBudget, "high", "srv", "", quotedCell(budgetReason(2, 2))}
+	fileWarning := scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + rules.RuleAnalysisBudget +
+		"; use --ignore on the command line"
 
 	tests := []struct {
 		name string
@@ -724,14 +727,23 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 			stderr: []string{warning, ignoredLine, pinnedLine("srv", 2)},
 		},
 		{
-			name:   ".mcpmoat-ignore entry for the rule drops the row",
+			name:   ".mcpmoat-ignore entry for the rule keeps the row",
 			file:   rules.RuleAnalysisBudget + "\n",
-			code:   exitOK,
-			stderr: []string{usingOneEntry, warning, ignoredLine, pinnedLine("srv", 2)},
+			code:   exitFindings,
+			want:   []toolFinding{budgetFinding},
+			stderr: []string{usingOneEntry, warning, fileWarning, pinnedLine("srv", 2)},
 		},
 		{
-			name:   ".mcpmoat-ignore entry for the rule and the server drops the row",
+			name:   ".mcpmoat-ignore entry for the rule and the server keeps the row",
 			file:   rules.RuleAnalysisBudget + " srv\n",
+			code:   exitFindings,
+			want:   []toolFinding{budgetFinding},
+			stderr: []string{usingOneEntry, warning, fileWarning, pinnedLine("srv", 2)},
+		},
+		{
+			name:   "--ignore drops the row also when the file has an entry for it",
+			file:   rules.RuleAnalysisBudget + "\n",
+			flags:  []string{"--ignore", rules.RuleAnalysisBudget},
 			code:   exitOK,
 			stderr: []string{usingOneEntry, warning, ignoredLine, pinnedLine("srv", 2)},
 		},

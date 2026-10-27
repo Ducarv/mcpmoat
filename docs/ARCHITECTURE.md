@@ -162,12 +162,12 @@ offline CI job are the proof.
    `--no-connect` is set.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
    two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool
-   rules (also `MOAT-T1-023`), with the file and the flags, and one for the pin rules and the LLM
-   rules, with the flags only. The file can come
-   from a cloned repository, so it cannot ignore a pin rule or an LLM rule. The guard is
-   `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with
-   `MOAT-T2-`, the unexported `ruleIDPrefix`) and for `llm.RuleID` and `llm.RuleIDInvalid`
-   (`MOAT-LLM-001` and `MOAT-LLM-002`). When a file entry for such a rule matches a finding, `scan`
+   rules, with the file and the flags, and one for the pin rules, the LLM rules and `MOAT-T1-023`, with
+   the flags only. The file can come
+   from a cloned repository, so it cannot ignore a pin rule, an LLM rule or the budget rule. The
+   guard is `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts
+   with `MOAT-T2-`, the unexported `ruleIDPrefix`), for `llm.RuleID` and `llm.RuleIDInvalid`
+   (`MOAT-LLM-001` and `MOAT-LLM-002`) and for `rules.RuleAnalysisBudget` (`MOAT-T1-023`). When a file entry for such a rule matches a finding, `scan`
    keeps the finding, prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells
    the user to use `--ignore`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
@@ -267,7 +267,7 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     The key is cut to 512 runes and then ends with `...` (`toolKey`, `maxToolKeyRunes`), so a long
     tool name cannot fill the report.
     The rule set gives the severity, the title, the risk and the remediation. The ignore list drops
-    rows like the config rows (see step 3).
+    rows like the config rows (see step 3), but the `MOAT-T1-023` row only with `--ignore`.
   - Budget: each server gets its own wall-clock budget of 5 seconds (`toolRulesBudget`), as a
     context deadline. The analyzer checks the context before each regex on each form, and between
     the schema strings and the seams. So it stops at most about one regex on one form after the
