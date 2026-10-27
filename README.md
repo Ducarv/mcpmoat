@@ -98,9 +98,12 @@ accept. See [docs/pins.md](docs/pins.md).
 mcpmoat pin --accept <server> --expect <digest>
 ```
 
-**Ignore a finding.** Use `--ignore` or a `.mcpmoat-ignore` file. A cloned repository can hide findings
-with its own `.mcpmoat-ignore`, so read it first. The file cannot drop pin findings, the
-`MOAT-T1-023` budget finding, the `MOAT-T1-024` cap finding or, from the next release, LLM findings. Only `--ignore` can. See [docs/ignore.md](docs/ignore.md).
+**Ignore a finding.** Use `--ignore`. From the next release, `scan` reads a `.mcpmoat-ignore` file
+in the working directory only with `--use-ignore-file`, because a cloned repository can hide
+findings with its own file. Use the flag only with a file that you trust. The file cannot drop pin
+findings, LLM findings or the findings that the analysis stopped early or that findings were left
+out (`MOAT-T1-023`, `MOAT-T1-024` and `MOAT-T4-005`). Only `--ignore` can. See
+[docs/ignore.md](docs/ignore.md).
 
 ```sh
 mcpmoat scan --ignore MOAT-T4-003

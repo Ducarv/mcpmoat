@@ -161,7 +161,10 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
   Only values that look like a credential are removed, so a phrase that a config puts under a key
   that does not look secret stays in the text, and the model reads it.
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
-- A hostile config that hides the LLM findings or the rule time budget finding: only `--ignore` hides them, not `.mcpmoat-ignore`.
+- A hostile ignore file that hides findings: `scan` reads `.mcpmoat-ignore` only with
+  `--use-ignore-file`, and even then the file cannot hide the LLM findings, the rule time budget
+  finding (`MOAT-T1-023`) or the cap findings (`MOAT-T1-024`, `MOAT-T4-005`). Only `--ignore`
+  hides them (FR-10).
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
   environment or a placeholder, and docs/llm.md advises a key made for `--llm` with a low spend
   limit.
@@ -447,20 +450,42 @@ references:
 - Every threat T1 to T5 has at least one rule or native check.
 - Every rule has at least one `should_match` and one `should_not_match` test case (see NFR-05).
 
-**FR-10: Ignore findings.** Ignore a specific finding via `.mcpmoat-ignore` or `--ignore <id>`.
+**FR-10: Ignore findings.** Ignore a specific finding via `--ignore <id>` or, with the opt-in flag
+`--use-ignore-file`, via `.mcpmoat-ignore`.
 
-- `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat.
-- `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
-  entries scoped to a rule ID, optionally limited to a server and tool.
+- `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat. It works with or
+  without `--use-ignore-file`.
+- `scan` reads `.mcpmoat-ignore` from the working directory only with `--use-ignore-file`, which is
+  off by default. Without the flag, `scan` never opens the file. When the file exists, `scan`
+  prints one note on stderr:
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it`.
+  There is no `--no-ignore-file` flag: the default is already fail-closed, so CI needs no extra
+  flag.
+- Why the file is opt-in: the working directory can be a cloned, untrusted repository or a pull
+  request checkout. When `scan` always read the file, a hostile file could turn exit code 1 into 0
+  (#138, for example a plaintext token in `.mcp.json` plus an entry with its rule ID), hide a
+  poisoned tool (#208) and hide config findings in CI (#172). A user who opts in uses only a file
+  that they trust. In CI, the file is guarded, for example with `CODEOWNERS`.
+- The file supports one entry per line, comments with `#`, and entries scoped to a rule ID,
+  optionally limited to a server and tool.
 - Ignored findings do not affect the exit code and are counted as "ignored" in the summary. With
-  `--json` the count is in the `ignored` object (FR-15).
-- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`), the LLM rules
-  (`MOAT-LLM-001` and `MOAT-LLM-002`), the budget rule (`MOAT-T1-023`) or the cap rule
-  (`MOAT-T1-024`). The file can come from a cloned repository, and it must not silence the rug-pull
-  alarm, the LLM classifier (FR-17), the sign that a server used up its rule time budget or the sign
-  that tool findings were left out for every server of the user. Only `--ignore` on the command line
-  ignores these rules. `scan` keeps the finding and prints a warning when a file entry for such a
-  rule matches a finding.
+  `--json` the count is in the `ignored` object (FR-15). Without `--use-ignore-file`,
+  `ignored.file_entries` is 0.
+- With `--use-ignore-file`, the file can drop the config rule findings and the T1 and T3
+  description and schema rule findings (#208 decision). Five built-in remediations (`MOAT-T1-004`,
+  `MOAT-T1-007`, `MOAT-T1-010`, `MOAT-T1-011` and `MOAT-T1-012`) advise a scoped
+  `RULE server/tool` entry, which `--ignore` cannot express.
+- Also with `--use-ignore-file`, the file cannot ignore the pin rules (`MOAT-T2-001` to
+  `MOAT-T2-004`), the LLM rules (`MOAT-LLM-001` and `MOAT-LLM-002`), `MOAT-T1-023` (the finding
+  that the rule analysis stopped early), `MOAT-T1-024` (the finding that tool findings were left
+  out) or `MOAT-T4-005` (the finding that config findings were left out). The file can come from a
+  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17), the
+  sign that the rule analysis of a server stopped early or the sign that findings were left out.
+  Only `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a
+  warning when a file entry for such a rule matches a finding.
+- So a hostile file cannot silence a poisoned tool without a visible signal. Without the flag, the
+  file drops nothing. With the flag, `--json` shows `ignored.rules` and `ignored.file_entries`, and
+  stderr shows the `using N entries from .mcpmoat-ignore` and `N findings ignored` lines.
 
 ### 6.4 Pins (rug-pull detection)
 
@@ -645,7 +670,8 @@ with `--no-color`).
 - Field names do not change without a schema version bump.
 - The output holds the count of findings that an ignore entry dropped: `ignored` has `total`, the
   count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries read
-  (`file_entries`). It holds rule IDs only, never text of the ignore file.
+  (`file_entries`, 0 without `--use-ignore-file`). It holds rule IDs only, never text of the
+  ignore file.
 - The output holds the data to accept the changes of a pinned server: `accept` has the digest of the
   terminal hint (FR-13) and, only when the hint prints a command, that command.
 - The size of the text fields and of the tool findings is bounded. Names are cut to 512 characters
@@ -654,10 +680,23 @@ with `--no-color`).
   `MOAT-T1-024`: the 1000 most severe are listed, and the rest is counted, not listed. Its severity is the highest severity among the
   applied rules and never lower than high. The scan stays complete, and the exit code follows
   `--fail-on`.
-- The whole document is not bounded. The config findings, the pin findings and the LLM findings are
-  not part of the cap of 1000, and the number of servers multiplies the bound. The number of config
-  findings is limited only by the size of the config file.
-  A cap for them is planned as a follow-up (issue #213).
+- The config findings (`MOAT-T4-*` and `MOAT-T5-*`) are capped at 100 for each server and 10,000
+  for the whole scan, counted after the ignore list (#213). Each cut keeps the most severe
+  findings: severity first, then servers from a user file before servers from a project file, then
+  server order, then finding order, and an unknown severity counts as critical. A server that lost findings gets one summary finding, `MOAT-T4-005`
+  (`N more config findings are not listed; limit M`). It is high, or higher when a finding that it
+  left out is higher. It does not count toward the caps, so a scan has at most 10,000 config
+  findings plus one `MOAT-T4-005` finding for each cut server. Only `--ignore` drops it (FR-10).
+  The scan stays complete, and the exit code follows `--fail-on`. The caps bound the rows and the
+  output, not the memory that `scan` uses before the cut.
+- The pin findings and the LLM findings are not part of these caps. The number of tools (at most
+  10,000 for each server) and the LLM tool cap bound them, and the number of servers multiplies
+  that bound.
+- `complete` stays `true` when the rule analysis stops at its time limit (#210, owner decision).
+  The `MOAT-T1-023` finding of each server that was cut or not analysed marks the incomplete rule
+  analysis. `complete` `false` would force exit 2, so hostile input could turn a finding into an
+  execution error, against the meaning of FR-16. There is no schema change and no new field. A CI
+  consumer checks the findings for `MOAT-T1-023`, not only `complete`.
 
 **FR-16: Exit codes.** 0 no findings, 1 findings at or above `--fail-on` (default `high`),
 2 execution error.
@@ -732,7 +771,7 @@ the machine**.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (since schema version 2). They only add to the rule findings and never remove or
   change them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does
-  not (FR-10).
+  not, also with `--use-ignore-file` (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
 - An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
@@ -800,6 +839,10 @@ on macOS always link the system libraries dynamically.
 for servers to start. Analysis itself under 1 s.
 
 - Benchmark: rule analysis of 10 servers with 20 tools each runs in under 1 s.
+- A hostile server or `--rules` folder cannot stretch the rule analysis without limit: the step
+  has a 30 s limit for all servers (at most 5 s for each), plus one regex and one form build that
+  cannot stop at the deadline (#210). A server that it cuts or does not reach in time gets
+  `MOAT-T1-023`. A share under 1 ms counts as not reached, for that server and the ones after it.
 - Integration: scanning 10 fixture servers concurrently finishes in under 15 s.
 
 **NFR-04: Project's own security.** stdio servers run without inheriting extra secrets and with

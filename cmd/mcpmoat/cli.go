@@ -88,6 +88,16 @@ type cli struct {
 	// runWithContext does not set it. Tests set a small value, so that they
 	// do not need a thousand findings. Use the maxToolRowsOrDefault method.
 	maxToolRows int
+	// maxConfigRows is the largest number of config finding rows that scan
+	// keeps for one server. Zero means the default (configRowsPerServer), so runWithContext
+	// does not set it. Tests set a small value, so that they do not need a
+	// hundred findings. The cap for the whole scan is fixed and has no hook.
+	maxConfigRows int
+	// toolStepBudget is the time limit of the whole tool rule step of scan,
+	// for all servers together. Zero means the default
+	// (toolRulesStepBudget), so runWithContext does not set it. toolBudget is the limit for one server
+	// inside this step. Tests set a short value to reach the limit.
+	toolStepBudget time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -294,8 +304,11 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  \tstdout is empty when the scan stops before the report (exit 2)\n")
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
-	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  --%s\tAlso ignore the findings that the %s file in the working directory lists. Off by default\n", flagUseIgnoreFile, rules.IgnoreFileName)
+	fprintf(tw, "  \tOne \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n")
+	fprintf(tw, "  \tWithout this flag scan does not read the file. When the file exists, scan prints a note on stderr\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding that config findings were left out (MOAT-T4-005), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tUse this flag only with a file that you trust. In CI, guard the file, for example with CODEOWNERS\n")
 	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
 	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
 	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
@@ -326,10 +339,17 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n")
 	fprintf(w, "  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n")
-	fprintf(w, "  The rule analysis of each server has a time budget of %s. A server that uses it up is a finding (MOAT-T1-023):\n", toolRulesBudget)
+	fprintf(w, "  The rule analysis has a time limit of %s for all servers. Each server gets a fair share of the time left,\n", toolRulesStepBudget)
+	fprintf(w, "  up to a time budget of %s. A server that uses it up, or that scan reaches after the limit, is a finding (MOAT-T1-023):\n", toolRulesBudget)
 	fprintf(w, "  high, or critical when a description or schema rule from --rules is critical.\n")
+	fprintf(w, "  The part of an analysis that cannot be stopped at its deadline (one regex and one text conversion) also uses\n")
+	fprintf(w, "  the limit for all servers. So servers early in the order can use up the time of later servers.\n")
+	fprintf(w, "  Those later servers get MOAT-T1-023 too, never a silent pass.\n")
 	fprintf(w, "  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer)
 	fprintf(w, "  at least high.\n")
+	fprintf(w, "  scan lists at most %d config findings for each server and %d for the whole scan. A server that loses\n", configRowsPerServer, configRowsTotal)
+	fprintf(w, "  config findings to a limit gets a finding (MOAT-T4-005), at least high. The limits do not count this finding.\n")
+	fprintf(w, "  scan keeps the most severe config findings across the whole scan, not the findings of the first servers.\n")
 	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")

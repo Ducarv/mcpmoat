@@ -3,6 +3,8 @@
 Run `mcpmoat scan --no-connect` on the MCP config of a repository, so that a dangerous change to
 `.mcp.json` fails a pull request or a commit. With `--no-connect`, mcpmoat checks the config only.
 It starts no server, opens no connection and reads no `pins.json`, so the job needs no saved state.
+It also does not read `.mcpmoat-ignore` unless you add `--use-ignore-file`, so a pull request cannot
+hide a finding with that file (see [Security notes](#security-notes)).
 
 The examples scan a Claude Code project config, `.mcp.json`, in the root of the repository. The
 GitHub Actions workflow also scans a Cursor project config, `.cursor/mcp.json`. For another file,
@@ -63,8 +65,9 @@ jobs:
 
 `setup-go` adds `$(go env GOPATH)/bin` to `PATH`, so the `mcpmoat` command works in the next step.
 The `paths` filter runs the job only when a pull request changes `.mcp.json`, `.cursor/mcp.json`
-or `.mcpmoat-ignore`. If you make the job a required check, remove the filter: GitHub keeps a
-required check that did not run in the pending state.
+or `.mcpmoat-ignore`. The job reads `.mcpmoat-ignore` only when you add `--use-ignore-file` to
+`mcpmoat scan`. If you make the job a required check, remove the filter: GitHub keeps a required
+check that did not run in the pending state.
 
 `--config` reads a file in a folder named `.cursor` as a Cursor config, and the repository root
 is its project.
@@ -185,11 +188,14 @@ known.
 - Keep `--no-connect` in CI. `scan` reads the `--config` file as an untrusted project file, and the
   file comes from the pull request. With `--no-connect`, no server process starts from that
   content.
-- A pull request can add or change `.mcpmoat-ignore` to hide config findings and turn exit code 1
-  into 0. It can also edit the workflow file: with `pull_request`, the run uses the workflow of the
-  pull request, so it can add `--fail-on critical` or `|| true`. Review changes to these files
-  like code, and let GitHub enforce it. Add a `CODEOWNERS` entry for them, turn on "Require review
-  from Code Owners" in the branch protection rule, and make the job a required check:
+- `scan` does not read `.mcpmoat-ignore` by default. So a pull request cannot add or change that
+  file to hide findings and turn exit code 1 into 0. If you add `--use-ignore-file` to the job, the
+  file applies, and a pull request can change it. Use the flag only with a file that you guard. A
+  pull request can also edit the workflow file: with `pull_request`, the run uses the workflow of
+  the pull request, so it can add `--fail-on critical`, `--use-ignore-file` or `|| true`. Review
+  changes to these files like code, and let GitHub enforce it. Add a `CODEOWNERS` entry for them,
+  turn on "Require review from Code Owners" in the branch protection rule, and make the job a
+  required check:
 
   ```text
   # .github/CODEOWNERS
@@ -204,12 +210,16 @@ known.
   that always passes. When you add the required check `mcpmoat-scan`, choose GitHub Actions as its
   source, so that another app cannot report a check with the same name.
 
-- When `.mcpmoat-ignore` gives entries, `scan` prints `mcpmoat scan: using N entries from
-  .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for this line in the job log.
+- Without `--use-ignore-file`, `scan` prints
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it` on stderr
+  when the file is there. With the flag, when the file gives entries, `scan` prints
+  `mcpmoat scan: using N entries from .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for
+  these lines in the job log.
 - The plain git hook scans the file in the working tree, not the staged version. If you stage only
   a part of your changes, the hook can check other text than the commit holds. The pre-commit
   framework hides the changes that are not staged while the hooks run, so it checks the staged
-  version. Untracked files still apply, such as a local `.mcpmoat-ignore` that you did not stage.
+  version. Untracked files still apply. For example, when you add `--use-ignore-file` to the hook, a
+  local `.mcpmoat-ignore` that you did not stage still applies.
 
 ## Try it
 

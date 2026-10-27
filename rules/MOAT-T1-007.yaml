@@ -7,7 +7,7 @@ match:
   params:
     max_runes: 4096
 risk: A very long description can hide instructions that a person does not read to the end.
-remediation: Read the full tool description and check what it asks the model to do. If the length is normal for this tool, ignore this rule for that tool only. Add the line MOAT-T1-007 server/tool to .mcpmoat-ignore, using the exact server and tool names. Do not use --ignore, because it hides the rule on every server.
+remediation: Read the full tool description and check what it asks the model to do. If the length is normal for this tool, ignore this rule for that tool only. Add the line MOAT-T1-007 server/tool to .mcpmoat-ignore, using the exact server and tool names, and run scan with --use-ignore-file. Do not use --ignore, because it hides the rule on every server.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://owasp.org/www-project-mcp-top-10/
