@@ -77,8 +77,11 @@ const lockSuffix = ".lock"
 // pins lock file <path>: permission denied" in a read-only pins directory
 // (mode 0500) that has no lock file yet. Such an error does not wrap
 // ErrLocked: no other process holds the lock. A read-only pins directory with
-// an existing lock file needs no create, so the lock works there. The errors
-// have no "read <path>" prefix: the caller adds it (prefixUnlessRefusal).
+// an existing lock file needs no create, so the lock works there. When the
+// user owns the lock file with no group or other access but may not open it
+// (mode 0400 or 0000), the error also gives the fix hint: remove the file.
+// The errors have no "read <path>" prefix: the caller adds it
+// (prefixUnlessRefusal).
 func openLockFile(root *os.Root, path string) (*os.File, error) {
 	lockPath := path + lockSuffix
 	name := filepath.Base(lockPath)
@@ -94,6 +97,14 @@ func openLockFile(root *os.Root, path string) (*os.File, error) {
 		if info, lerr := root.Lstat(name); lerr == nil {
 			if checkErr := checkLockFile(lockPath, info, os.Geteuid()); checkErr != nil {
 				return nil, checkErr
+			}
+			// The entry passed the check: the user owns a regular file with
+			// no group or other access, and still cannot open it, for
+			// example mode 0400 or 0000 after a run was killed between the
+			// create and the chmod. That does not clear by itself, and
+			// removing the file is the only fix.
+			if errors.Is(err, fs.ErrPermission) && info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%w (fix: %s)", err, lockRemoveFix(lockPath, info))
 			}
 		}
 		return nil, err
@@ -157,8 +168,10 @@ func openOrCreate(open openFileFunc, lockPath, name string) (f *os.File, created
 		// This open can fail with "permission denied" for a moment: another
 		// run created the file with a very narrow umask (for example 0o777
 		// gives mode 0000) and has not set mode 0o600 yet. Then this run
-		// fails with exit code 2, and a second run works. That is rare, so
-		// there is no wait and no retry for it.
+		// fails with exit code 2, and a second run works. When that other
+		// run dies before the chmod, the mode stays, and openLockFile adds
+		// the fix hint to the error. That is rare, so there is no wait and
+		// no retry for it.
 		f, err = open(name, lockOpenFlags, 0)
 		switch {
 		case err == nil:
@@ -177,6 +190,17 @@ func openOrCreate(open openFileFunc, lockPath, name string) (f *os.File, created
 // ("open" or "create"), for the lock file lockPath.
 func lockOpenError(step, lockPath string, err error) error {
 	return fmt.Errorf("%s the pins lock file %s: %w", step, lockPath, pathErrCause(err))
+}
+
+// lockSwappedError is the error of openLockFile when the open lock file at
+// lockPath is not the directory entry itself: a symlink, or a file that was
+// swapped after the open. It wraps ErrInsecurePermissions. entry is the Lstat
+// result of the directory entry, or nil when the entry is gone. The fix hint
+// is the one of checkLockFile (lockRemoveFix): remove the entry, and the next
+// run makes a new lock file.
+func lockSwappedError(lockPath string, entry fs.FileInfo) error {
+	return fmt.Errorf("%s %s is not safe: it is a symlink or was swapped while it was opened (fix: %s): %w",
+		labelLock, lockPath, lockRemoveFix(lockPath, entry), ErrInsecurePermissions)
 }
 
 // checkOpenLockFile checks f, the open lock file name in root (see

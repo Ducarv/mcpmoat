@@ -19,15 +19,12 @@ import (
 // Unix file because the open of a FIFO can block only on Unix.
 const lockOpenFlags = os.O_RDWR | syscall.O_NONBLOCK
 
-// lockSwappedError is the error of openLockFile when the open lock file at
-// lockPath is not the directory entry itself: a symlink, or a file that was
-// swapped after the open. It wraps ErrInsecurePermissions. entry is the Lstat
-// result of the directory entry, or nil when the entry is gone. The fix hint
-// is the one of checkLockFile (lockFileFix): remove the entry, and the next
-// run makes a new lock file.
-func lockSwappedError(lockPath string, entry fs.FileInfo) error {
-	return fmt.Errorf("pins %s %s is not safe: it is a symlink or was swapped while it was opened (fix: %s): %w",
-		kindLock, lockPath, lockFileFix(lockPath, entry), ErrInsecurePermissions)
+// lockRemoveFix is the fix hint for a pins lock file at lockPath that mcpmoat
+// refuses or cannot open: remove the entry, and the next run makes a new lock
+// file (lockFileFix). entry is the Lstat result of the directory entry, or
+// nil when it is not known.
+func lockRemoveFix(lockPath string, entry fs.FileInfo) string {
+	return lockFileFix(lockPath, entry)
 }
 
 // tryLock tries to take an exclusive advisory lock on the open file f

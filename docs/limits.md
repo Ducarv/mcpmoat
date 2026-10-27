@@ -123,8 +123,10 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
   The project servers may use at most 16 MiB of it together, so a hostile project config cannot
   fill the whole file. But all projects share these 16 MiB, so one hostile project config can use
-  them up, and the servers of other projects are then not pinned. A server that does not fit is
-  reported and not pinned (see **Full pins file** in [Pins and rug pulls](pins.md)).
+  them up, and the servers of other projects are then not pinned. The `projects.<path>` servers of
+  your own `~/.claude.json` count as project servers too, so they are not pinned either. A server
+  that does not fit is reported and not pinned (see **Full pins file** in [Pins and rug
+  pulls](pins.md)).
 - For the detail, see [Pins and rug pulls](pins.md) and [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 

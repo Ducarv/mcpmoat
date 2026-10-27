@@ -2,7 +2,6 @@ package pins
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -45,7 +44,7 @@ type atomicWriter struct {
 }
 
 // writeFile writes data to the file name in root, through a temp file in the
-// same directory. root is the open pins directory, and dir is a handle of the
+// same directory. root is the open pins directory, and d is a handle of the
 // same directory (root.Open(".")), used only to sync the directory entry.
 // name is a base name, for example "pins.json".
 //
@@ -56,7 +55,7 @@ type atomicWriter struct {
 // LoadLocked locked; the directory itself is not locked).
 //
 // The steps are:
-//   - Create a temp file with a random name (.pins-<16 hex chars>.tmp) and
+//   - Create a temp file with a random name (.pins-<26 base32 chars>.tmp) and
 //     O_EXCL, so two mcpmoat processes never write to the same temp file and
 //     an existing file or symlink with that name is never followed.
 //   - Write the data, set mode 0o600 on the open file, sync and close it.
@@ -64,7 +63,7 @@ type atomicWriter struct {
 //     of root. When it does not, the write stops and the old file stays.
 //   - Rename the temp file to name. The temp file is in the same directory,
 //     so the rename stays on one file system and is atomic.
-//   - Sync dir, so the rename survives a power loss (best effort).
+//   - Sync d, so the rename survives a power loss (best effort).
 //
 // When an error happens before the rename succeeds, the temp file is removed
 // and the old file is not touched. writeFile does not create the directory and
@@ -74,7 +73,7 @@ type atomicWriter struct {
 // created, writeFile also calls verifyDir and returns its error, if any: a
 // directory that was removed fails at the create already. The other errors
 // name the step that failed, not the path: the caller adds it.
-func (w atomicWriter) writeFile(root *os.Root, dir *os.File, name string, data []byte, verifyDir func() error) (err error) {
+func (w atomicWriter) writeFile(root *os.Root, d *os.File, name string, data []byte, verifyDir func() error) (err error) {
 	f, tmp, err := createTemp(root)
 	if err != nil {
 		// A removed directory cannot hold a new file, so the create fails with
@@ -140,19 +139,19 @@ func (w atomicWriter) writeFile(root *os.Root, dir *os.File, name string, data [
 	// platforms (Windows) and file systems cannot sync a directory, and a
 	// failed directory sync must not report a failed save. So the error is
 	// ignored.
-	_ = dir.Sync()
+	_ = d.Sync()
 	return nil
 }
 
 // createTemp creates a new temp file in root for writing, with mode 0o600, and
-// returns it with its name. The name is ".pins-" plus 16 hex characters from
-// crypto/rand, plus ".tmp". O_EXCL makes the create fail when the name exists,
+// returns it with its name. The name is ".pins-" plus 26 base32 characters from
+// crypto/rand.Text, plus ".tmp". O_EXCL makes the create fail when the name exists,
 // also as a symlink, so the file is always new. On such a collision createTemp
 // tries again with a new name, up to tempAttempts times.
 func createTemp(root *os.Root) (*os.File, string, error) {
 	var err error
 	for range tempAttempts {
-		name := ".pins-" + randomHex() + ".tmp"
+		name := ".pins-" + rand.Text() + ".tmp"
 		var f *os.File
 		f, err = root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
 		if err == nil {
@@ -163,13 +162,4 @@ func createTemp(root *os.Root) (*os.File, string, error) {
 		}
 	}
 	return nil, "", err
-}
-
-// randomHex returns 16 hex characters from 8 random bytes.
-func randomHex() string {
-	b := make([]byte, 8)
-	// crypto/rand.Read never returns an error (since Go 1.24 it stops the
-	// program instead), so the error is ignored.
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

@@ -56,7 +56,7 @@ func wantPerm(t *testing.T, path string, want os.FileMode) {
 }
 
 // tempNameRE is the name of a temp file of writeFile.
-var tempNameRE = regexp.MustCompile(`^\.pins-[0-9a-f]{16}\.tmp$`)
+var tempNameRE = regexp.MustCompile(`^\.pins-[A-Z2-7]{26}\.tmp$`)
 
 // openDir opens dir as an os.Root and a handle of the directory itself, as
 // openPinsDir does, and closes both at the end of the test.

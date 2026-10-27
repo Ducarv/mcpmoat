@@ -241,13 +241,13 @@ func checkLockFile(path string, info fs.FileInfo, uid int) error {
 
 	mode := info.Mode()
 	if !mode.IsRegular() {
-		return fmt.Errorf("pins %s %s is not safe: %s (fix: %s): %w",
-			kindLock, path, problemLockNotRegular, fix, ErrInsecurePermissions)
+		return fmt.Errorf("%s %s is not safe: %s (fix: %s): %w",
+			labelLock, path, problemLockNotRegular, fix, ErrInsecurePermissions)
 	}
 
 	owner, ok := ownerUID(info)
 	if !ok {
-		return fmt.Errorf("pins %s %s is not safe: its owner is unknown: %w", kindLock, path, ErrInsecurePermissions)
+		return fmt.Errorf("%s %s is not safe: its owner is unknown: %w", labelLock, path, ErrInsecurePermissions)
 	}
 
 	foreignOwner := owner != uid
@@ -265,8 +265,8 @@ func checkLockFile(path string, info fs.FileInfo, uid int) error {
 	default:
 		return nil
 	}
-	return fmt.Errorf("pins %s %s is not safe: mode %04o, %s (fix: %s): %w",
-		kindLock, path, perm, problem, fix, ErrInsecurePermissions)
+	return fmt.Errorf("%s %s is not safe: mode %04o, %s (fix: %s): %w",
+		labelLock, path, perm, problem, fix, ErrInsecurePermissions)
 }
 
 // lockFileFix returns the fix hint of a refused pins lock file at path, with

@@ -114,8 +114,12 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
   passes, 0644 is refused), or on macOS an ACL entry lets a user or group open it. mcpmoat never
   changes the mode of an existing lock file. The fix is `rm -- '<path>', then mcpmoat makes a new
   one with mode 0600` (`rmdir -- '<path>', ...` when the lock entry is a directory). For an ACL
-  entry that comes back after that, the entry is inherited from the pins directory. `scan` takes the
-  lock only when it has new servers to pin.
+  entry that comes back after that, the entry is inherited from the pins directory, and the hint
+  also gives `chmod -N -- '<directory>'`. `scan` takes the lock only when it has new servers to pin.
+- You own the lock file and it has no group or other access, but you cannot open it (mode 0400 or
+  0000, for example after a run was killed while it made the file). The error is `open the pins
+  lock file <path>: permission denied (fix: rm -- '<path>', then mcpmoat makes a new one with mode
+  0600)`.
 - The pins directory is read-only and has no lock file yet, so mcpmoat cannot create
   `pins.json.lock`. The error names the lock file and the reason, for example `create the pins
   lock file <path>: permission denied`. A read-only pins directory with a lock file gets past the

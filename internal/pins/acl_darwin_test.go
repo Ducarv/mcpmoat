@@ -645,17 +645,19 @@ func TestCheckLockFileACL(t *testing.T) {
 }
 
 // aclWantLockRefused fails the test unless err is the ACL refusal of the lock
-// file path, with the rm hint (lockFileFix) and never chmod.
+// file path, with the rm hint (lockFileFix). It never says chmod for the lock
+// file itself; the only chmod is the chmod -N of the pins directory.
 func aclWantLockRefused(t *testing.T, err error, path string) {
 	t.Helper()
 	wantInsecure(t, err, path)
 	want := "pins lock file " + path + " is not safe: its ACL entry 0 lets a user or group open it (fix: rm -- " +
 		shellQuote(path) + ", then mcpmoat makes a new one with mode 0600; " +
-		"if the entry comes back, it is inherited from the pins directory): insecure permissions"
+		"if the entry comes back, it is inherited from the pins directory, so also run chmod -N -- " +
+		shellQuote(filepath.Dir(path)) + "): insecure permissions"
 	if err.Error() != want {
 		t.Errorf("error = %q\nwant    %q", err, want)
 	}
-	if strings.Contains(err.Error(), "chmod") {
-		t.Errorf("error = %q, the fix must be rm, never chmod", err)
+	if strings.Contains(err.Error(), "chmod -- ") || strings.Contains(err.Error(), "chmod 0") {
+		t.Errorf("error = %q, the fix for the lock file must be rm, never chmod", err)
 	}
 }

@@ -14,14 +14,13 @@ import (
 // version for the reasons.
 const lockOpenFlags = os.O_RDWR
 
-// lockSwappedError is the error of openLockFile when the open lock file at
-// lockPath is not the directory entry itself: a symlink, or a file that was
-// swapped after the open. It wraps ErrInsecurePermissions. It quotes the path
-// with %q, because shellQuote (a POSIX shell quote) and lockFileFix exist only
-// on Unix, so it does not use the entry (see the Unix version).
-func lockSwappedError(lockPath string, _ fs.FileInfo) error {
-	return fmt.Errorf("pins %s %s is not safe: it is a symlink or was swapped while it was opened (fix: remove %q, then mcpmoat makes a new one): %w",
-		kindLock, lockPath, lockPath, ErrInsecurePermissions)
+// lockRemoveFix is the fix hint for a pins lock file at lockPath that mcpmoat
+// refuses or cannot open: remove the entry, and the next run makes a new lock
+// file. It quotes the path with %q, because shellQuote (a POSIX shell quote)
+// and lockFileFix exist only on Unix, so it does not use the entry (see the
+// Unix version).
+func lockRemoveFix(lockPath string, _ fs.FileInfo) string {
+	return fmt.Sprintf("remove %q, then mcpmoat makes a new one", lockPath)
 }
 
 // tryLock never takes a lock on systems that are not Unix. It always returns

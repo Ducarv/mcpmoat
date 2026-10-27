@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 )
@@ -229,7 +230,8 @@ func checkParentACL(path string, info fs.FileInfo, uid int) error {
 // The fix hint is rm, not chmod (see lockFileFix): mcpmoat makes a new lock
 // file with mode 0o600, and a chmod does not close a descriptor that another
 // user already has open. When the new file gets the entry again, the entry is
-// inherited from the pins directory.
+// inherited from the pins directory, so the hint also names the chmod -N of
+// that directory (the same fix as checkACL gives for a directory ACL).
 func checkLockFileACL(path string, f *os.File) error {
 	filesec, err := readFilesec(f)
 	if err != nil {
@@ -244,8 +246,8 @@ func checkLockFileACL(path string, f *os.File) error {
 	}
 	// The lock file is a regular file here (checkLockFile ran first), so the
 	// hint is rm (lockFileFix with no file info).
-	return fmt.Errorf("pins %s %s is not safe: its ACL entry %d lets a user or group open it (fix: %s; if the entry comes back, it is inherited from the pins directory): %w",
-		kindLock, path, index, lockFileFix(path, nil), ErrInsecurePermissions)
+	return fmt.Errorf("%s %s is not safe: its ACL entry %d lets a user or group open it (fix: %s; if the entry comes back, it is inherited from the pins directory, so also run chmod -N -- %s): %w",
+		labelLock, path, index, lockFileFix(path, nil), shellQuote(filepath.Dir(path)), ErrInsecurePermissions)
 }
 
 // readFilesec returns the struct kauth_filesec of the open file f, as

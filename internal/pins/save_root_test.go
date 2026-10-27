@@ -337,6 +337,9 @@ func TestSaveAfterRelease(t *testing.T) {
 			if prefix := "save " + path + ": "; err == nil || !strings.HasPrefix(err.Error(), prefix) {
 				t.Errorf("Save() error = %v, want the prefix %q", err, prefix)
 			}
+			if want := "the store was released"; err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("Save() error = %v, want it to contain %q, not a permission hint", err, want)
+			}
 			if got := readFile(t, path); string(got) != validPins {
 				t.Errorf("pins.json = %q, want the old content", got)
 			}

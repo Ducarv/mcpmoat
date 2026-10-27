@@ -267,6 +267,52 @@ func TestLoadLockedReadOnlyDir(t *testing.T) {
 	})
 }
 
+// TestLoadLockedUnopenableLockFile checks the error for a lock file that the
+// user owns with no group or other access but cannot open, for example from a
+// run that was killed between the create and the chmod. The error is not a
+// refusal (no ErrInsecurePermissions), and it gives the rm hint, because
+// removing the file is the only fix.
+func TestLoadLockedUnopenableLockFile(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a file with mode 0000")
+	}
+	for _, mode := range []os.FileMode{0o400, 0o000} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+			path := storeTestPath(t)
+			storeTestMustSave(t, storeTestMustLoad(t, path))
+			lockPath := path + ".lock"
+			if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(lockPath, mode); err != nil {
+				t.Fatal(err)
+			}
+
+			s, release, err := pins.LoadLocked(t.Context(), path, 0)
+			if release == nil {
+				t.Fatal("LoadLocked() release = nil, want a function")
+			}
+			release()
+			if s != nil {
+				t.Errorf("LoadLocked() store = %v, want nil", s)
+			}
+			if !errors.Is(err, fs.ErrPermission) {
+				t.Fatalf("LoadLocked() error = %v, want errors.Is fs.ErrPermission", err)
+			}
+			if errors.Is(err, pins.ErrInsecurePermissions) || errors.Is(err, pins.ErrLocked) {
+				t.Errorf("LoadLocked() error = %v, must not wrap ErrInsecurePermissions or ErrLocked", err)
+			}
+			for _, want := range []string{"open the pins lock file " + lockPath + ": ", "(fix: rm -- '" + lockPath + "'"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("LoadLocked() error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestLoadLockedReleaseNoLeak locks and releases one directory many times.
 // Each LoadLocked with no wait must get the lock, so release really frees it,
 // and the open file descriptors must not grow.

@@ -167,11 +167,12 @@ func checkParents(dir string) error {
 // closed. The limit also ends a loop such as a -> b -> a.
 const maxSymlinks = 40
 
-// Labels of a path in the errors of checkParentsAs: "pins directory" and
-// "pins parent directory".
+// Labels of a path in the permission errors: "pins directory", "pins parent
+// directory" and "pins lock file".
 const (
 	labelDir    = "pins " + kindDir
 	labelParent = "pins " + kindParent
+	labelLock   = "pins " + kindLock
 )
 
 // checkParentsAs is checkParents for the user uid. uid is a parameter, so a
@@ -226,8 +227,8 @@ const (
 // where Save creates the pins directory, are already checked. It also stops
 // at a component that is not a directory or a symlink: then the pins
 // directory cannot exist, and checkFirstRun reports the problem (in Load,
-// and in ensurePinsDir for LoadLocked and Save). On macOS /var and /tmp are symlinks that root owns, with
-// targets in /private, so they pass.
+// and in ensurePinsDir for LoadLocked and Save). On macOS /var and /tmp are
+// symlinks that root owns, with targets in /private, so they pass.
 //
 // The error names the path where the entry really is, after the symlinks
 // before it are resolved: for example /private/var/... and not /var/... on

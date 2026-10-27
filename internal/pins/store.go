@@ -72,7 +72,10 @@ const maxServerSize = 2 << 20
 // scope (an empty ProjectPath) always have the other half of the file.
 //
 // The share does not protect one project from another: all project servers
-// together share the 16 MiB. The servers of the user scope may use the whole
+// together share the 16 MiB. The servers of the projects.<path> key of
+// ~/.claude.json have a ProjectPath too, so they count toward the share
+// although the user wrote them: the store knows only the ProjectPath, not
+// whether the config is trusted. The servers of the user scope may use the whole
 // file, so they can still fill it.
 const projectShare = MaxFileSize / 2
 
@@ -1426,6 +1429,9 @@ func (s *Store) saveWith(w atomicWriter) error {
 	// the write) fails with an error.
 	if s.root != nil {
 		if err := checkDirHandle(filepath.Dir(s.path), s.dir); err != nil {
+			if errors.Is(err, os.ErrClosed) {
+				return fmt.Errorf("save %s: the store was released (Save ran after the release function of LoadLocked): %w", s.path, os.ErrClosed)
+			}
 			// A refusal names the unsafe path itself, so it gets no "save
 			// <path>" prefix (the same rule as in Load).
 			return prefixUnlessRefusal("save", s.path, err)
