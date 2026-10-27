@@ -67,14 +67,15 @@ func lockErrno(errno syscall.Errno) (acquired bool, err error) {
 }
 
 // unlock releases the lock that tryLock took on f. It is safe to call when f
-// holds no lock: flock then does nothing and returns no error.
+// holds no lock: flock then does nothing and returns no error. Like the errors
+// of tryLock, the error does not name the file.
 func unlock(f *os.File) error {
 	errno, err := flock(f, syscall.LOCK_UN)
 	if err != nil {
 		return err
 	}
 	if errno != 0 {
-		return fmt.Errorf("unlock %s: %w", f.Name(), errno)
+		return fmt.Errorf("unlock: %w", errno)
 	}
 	return nil
 }

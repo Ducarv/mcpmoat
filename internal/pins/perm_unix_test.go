@@ -1300,6 +1300,30 @@ func TestLoadChecksParents(t *testing.T) {
 			wantInsecure(t, err, realDir, "pins parent directory {path} is not safe", fmt.Sprintf("mode %04o", mode), msgChmod)
 		}
 	})
+
+	// A walk error that is not a refusal, here a symlink loop, gets the
+	// "read <path>" prefix, as every error of Load that is not a refusal.
+	t.Run("symlink loop is a read error", func(t *testing.T) {
+		t.Parallel()
+		base := newNamedPinsDir(t, "base", 0o700)
+		symlink(t, "loop-b", base, "loop-a")
+		symlink(t, "loop-a", base, "loop-b")
+		path := filepath.Join(base, "loop-a", "mcpmoat", "pins.json")
+		wantPrefix := "read " + path + ": "
+
+		_, err := Load(path)
+		if err == nil || errors.Is(err, ErrInsecurePermissions) ||
+			!strings.HasPrefix(err.Error(), wantPrefix) || !strings.Contains(err.Error(), "too many symlinks") {
+			t.Errorf("Load() error = %v, want a \"too many symlinks\" error with the prefix %q that is not ErrInsecurePermissions", err, wantPrefix)
+		}
+
+		_, release, err := LoadLocked(t.Context(), path, 0)
+		release()
+		if err == nil || errors.Is(err, ErrInsecurePermissions) ||
+			!strings.HasPrefix(err.Error(), wantPrefix) || !strings.Contains(err.Error(), "too many symlinks") {
+			t.Errorf("LoadLocked() error = %v, want a \"too many symlinks\" error with the prefix %q that is not ErrInsecurePermissions", err, wantPrefix)
+		}
+	})
 }
 
 // TestCheckParentsAsChains covers the walk over a path with several symlinks:

@@ -785,6 +785,8 @@ func newLockProbeWriter(t *testing.T, w io.Writer, path string, match ...string)
 	return &lockProbeWriter{t: t, w: w, path: path, match: match}
 }
 
+// Write probes the lock when b holds one of the match texts, then writes b to
+// the wrapped writer.
 func (p *lockProbeWriter) Write(b []byte) (int, error) {
 	if slices.ContainsFunc(p.match, func(m string) bool { return bytes.Contains(b, []byte(m)) }) {
 		store, release, err := pins.LoadLocked(p.t.Context(), p.path, 0)

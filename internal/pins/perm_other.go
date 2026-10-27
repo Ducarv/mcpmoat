@@ -4,6 +4,12 @@ package pins
 
 import "io/fs"
 
+// parentChecks is false on systems that are not Unix, so checkParents does not
+// walk the path. The owner and symlink checks below do nothing here, so the
+// walk would add no protection, but it could still fail or follow a wrong path
+// (see checkParents). perm_unix.go sets it to true.
+const parentChecks = false
+
 // checkOwnerAndMode does nothing on systems that are not Unix. Windows reports
 // no Unix owner or permission bits, and it uses ACLs, which mcpmoat does not
 // check. Windows is a non-goal (PRD section 2.2). See the Unix version for the

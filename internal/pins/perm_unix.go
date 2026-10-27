@@ -9,6 +9,11 @@ import (
 	"syscall"
 )
 
+// parentChecks tells checkParents to walk the path to the pins directory. On
+// Unix the walk checks the owner of each symlink and the owner and the mode of
+// each parent directory. perm_other.go sets it to false.
+const parentChecks = true
+
 // groupOrOtherWrite is the mode bits that let the group or others write.
 const groupOrOtherWrite fs.FileMode = 0o022
 

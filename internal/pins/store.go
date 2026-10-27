@@ -236,8 +236,9 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 //
 // Load refuses an unsafe path with an error that wraps ErrInsecurePermissions
 // (see Save). Such an error names the unsafe path and has no "read <path>"
-// prefix; the other errors start with "read <path>" or "parse <path>". The
-// checks run in this order:
+// prefix. A file with a newer format version gives an error that wraps
+// ErrUnsupportedVersion and starts with the path itself. Every other error
+// starts with "read <path>" or "parse <path>". The checks run in this order:
 //   - The path to the pins directory, resolved one component at a time
 //     (checkParents): the owner of every symlink on it, also a symlink that
 //     is reached only through the target of another symlink, and the owner
@@ -354,16 +355,15 @@ func LoadLocked(ctx context.Context, path string, wait time.Duration) (*Store, f
 // The results are named, so the deferred cleanup below can see whether the
 // function returns an error.
 func loadLocked(ctx context.Context, path string, l locker) (s *Store, release func(), err error) {
-	// noop is the release function for an error: release is never nil, so the
-	// caller can defer it before it checks err.
-	noop := func() {}
+	// Every error return below gives noop as the release function, so the
+	// caller can defer release before it checks err.
 	dir, name := filepath.Dir(path), filepath.Base(path)
 
 	// Check the parents before ensurePinsDir, so it never creates a directory
-	// under an unsafe parent. The error names the unsafe path (see
+	// under an unsafe parent. A refusal names the unsafe path itself (see
 	// openCheckedDir).
 	if err := checkParents(dir); err != nil {
-		return nil, noop, err
+		return nil, noop, prefixUnlessRefusal("read", path, err)
 	}
 	if err := ensurePinsDir(path, dir); err != nil {
 		return nil, noop, err
@@ -471,13 +471,16 @@ func ensurePinsDir(path, dir string) error {
 // treats it as a first run, LoadLocked as a directory that changed after it
 // created it. A missing directory at a later step is a plain error.
 //
-// The errors name path. A permission error of OpenRoot or root.Open gets the
+// The errors name path. A refusal (ErrInsecurePermissions) names the unsafe
+// path itself and has no "read <path>" prefix; every other error has it (see
+// prefixUnlessRefusal). A permission error of OpenRoot or root.Open gets the
 // owner check by path (dirOpenError).
 func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, err error) {
 	if parentErr := checkParents(dir); parentErr != nil {
-		// No "read <path>" prefix: like every refusal of an unsafe path
-		// (ErrInsecurePermissions), the error names the path that is unsafe.
-		return nil, nil, false, parentErr
+		// checkParents can also fail for a reason that is not a refusal, for
+		// example a Readlink error or too many symlinks. That error gets the
+		// "read <path>" prefix.
+		return nil, nil, false, prefixUnlessRefusal("read", path, parentErr)
 	}
 
 	root, err = safefile.OpenRoot(dir)
@@ -494,10 +497,27 @@ func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, 
 
 	if checkErr := checkDirHandle(dir, d); checkErr != nil {
 		closeDir(root, d)
-		return nil, nil, false, checkErr
+		return nil, nil, false, prefixUnlessRefusal("read", path, checkErr)
 	}
 	return root, d, false, nil
 }
+
+// prefixUnlessRefusal returns err with the prefix "<op> <path>: ", for
+// example "read /home/u/.config/mcpmoat/pins.json: ". A refusal of an unsafe
+// path (an error that wraps ErrInsecurePermissions) is returned as it is: it
+// names the unsafe path itself. The wrap uses %w, so errors.Is and errors.As
+// still see err.
+func prefixUnlessRefusal(op, path string, err error) error {
+	if errors.Is(err, ErrInsecurePermissions) {
+		return err
+	}
+	return fmt.Errorf("%s %s: %w", op, path, err)
+}
+
+// noop is a function that does nothing. A release function is never nil, so
+// loadLocked returns noop as the release function on an error, and
+// locker.lock returns it when it holds no lock.
+func noop() {}
 
 // closeDir closes d, the handle of the pins directory, and root, the os.Root
 // that d was opened through. Closing root does not close the files opened
@@ -526,10 +546,11 @@ func newStore(path string) *Store {
 // and err is only "permission denied". The owner problem has a fix hint, so
 // for a permission error dirOpenError runs checkDirPerm, by path, only to get
 // a better error text. checkFilePermByPath does the same for pins.json. When
-// checkDirPerm finds nothing, the original error is returned.
+// checkDirPerm finds no refusal, also when its own Stat fails, the original
+// error is returned with the "read <path>" prefix.
 func dirOpenError(path, dir string, err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		if permErr := checkDirPerm(dir); permErr != nil {
+		if permErr := checkDirPerm(dir); errors.Is(permErr, ErrInsecurePermissions) {
 			// A refusal names its own path, so it gets no "read <path>" prefix.
 			return permErr
 		}
@@ -1049,12 +1070,9 @@ func (s *Store) Save() error {
 	}
 
 	if err := writeFileAtomic(s.path, data); err != nil {
-		if errors.Is(err, ErrInsecurePermissions) {
-			// A refusal names the unsafe path itself, so it gets no
-			// "save <path>" prefix (the same rule as in Load).
-			return err
-		}
-		return fmt.Errorf("save %s: %w", s.path, err)
+		// A refusal names the unsafe path itself, so it gets no "save <path>"
+		// prefix (the same rule as in Load).
+		return prefixUnlessRefusal("save", s.path, err)
 	}
 	return nil
 }
@@ -1121,14 +1139,16 @@ func ValidateServer(id Identity, tools ServerPins) error {
 			return errors.New("a tool canonical text is not valid UTF-8")
 		}
 	}
-	entry, err := json.Marshal(newFileServer(id, tools))
-	if err != nil {
+	// Encode to a byteCounter: only the size of the compact JSON is needed, so
+	// the entry is counted and not kept in memory.
+	var w byteCounter
+	if err := json.MarshalWrite(&w, newFileServer(id, tools)); err != nil {
 		// Not wrapped: the error text of encoding/json can hold a tool name.
 		return errors.New("the server pins cannot be encoded as JSON")
 	}
-	if len(entry) > maxServerSize {
+	if w.n > maxServerSize {
 		return fmt.Errorf("server pins are %d bytes as JSON, larger than the %d byte limit",
-			len(entry), maxServerSize)
+			w.n, maxServerSize)
 	}
 	return nil
 }

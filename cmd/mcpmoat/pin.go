@@ -229,7 +229,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	if c.interrupted(ctx, "pin") {
 		return exitError
 	}
-	return c.saveAccepted(ctx, name, id, tools, snap, shown, firstExisted)
+	return c.saveAccepted(ctx, name, id, tools, snap, shown)
 }
 
 // saveAccepted is the locked part of acceptTools, like savePinned for scan. It
@@ -237,7 +237,9 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // readPinsLocked), sets the pins of the server id to snap, saves the file and
 // returns the exit code. name is the server name, already escaped and cut for
 // the messages. tools are the tools that snap pins. shown is the store that
-// acceptTools read for the diffs. firstExisted is the same as in acceptTools.
+// acceptTools read for the diffs. acceptTools has already stopped when the file
+// existed at the first read of the command and was gone at that read, so
+// shown.Existed() is true whenever the file existed at the first read.
 //
 // saveAccepted holds the lock until the save is done. No other run that locks
 // can save between this read and this save, so the save keeps every entry that
@@ -255,9 +257,8 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // and on success the new pins file notice and the "accepted" line.
 //
 // This is the second check for a removed pins file (see acceptTools). When the
-// file existed at the first read of the command or at the read for the diffs,
-// and the locked read does not find it, it was removed while pin showed the
-// diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
+// file existed at the read for the diffs (shown), and the locked read does not
+// find it, it was removed while pin showed the diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
 // and gives exit code 2. A file that is missing at every read is a real first
 // run: the save creates it.
 //
@@ -266,7 +267,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // tells the user to remove old servers. When the save created a new pins file,
 // saveAccepted prints a notice before the "accepted" line (see
 // printNewPinsFile).
-func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store, firstExisted bool) int {
+func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
 	// release is never nil. Each path below calls release before it prints.
 	// The deferred call is a safety net: a second call does nothing.
@@ -276,9 +277,9 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 		// message.
 		return exitError
 	}
-	// A file that existed at either read before this one and is gone now was
+	// A file that existed at the read for the diffs and is gone now was
 	// removed while pin showed the diffs.
-	if pinsRemovedWhileRunning(firstExisted || shown.Existed(), store) {
+	if pinsRemovedWhileRunning(shown.Existed(), store) {
 		release()
 		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError

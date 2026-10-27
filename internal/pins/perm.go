@@ -25,7 +25,9 @@ import (
 // The text of such an error names the unsafe path and starts with "pins
 // directory", "pins file", "pins parent directory" or "cannot read the ACL".
 // Load, LoadLocked and Save return it as it is, with no "read <path>" or "save
-// <path>" prefix.
+// <path>" prefix. Their other errors from the same checks, for example a
+// failed Lstat or Readlink in checkParents, do not wrap ErrInsecurePermissions
+// and get the prefix (see Load).
 var ErrInsecurePermissions = errors.New("insecure permissions")
 
 // The kind of path in a permission error: the text says "pins directory" or
@@ -144,14 +146,24 @@ func checkFilePermByPath(path string, uid int) error {
 // (checkSymlinkOwner, Unix only). Then the next run would see a first run and
 // pin the current tools without an alert (T2). It checks for the current user
 // (os.Geteuid). See checkParentsAs.
+//
+// On a system that is not Unix, it returns nil and does not walk the path
+// (parentChecks is false, see perm_other.go). There the owner and symlink
+// checks do nothing, so the walk adds no protection. But it could still fail,
+// for example on a Readlink error, and it could follow a wrong path: on
+// Windows, filepath.IsAbs is false for a rooted target such as \foo.
 func checkParents(dir string) error {
+	if !parentChecks {
+		return nil
+	}
 	return checkParentsAs(dir, os.Geteuid())
 }
 
 // maxSymlinks is the largest number of symlinks that checkParentsAs follows
 // on one path. Linux follows at most 40 (MAXSYMLINKS) and macOS 32, so a
-// longer chain cannot open anyway. The limit also ends a loop such as a -> b
-// -> a.
+// longer chain cannot open anyway. On macOS a chain of 33 to 40 symlinks
+// passes this walk, but the open then fails with ELOOP, so the run fails
+// closed. The limit also ends a loop such as a -> b -> a.
 const maxSymlinks = 40
 
 // Labels of a path in the errors of checkParentsAs.
@@ -196,6 +208,12 @@ const (
 // first (filepath.Abs), as filepath.Join and filepath.Dir already do with the
 // paths of the callers.
 //
+// A directory that the walk enters is checked, also when a later ".." leaves
+// it again: when the walk enters it, the check cannot know yet whether a
+// symlink below it will be followed. So a writable directory that a symlink
+// target enters and leaves with ".." is refused. That is a false refusal in
+// rare layouts, and it fails closed; the fix is the usual hint.
+//
 // The walk stops without an error when the next component is missing (see
 // safefile.IsMissing): that is a first run, and the directories above it,
 // where Save creates the pins directory, are already checked. It also stops
@@ -216,7 +234,10 @@ const (
 // The check is by path, by design. When no other user (only root) can write
 // any directory on the way or owns a symlink on it, no other user can change
 // the path between this check and the open, so the path race does not help
-// an attacker.
+// an attacker. This argument is for the mode bits, and it has one exception:
+// on macOS an ACL can let another user write a directory whose mode bits are
+// safe, and the walk does not read the ACLs of the parent directories (see
+// docs/limits.md, issue #217).
 func checkParentsAs(dir string, uid int) error {
 	abs, err := filepath.Abs(dir) // Abs also cleans the path.
 	if err != nil {

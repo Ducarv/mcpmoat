@@ -90,7 +90,6 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 	// Compute the deadline once, so the total wait does not grow with the
 	// time that each attempt takes.
 	deadline := time.Now().Add(l.wait)
-	noop := func() {}
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
