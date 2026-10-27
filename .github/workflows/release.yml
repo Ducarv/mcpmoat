@@ -51,7 +51,7 @@ jobs:
 
       - name: Check for known vulnerabilities
         env:
-          # The release-check job in ci.yml checks that ci.yml and
+          # The ci-scripts job in ci.yml checks that ci.yml and
           # govulncheck.yml pin the same version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
@@ -66,7 +66,7 @@ jobs:
       id-token: write # get the OIDC token that signs the attestation
       attestations: write # store the attestation
     env:
-      # Dependabot does not bump this version string. The release-check job
+      # Dependabot does not bump this version string. The ci-scripts job
       # in ci.yml checks that this pin matches the pins in ci.yml and
       # CONTRIBUTING.md.
       GORELEASER_VERSION: v2.19.0
@@ -150,80 +150,62 @@ jobs:
             dist/*.tar.gz
             dist/checksums.txt
 
+      # The next step runs a script from the checkout, with write permission,
+      # after the build ran repo code. This step compares .github/scripts with
+      # the tagged commit, not with the index, and fails on any new file there,
+      # also an ignored one. It also refuses a file marked assume-unchanged or
+      # skip-worktree. It ignores git replace refs, and it compares the publish
+      # script byte by byte with the blob of the tagged commit, so a replace
+      # ref or an attribute filter cannot hide a change. It is hardening, not a
+      # boundary: a build that rewrites the git config, the index file or the
+      # git object store itself could still hide a change. It also does not
+      # cover a build that writes $GITHUB_PATH or $GITHUB_ENV (for example
+      # BASH_ENV, GIT_* or a planted git), a global or system git config, or
+      # that leaves a background process. The runner user has passwordless
+      # sudo and a writable $HOME, so the build can also replace git, gh, bash
+      # or cmp, and the gh config or the sigstore cache. The real fix is a
+      # separate publish job with a fresh checkout and no build code (#174).
+      - name: Check that the build left the scripts unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A replace ref in .git/refs/replace makes git show other content
+          # for the tagged commit. The build can write one.
+          export GIT_NO_REPLACE_OBJECTS=1
+          if ! git diff --exit-code "$GITHUB_SHA" -- .github/scripts; then
+            echo "::error::The build changed .github/scripts. Stop before the publish."
+            exit 1
+          fi
+          # The output goes into a variable first, so that a git error stops
+          # the step. A git error in a test or a pipe would pass the check.
+          others=$(git ls-files --others -- .github/scripts)
+          if [ -n "$others" ]; then
+            echo "::error::The build added a file to .github/scripts. Stop before the publish."
+            exit 1
+          fi
+          # git diff can skip a file that is marked assume-unchanged, so also
+          # compare the bytes of the publish script with the blob of the tagged
+          # commit. cmp reads the raw bytes, with no attribute filter.
+          script=.github/scripts/verify-and-publish.sh
+          if ! git cat-file blob "$GITHUB_SHA:$script" | cmp -s - "$script"; then
+            echo "::error::The build changed $script. Stop before the publish."
+            exit 1
+          fi
+          # In ls-files -v, only H means a normal file. h, S and s mean the
+          # build hid a change from git diff.
+          flags=$(git ls-files -v -- .github/scripts)
+          if printf '%s\n' "$flags" | grep -v '^H '; then
+            echo "::error::The build marked a file in .github/scripts as hidden. Stop before the publish."
+            exit 1
+          fi
+
       # GoReleaser makes a draft release. Publish it only after the
       # attestations of the uploaded files verify. With Immutable releases,
       # the assets lock at publish, so check them once more after it: a file
       # that changed between the verify and the publish shows up there.
+      # The steps are in .github/scripts/verify-and-publish.sh.
       - name: Verify and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: |
-          set -euo pipefail
-          # check_assets downloads the release assets to $1 and checks that
-          # they are exactly the files in dist/, no more and no less. Each
-          # command has its own "|| return 1", because set -e is off inside
-          # a function that runs as an if condition.
-          check_assets() {
-            local want got f
-            want=$(cd dist && find . -maxdepth 1 -type f \
-              \( -name '*.tar.gz' -o -name checksums.txt \) | sed 's|^\./||' | sort) || return 1
-            got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
-              --json assets -q '.assets[].name' | sort) || return 1
-            if [ "$got" != "$want" ]; then
-              echo "::error::The release assets do not match dist/:"
-              diff <(echo "$want") <(echo "$got") || true
-              return 1
-            fi
-            gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
-              --pattern '*.tar.gz' --pattern checksums.txt -D "$1" || return 1
-            while read -r f; do
-              cmp "dist/$f" "$1/$f" || return 1
-            done <<<"$want"
-          }
-
-          # check_immutable fails unless GitHub locked the published release.
-          # That needs "Immutable releases" on (docs/releasing.md, One-time setup, step 5).
-          check_immutable() {
-            local immutable
-            immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" -q .immutable) || return 1
-            if [ "$immutable" != true ]; then
-              echo "::error::The release is not immutable. Turn on Immutable releases (docs/releasing.md, One-time setup, step 5)."
-              return 1
-            fi
-          }
-
-          # check_tag fails unless the tag still points at the commit that
-          # this run built. The commits API resolves an annotated tag to its
-          # commit.
-          check_tag() {
-            local tag_sha
-            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha) || return 1
-            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
-              echo "::error::The tag $GITHUB_REF_NAME points at $tag_sha, not at $GITHUB_SHA."
-              return 1
-            fi
-          }
-
-          check_assets draft
-          # --cert-identity is an exact match on the signing workflow and its
-          # ref. Some gh versions match --signer-workflow as a prefix only.
-          for f in draft/*; do
-            gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
-              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
-              --source-ref "$GITHUB_REF" \
-              --source-digest "$GITHUB_SHA" \
-              --deny-self-hosted-runners
-          done
-
-          # A moved tag would lock the published release on another commit.
-          check_tag
-
-          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
-
-          # An immutable release locks its tag and assets at publish, so these
-          # checks are final.
-          if ! check_immutable || ! check_tag || ! check_assets published; then
-            echo "::error::The release is public, but it is not locked, or its tag or assets changed after the checks. Check it, and delete it if it is wrong."
-            exit 1
-          fi
+        run: .github/scripts/verify-and-publish.sh

@@ -38,13 +38,8 @@ jobs:
           cache: false
 
       - name: Install mcpmoat
-        # This pins one commit, and the Go checksum database checks it. This
-        # commit has no --fail-on. Issue #171 moves this pin to a
-        # release tag, because v0.1.0 exists. Until then, for --fail-on and
-        # newer rules, pin a newer commit (unreleased work is on dev, released
-        # work is on main): go list -m
-        # github.com/Ducarv/mcpmoat@<commit> prints its pseudo-version.
-        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.0.0-20261025220440-f51b6705da29
+        # This pins a release tag, and the Go checksum database checks it.
+        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.1.0
 
       # The install runs before the checkout, so it never runs in the tree of
       # the pull request.
@@ -132,7 +127,7 @@ repos:
         name: mcpmoat scan
         # A commit that changes only .mcpmoat-ignore can run the hook when
         # there is no .mcp.json. Then there is nothing to scan.
-        entry: sh -c '[ ! -f .mcp.json ] || exec mcpmoat scan --no-connect --config .mcp.json'
+        entry: sh -c '[ ! -f .mcp.json ] || exec mcpmoat scan --no-connect --config .mcp.json "$@"' --
         language: system
         pass_filenames: false
         files: ^(\.mcp\.json|\.mcpmoat-ignore)$
@@ -143,10 +138,40 @@ test the hook now, run `pre-commit run --all-files`.
 
 `language: system` runs the `mcpmoat` command from your `PATH`, so install mcpmoat first. The hook
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
-`--fail-on` after `.mcp.json`, inside the quotes of `entry`, for example `--fail-on medium`.
+`args: [--fail-on, medium]` to the hook. The `"$@"` and the trailing `--` in `entry` pass the
+`args` to `mcpmoat scan`. Keep both. Without the trailing `--`, the first arg becomes `$0` of the
+shell and is lost, so `args: [--fail-on, medium]` would run `mcpmoat scan ... medium`.
+
 pre-commit shows the output of a hook only when the hook fails. To see the findings each time, add
-`verbose: true` to the hook. A remote hook (`repo: https://github.com/Ducarv/mcpmoat`) comes after
-the first tagged release.
+`verbose: true` to the hook.
+
+To skip the install step, use the remote hook instead:
+
+```yaml
+repos:
+  - repo: https://github.com/Ducarv/mcpmoat
+    rev: <tag>   # a release tag newer than v0.1.0, or the full commit SHA of such a tag
+    hooks:
+      - id: mcpmoat
+```
+
+v0.1.0 has no `.pre-commit-hooks.yaml`, so use a newer tag. The remote hook builds the `mcpmoat`
+binary with Go (`language: golang`). You do not need Go on the `PATH`. When pre-commit finds no `go`
+command, it downloads the latest stable Go toolchain into its own cache, so the first run needs
+network access and takes longer. If you want a fixed toolchain, put a Go that you chose on `PATH`.
+The remote hook has the same `entry` and `files` as the local hook. It runs only when the commit
+changes `.mcp.json` or `.mcpmoat-ignore`. It skips when `.mcp.json` is missing. It blocks at the
+default `--fail-on high`. It takes `args` in the same way as the local hook. Do not put `--no-connect=false` in `args`: the
+hook would then start the stdio servers that `.mcp.json` lists. Use the local hook when you manage
+the `mcpmoat` binary yourself.
+
+A tag in `rev` can move, and pre-commit has no checksum database for it. The hook builds and runs
+the code of that `rev` on each developer machine. To pin it, use a full commit SHA in `rev`
+instead of a tag. The command `pre-commit autoupdate --freeze` does this.
+
+Both pre-commit hooks scan only the `.mcp.json` file in the root of the repository. They do not scan other
+client configs such as `.cursor/mcp.json`, and they do not scan a `.mcp.json` in a subfolder. To
+scan those files, use the CI job.
 
 ## Exit codes and --fail-on
 

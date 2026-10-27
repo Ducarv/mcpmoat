@@ -53,11 +53,32 @@ the `release` job waits for the maintainer to approve it in the `release` enviro
 the tagged commit is not on the first-parent history of `main`, or if the environment has no tap
 secret. It builds the archives with GoReleaser, creates a draft GitHub release and pushes the cask
 to the tap. Only the GoReleaser step gets the tap token. Then it attests the build provenance of
-`dist/*.tar.gz` and `dist/checksums.txt`. It checks that the draft release holds exactly those
-files. It downloads them and checks that they match `dist/`. It verifies each attestation with
+`dist/*.tar.gz` and `dist/checksums.txt`.
+
+The next step checks that the build left `.github/scripts` unchanged, because the step after it runs
+a script from the checkout with write permission. The step compares the folder with the tagged
+commit, not with the index. It fails on any new file there, on a changed `verify-and-publish.sh`
+(the check compares its bytes with the tagged commit, and ignores git replace refs and attribute
+filters), and on a file that is marked assume-unchanged or skip-worktree. This is hardening, not a
+boundary. The script `.github/scripts/release-guard-test.sh` tests this step in the `ci-scripts`
+job. The step does not catch a build that does one of these things:
+
+- It writes a git config: the repository config, the global config or the system config.
+- It writes the index or the git object store (the files under `.git`).
+- It writes `$GITHUB_PATH` or `$GITHUB_ENV`.
+- It leaves a background process.
+- It replaces a system program (`git`, `gh`, `bash`, `cmp`) or a tool config (the `gh` config, the
+  sigstore cache). The runner user has passwordless `sudo` and a writable `$HOME`.
+
+A separate publish job with a fresh checkout is the real fix, and issue #174 tracks it.
+
+The next step, "Verify and publish the release", runs `.github/scripts/verify-and-publish.sh`. It
+checks that the draft release holds exactly the files in `dist/*.tar.gz` and `dist/checksums.txt`.
+It downloads them and checks that they match `dist/`. It verifies each attestation with
 `gh attestation verify`. It checks that the tag still points at the commit that it built. Then it
 publishes the release. Last, it checks that the release is immutable, and checks the tag and the
-published files once more.
+published files once more. The script `.github/scripts/verify-and-publish-test.sh` tests it with a
+fake `gh`, with no network and no token. It runs in the `ci-scripts` job.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.
@@ -108,12 +129,38 @@ schedule only from the file on `dev`.
 
 - To run it by hand, open the Actions tab and run it from `dev`. GitHub uses the workflow file of the
   branch that you pick. A run that you start by hand notifies you.
-- A failed scheduled run sends a notice only to the maintainer who last edited the cron line, or who
-  enabled the workflow again. Keep GitHub Actions notifications on for that account.
+- A failed run, scheduled or started by hand, runs the job `notify-failure`. A timeout of the scan
+  counts as a failure, and a timeout can end the scan as cancelled, so the job also runs when the
+  scan job is cancelled. A run that you cancel by hand can also run it. The job cannot tell a
+  timeout from a cancel by hand, so the issue body and the comment always say "failed or was
+  cancelled".
+- The job opens the issue "Weekly vulnerability check failed" with the `security` label. If an open
+  issue with that exact title exists, the job adds a comment with the link to the run. So a check
+  that fails every week adds comments to one issue. It does not open a new issue each week. One
+  series of failures makes one issue.
+- The job looks for the open issue by title and by the `security` label, so a stranger cannot hide
+  the alert with an issue of the same title. This holds while only maintainers can add the label:
+  do not let an issue form add `security` by itself, and do not label an issue from a stranger. The
+  job does not check the author. It reads the newest 200 open issues with that label.
+  If a maintainer removes the label from the open issue, the next failure opens a new issue. If the
+  `security` label is deleted from the repo, the job fails and opens no issue: the red run is then
+  the only signal.
+- The job has the permission `issues: write` only, and it uses the `gh` CLI. The scan job keeps
+  `contents: read`.
+- The job uses one fixed concurrency group and does not cancel a run. GitHub keeps only one pending
+  job in a group, so when three runs fail close together, the middle notice can be lost. The red
+  runs still show.
+- The script `.github/scripts/notify-failure-test.sh` tests this job in the `ci-scripts` job. See
+  [Checks](../CONTRIBUTING.md#checks).
+- GitHub sends the notice of a failed scheduled run only to the maintainer who last edited the cron
+  line, or who enabled the workflow again. Keep GitHub Actions notifications on for that account.
+  The issue makes the failure visible to everyone.
+- After the fix, close the issue. The next failure opens a new issue.
 - GitHub disables a schedule after 60 days with no repository activity. When you cut a release, open
   the `govulncheck` workflow in the Actions tab. If GitHub shows it as disabled, click Enable
-  workflow. Then the failure notices go to you. If it is enabled but the last run is more than 8 days
-  old (one week plus one day), run it by hand and look for the reason.
+  workflow. Then the failure notices go to you. A disabled schedule runs nothing, so no issue
+  reports it. If it is enabled but the last run is more than 8 days old (one week plus one day), run
+  it by hand and look for the reason.
 - After a failed run, fix the cause on `dev`, merge `dev` into `main` and cut a release (see
   [Cut a release](#cut-a-release)).
 
