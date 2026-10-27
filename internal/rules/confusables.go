@@ -44,14 +44,19 @@ type confusable struct {
 // duplicates. It is a hand-checked subset of TR39 confusables.txt, version
 // confusablesVersion (the same version that lookalikeScripts comes from).
 // When confusablesVersion or scriptTablesVersion changes, make the table
-// again (issue #152 tracks a generator). Every entry comes from one line of
-// confusables.txt whose source is one rune and whose target is one ASCII
-// letter, alone or followed only by combining marks of category Mn. The
-// entry maps the rune to that letter and drops the marks, because
-// foldMarks drops every mark of the text too: TR39 maps U+0268 (i with
-// stroke) to "i" + U+0335 and U+00F8 (o with stroke) to "o" + U+0338, so
-// the table maps them to "i" and "o", and U+0268 + "gnore" reads as
-// "ignore". The rune is:
+// again from a local copy of confusables.txt with TestGenTables
+// (gentables_test.go). With -update it rewrites the table; without it, it
+// compares the table with the generated one:
+//
+//	go test ./internal/rules/ -run TestGenTables -args -confusables=PATH [-update]
+//
+// Every entry comes from one line of confusables.txt whose source is one rune
+// and whose target is one ASCII letter, alone or followed only by combining
+// marks of category Mn. The entry maps the rune to that letter and drops the
+// marks, because foldMarks drops every mark of the text too: TR39 maps
+// U+0268 (i with stroke) to "i" + U+0335 and U+00F8 (o with stroke) to "o" +
+// U+0338, so the table maps them to "i" and "o", and U+0268 + "gnore" reads
+// as "ignore". The rune is:
 //
 //   - a letter (unicode.IsLetter) or a spacing mark (category Mc) in the Go
 //     unicode tables (scriptTablesVersion), or the symbol U+212E (estimated

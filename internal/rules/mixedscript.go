@@ -208,16 +208,28 @@ const arabicHighHamza = '\u0674'
 //   - The letters that TR39 confusables.txt 18.0.0 (see confusablesVersion)
 //     maps to one Latin letter, or to one Latin letter and then only
 //     non-spacing marks (Mn) or U+0674 (Arabic letter high hamza, see
-//     arabicHighHamza). The comment of each entry gives that letter. So
-//     U+0673 (alef with wavy hamza below, TR39 "l" + U+0655) and U+0675 (high
-//     hamza alef, TR39 "l" + U+0674) are in the table, as U+0625 is.
+//     arabicHighHamza). So U+0673 (alef with wavy hamza below, TR39 "l" +
+//     U+0655) and U+0675 (high hamza alef, TR39 "l" + U+0674) are in the
+//     table, as U+0625 is.
 //   - The composed and compatibility forms of those letters. A form is an
 //     edge-tier letter whose NFKD decomposition, with its marks (Mn, Mc and
-//     Me) and U+0674 removed, is exactly one letter of the first group. The
-//     comment of each entry gives that letter. TR39 applies NFD before it
-//     maps a letter, so confusables.txt does not list most of these forms,
-//     but they read as their base letter: U+0623 (alef with hamza above) +
-//     "gnore" reads as "lgnore", as U+0627 U+0654 does.
+//     Me) and U+0674 removed, is exactly one other letter of the first group.
+//     TR39 applies NFD before it maps a letter, so confusables.txt does not
+//     list most of these forms, but they read as their base letter: U+0623
+//     (alef with hamza above) + "gnore" reads as "lgnore", as U+0627 U+0654
+//     does.
+//
+// The comment of each entry gives the name of the letter and then a label.
+// TestGenTables uses the same rule for the label:
+//
+//   - When TR39 maps the letter to one Latin letter alone, the label is that
+//     letter.
+//   - Else, when the letter is a form that is not in the first group, or a
+//     form whose NFKD decomposition is the other letter and only marks (Mn,
+//     Mc and Me), the label is "NFKD U+XXXX", the code point of that other
+//     letter. U+0623 and U+FE83 are examples.
+//   - Else the label is the TR39 Latin letter. U+0675 ("l") is an example: its
+//     NFKD decomposition holds U+0674, which is not a mark.
 //
 // The second group comes from the Unicode 17.0.0 tables of Go (see
 // scriptTablesVersion, unicode.Version) and of
@@ -230,8 +242,11 @@ const arabicHighHamza = '\u0674'
 // NFKD base is U+0647, and the letters that TR39 maps to a Latin letter and a
 // spacing mark (Mc), such as Myanmar U+1010 ("o" + U+102C): the visible sign
 // shows that the letter is not a Latin one. When confusablesVersion or
-// scriptTablesVersion changes, make the list again (issue #152 tracks a
-// generator).
+// scriptTablesVersion changes, make the list again from a local copy of
+// confusables.txt with TestGenTables (gentables_test.go), as for
+// skeletonTable:
+//
+//	go test ./internal/rules/ -run TestGenTables -args -confusables=PATH [-update]
 //
 // The comments of U+0629, U+06C3, U+FE93 and U+FE94 call the letter TAA
 // MARBUTA, its common name: the misspell linter rejects the Unicode name.

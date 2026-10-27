@@ -15,7 +15,10 @@ import (
 // skeletonTableSize is the number of entries of skeletonTable for TR39
 // confusables.txt confusablesVersion and the Go unicode tables
 // scriptTablesVersion. A new version of either can change it: make the table
-// again and update this number.
+// again with TestGenTables (see the comment of skeletonTable) and update this
+// number:
+//
+//	go test ./internal/rules/ -run TestGenTables -args -confusables=PATH [-update]
 const skeletonTableSize = 562
 
 // latinILonga is U+A7FE LATIN EPIGRAPHIC LETTER I LONGA. It has no case, but
@@ -29,7 +32,7 @@ func TestSkeletonTable(t *testing.T) {
 	t.Parallel()
 	table := skeletonTable[:]
 	if len(table) != skeletonTableSize {
-		t.Errorf("len(skeletonTable) = %d, want %d (TR39 %s, Unicode %s): make the table again",
+		t.Errorf("len(skeletonTable) = %d, want %d (TR39 %s, Unicode %s): make the table again with TestGenTables (see the comment of skeletonTable)",
 			len(table), skeletonTableSize, confusablesVersion, scriptTablesVersion)
 	}
 	for i := 1; i < len(table); i++ {
