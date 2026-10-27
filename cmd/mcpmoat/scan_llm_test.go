@@ -746,7 +746,11 @@ func TestScanLLMConfig(t *testing.T) {
 			}
 			// The config prints as a mask, so a log of it holds no key.
 			llmAssertNoKey(t, llmTestKey, fmt.Sprintf("%v %+v", got, got))
-			assertStderrLines(t, r.stderr, []lineWant{exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)), prefixLine(scanPrefix + "pinned ")})
+			assertStderrLines(t, r.stderr, []lineWant{
+				exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)),
+				exactLine(newPinsNoticeLine("scan", e.pinsPath())),
+				prefixLine(scanPrefix + "pinned "),
+			})
 		})
 	}
 }
@@ -761,12 +765,20 @@ func TestScanLLMWithoutFlag(t *testing.T) {
 	for _, args := range [][]string{nil, {"--json"}, {"--no-connect"}} {
 		t.Run(strings.Join(append([]string{"scan"}, args...), " "), func(t *testing.T) {
 			t.Parallel()
-			r := llmScan(t, llmEnv(t, tools), tools, nil, args...)
+			e := llmEnv(t, tools)
+			r := llmScan(t, e, tools, nil, args...)
 			if r.code != exitOK {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitOK, r.stderr)
 			}
 			assertContainsNone(t, "stdout", r.stdout, []string{"MOAT-LLM", "[LLM]", `"llm"`})
-			assertContainsNone(t, "stderr", r.stderr, []string{"LLM", "--llm"})
+			// A scan that connects creates pins.json and prints the new pins
+			// file notice. Its temp path holds the test name, which holds
+			// "LLM", so check the rest of stderr. --no-connect writes no pins.
+			rest := r.stderr
+			if !slices.Contains(args, "--no-connect") {
+				rest = withoutPinsFileNotice(t, r.stderr, "scan", e.pinsPath())
+			}
+			assertContainsNone(t, "stderr", rest, []string{"LLM", "--llm"})
 		})
 	}
 }

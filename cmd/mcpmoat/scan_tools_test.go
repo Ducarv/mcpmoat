@@ -159,6 +159,24 @@ func pinnedLine(server string, n int) string {
 	return fmt.Sprintf("%spinned %d %s for %s", scanPrefix, n, plural(n, "tool", "tools"), server)
 }
 
+// newPinsLine is the stderr line, without its newline, that a scan prints when
+// its save creates pins.json in e (see newPinsNoticeLine).
+func newPinsLine(e *pinEnv) string {
+	return newPinsNoticeLine("scan", e.pinsPath())
+}
+
+// withNewPinsLine returns a copy of the stderr lines of a first-run scan in e
+// with newPinsLine(e) before the first "pinned" line, where scan prints it
+// (see savePinned). lines must hold at least one "pinned" line.
+func withNewPinsLine(t *testing.T, e *pinEnv, lines []string) []string {
+	t.Helper()
+	i := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, scanPrefix+"pinned ") })
+	if i < 0 {
+		t.Fatalf("the wanted stderr lines have no pinned line: %q", lines)
+	}
+	return slices.Insert(slices.Clone(lines), i, newPinsLine(e))
+}
+
 // exactLines returns one exactLine for each line of lines.
 func exactLines(lines []string) []lineWant {
 	out := make([]lineWant, len(lines))
@@ -224,8 +242,9 @@ func TestScanToolsRuleRows(t *testing.T) {
 			toolFinding{"MOAT-T1-009", "high", "srv-a", "write_file (schema)", ""},
 			toolFinding{"MOAT-T1-001", "high", "srv-b", "fetch_url (description)", ""},
 		)
-		// The first run pins both servers and prints nothing else on stderr.
-		assertStderrLines(t, got.stderr, []lineWant{exactLine(pinnedLine("srv-a", 3)), exactLine(pinnedLine("srv-b", 2))})
+		// The first run creates pins.json, pins both servers and prints
+		// nothing else on stderr.
+		assertStderrLines(t, got.stderr, exactLines([]string{newPinsLine(e), pinnedLine("srv-a", 3), pinnedLine("srv-b", 2)}))
 		for _, w := range []struct {
 			name            string
 			tools, findings int
@@ -304,7 +323,8 @@ func TestScanToolsIgnore(t *testing.T) {
 		flags []string
 		code  int
 		want  []toolFinding
-		// stderr are the exact stderr lines, in order.
+		// stderr are the exact stderr lines, in order, without the new
+		// pins file notice (the test adds it, see withNewPinsLine).
 		stderr []string
 	}{
 		{
@@ -360,9 +380,10 @@ func TestScanToolsIgnore(t *testing.T) {
 
 			got := e.scan(insp, tt.flags...)
 
-			assertScanRun(t, got, scanWant{code: tt.code, stderr: tt.stderr})
+			wantStderr := withNewPinsLine(t, e, tt.stderr)
+			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
 			assertToolFindings(t, got.stdout, tt.want...)
-			assertStderrLines(t, got.stderr, exactLines(tt.stderr))
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
 			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(tt.want) {
 				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(tt.want))
 			}
@@ -417,7 +438,11 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 		exactLine(budgetWarning("srv-a", budget, 3, 3)),
 		exactLine(budgetWarning("srv-b", budget, 2, 2)),
 	}
-	pinned := []lineWant{exactLine(pinnedLine("srv-a", 3)), exactLine(pinnedLine("srv-b", 2))}
+	// pinned returns the last stderr lines of the first run in e: the new pins
+	// file notice and the "pinned" lines.
+	pinned := func(e *pinEnv) []lineWant {
+		return exactLines([]string{newPinsLine(e), pinnedLine("srv-a", 3), pinnedLine("srv-b", 2)})
+	}
 
 	t.Run("terminal, default --fail-on", func(t *testing.T) {
 		t.Parallel()
@@ -433,7 +458,7 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 			toolFinding{rules.RuleAnalysisBudget, "high", "srv-a", "", quotedCell(budgetReason(3, 3))},
 			toolFinding{rules.RuleAnalysisBudget, "high", "srv-b", "", quotedCell(budgetReason(2, 2))},
 		)
-		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned...))
+		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned(e)...))
 		assertNoToolText(t, got.stderr, toolNames...)
 		for _, name := range []string{"srv-a", "srv-b"} {
 			if row := summaryRowOf(t, got.stdout, name); row.Findings != 1 {
@@ -449,7 +474,7 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 		got := scanWithBudget(e, insp(), budget, "--fail-on", "critical")
 
 		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{rules.RuleAnalysisBudget}, stderr: []string{failOnCriticalNotice}})
-		assertStderrLines(t, got.stderr, append(append([]lineWant{exactLine(failOnCriticalNotice)}, warnings...), pinned...))
+		assertStderrLines(t, got.stderr, append(append([]lineWant{exactLine(failOnCriticalNotice)}, warnings...), pinned(e)...))
 	})
 
 	t.Run("json", func(t *testing.T) {
@@ -459,7 +484,7 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 		got := scanWithBudget(e, insp(), budget, "--json")
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned...))
+		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned(e)...))
 		assertNoToolText(t, got.stderr, toolNames...)
 		want := []report.JSONFinding{budgetJSONRow("srv-a", "high", 3, 3), budgetJSONRow("srv-b", "high", 2, 2)}
 		if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
@@ -552,6 +577,7 @@ func TestScanToolsHostileServerBudget(t *testing.T) {
 	)
 	assertStderrLines(t, got.stderr, []lineWant{
 		exactLine(budgetWarning("evil", budget, 2, 2)),
+		exactLine(newPinsLine(e)),
 		exactLine(pinnedLine("evil", 2)),
 	})
 	assertNoToolText(t, got.stderr, "big_tool", "add_numbers", "aaaa")
@@ -594,6 +620,7 @@ func TestScanToolsBudgetPerServer(t *testing.T) {
 	)
 	assertStderrLines(t, got.stderr, []lineWant{
 		exactLine(budgetWarning("srv-a", budget, 1, 2)),
+		exactLine(newPinsLine(e)),
 		exactLine(pinnedLine("srv-a", 2)),
 		exactLine(pinnedLine("srv-b", 1)),
 	})
@@ -772,9 +799,10 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 
 			got := scanWithBudget(e, insp, budget, tc.flags...)
 
-			assertScanRun(t, got, scanWant{code: code, stderr: stderr})
+			wantStderr := withNewPinsLine(t, e, stderr)
+			assertScanRun(t, got, scanWant{code: code, stderr: wantStderr})
 			assertToolFindings(t, got.stdout, want...)
-			assertStderrLines(t, got.stderr, exactLines(stderr))
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
 			assertNoToolText(t, got.stderr, "read_file", "add_numbers")
 			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(want) {
 				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(want))
@@ -809,6 +837,7 @@ func TestScanToolsBudgetFileWarningOnce(t *testing.T) {
 		exactLine(budgetWarning("srv-a", budget, 2, 2)),
 		exactLine(budgetWarning("srv-b", budget, 2, 2)),
 		exactLine(fileCannotIgnoreWarning(rules.RuleAnalysisBudget)),
+		exactLine(newPinsLine(e)),
 		exactLine(pinnedLine("srv-a", 2)),
 		exactLine(pinnedLine("srv-b", 2)),
 	})
@@ -860,9 +889,9 @@ func TestScanToolsBudgetSeverity(t *testing.T) {
 			insp := func() *inspecttest.Fake {
 				return fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), mkTool("add_numbers", "Add.")}})
 			}
-			wantStderr := []string{failOnCriticalNotice, budgetWarning("srv", budget, 2, 2), pinnedLine("srv", 2)}
-
 			e := newPinEnv(t, oneServer("srv"))
+			wantStderr := []string{failOnCriticalNotice, budgetWarning("srv", budget, 2, 2), newPinsLine(e), pinnedLine("srv", 2)}
+
 			got := scanWithBudget(e, insp(), budget, append(slices.Clone(flags), "--fail-on", "critical")...)
 
 			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
@@ -1077,6 +1106,7 @@ func TestScanToolsCapRows(t *testing.T) {
 
 			got := scanWithCap(e, insp, limit)
 
+			wantStderr = withNewPinsLine(t, e, wantStderr)
 			assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
 			assertToolFindings(t, got.stdout, wantRows...)
 			assertStderrLines(t, got.stderr, exactLines(wantStderr))
@@ -1196,6 +1226,7 @@ func TestScanToolsCapSeverity(t *testing.T) {
 			e := newPinEnv(t, oneServer("srv"))
 			got := scanWithCap(e, insp, limit, flags...)
 
+			wantStderr = withNewPinsLine(t, e, wantStderr)
 			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
 			assertToolFindings(t, got.stdout, wantRows...)
 			assertStderrLines(t, got.stderr, exactLines(wantStderr))
@@ -1278,11 +1309,12 @@ func TestScanToolsCapAfterIgnore(t *testing.T) {
 
 			got := scanWithCap(e, insp, limit, tt.flags...)
 
-			assertScanRun(t, got, scanWant{code: exitFindings, stderr: tt.stderr})
+			wantStderr := withNewPinsLine(t, e, tt.stderr)
+			assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
 			assertToolFindings(t, got.stdout, slices.SortedFunc(slices.Values(tt.want), func(a, b toolFinding) int {
 				return cmp.Or(cmp.Compare(a.server, b.server), cmp.Compare(a.rule, b.rule), cmp.Compare(a.tool, b.tool))
 			})...)
-			assertStderrLines(t, got.stderr, exactLines(tt.stderr))
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
 			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(tt.want) {
 				t.Errorf("SUMMARY findings of srv = %d, want %d", row.Findings, len(tt.want))
 			}
@@ -1310,7 +1342,7 @@ func TestScanToolsCapMultipleHits(t *testing.T) {
 		toolFinding{"MOAT-T1-009", "high", "srv", "both (schema)", ""},
 		capFinding("srv", "high", 1, limit),
 	)
-	assertStderrLines(t, got.stderr, exactLines([]string{capWarning("srv", 1, limit), pinnedLine("srv", 3)}))
+	assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, []string{capWarning("srv", 1, limit), pinnedLine("srv", 3)})))
 }
 
 // TestScanToolsCapAndBudget checks that the budget row (MOAT-T1-023) and the
@@ -1335,7 +1367,7 @@ func TestScanToolsCapAndBudget(t *testing.T) {
 
 	got := scanWithLimits(e, insp, budget, limit, "--rules", hostileRulesDir(t))
 
-	wantStderr := []string{budgetWarning("srv", budget, 1, 6), capWarning("srv", 2, limit), pinnedLine("srv", 6)}
+	wantStderr := withNewPinsLine(t, e, []string{budgetWarning("srv", budget, 1, 6), capWarning("srv", 2, limit), pinnedLine("srv", 6)})
 	assertScanRun(t, got, scanWant{code: exitFindings, stderr: wantStderr})
 	assertToolFindings(t, got.stdout, append(keptFindings("srv", limit),
 		toolFinding{rules.RuleAnalysisBudget, "high", "srv", "", quotedCell(budgetReason(1, 6))},
@@ -1372,8 +1404,8 @@ func TestScanToolsCapIgnore(t *testing.T) {
 			if tc.dropped {
 				want = toolRows
 			}
-			stderr := tc.stderr(warning, ignoredLine, fileWarning, pinnedLine("srv", 5))
 			e := newPinEnv(t, oneServer("srv"))
+			stderr := withNewPinsLine(t, e, tc.stderr(warning, ignoredLine, fileWarning, pinnedLine("srv", 5)))
 			if tc.file != "" {
 				writeTestFile(t, e.work, rules.IgnoreFileName, tc.file)
 			}
@@ -1437,7 +1469,7 @@ func TestScanToolsCapPerServer(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
 		assertToolFindings(t, got.stdout, rows...)
-		assertStderrLines(t, got.stderr, exactLines(append(slices.Clone(warnings), pinned...)))
+		assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, append(slices.Clone(warnings), pinned...))))
 		for _, w := range []struct {
 			name     string
 			findings int
@@ -1459,7 +1491,7 @@ func TestScanToolsCapPerServer(t *testing.T) {
 		assertToolFindings(t, got.stdout, rows...)
 		wantStderr := append([]string{scanPrefix + "using 1 entry from " + rules.IgnoreFileName}, warnings...)
 		wantStderr = append(wantStderr, fileCannotIgnoreWarning(rules.RuleToolFindingCap))
-		assertStderrLines(t, got.stderr, exactLines(append(wantStderr, pinned...)))
+		assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, append(wantStderr, pinned...))))
 	})
 }
 
@@ -1483,9 +1515,9 @@ func TestScanToolsCapDefaultLimit(t *testing.T) {
 	got := scanWithLimits(e, insp, time.Hour, 0, "--json")
 
 	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{capWarning("srv", over, maxToolRowsPerServer)}})
-	assertStderrLines(t, got.stderr, exactLines([]string{
+	assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, []string{
 		capWarning("srv", over, maxToolRowsPerServer), pinnedLine("srv", maxToolRowsPerServer+over),
-	}))
+	})))
 	want := append(keptJSONRows("srv", maxToolRowsPerServer), capJSONRow("srv", "high", over, maxToolRowsPerServer))
 	rows := jsonFindings(t, got.stdout)
 	if len(rows) != len(want) {

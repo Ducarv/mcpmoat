@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -33,8 +34,9 @@ type pinReport struct {
 	// ID. It is nil when the list dropped nothing.
 	ignored map[string]int
 	// pinned lists the servers that this run wants to pin for the first time,
-	// in the order of the servers. savePinned writes them (see there), and scan
-	// prints one notice for each server that it saved (see printPinned).
+	// in the order of the servers. It holds only servers that fit in pins.json
+	// (see pinner.budget). savePinned writes them (see there), and scan prints
+	// one notice for each server that it saved (see printPinned).
 	pinned []pinnedServer
 	// hints lists the pinned servers that have at least one pin finding that
 	// the ignore list does not drop, in the order of the servers. Each one
@@ -53,6 +55,11 @@ type pinReport struct {
 	// map was not inspected: the --json report shows it as not run (see
 	// inspectionOf). It is nil when scan inspected nothing.
 	inspection map[pins.Identity]report.InspectionStatus
+	// storeExisted is pins.Store.Existed of the store that scan read before it
+	// started the servers. savePinned compares it with the store that it reads
+	// again with the lock, to find a pins file that was removed while scan ran
+	// (see pinsRemovedWhileRunning).
+	storeExisted bool
 }
 
 // outcomeStatus is the summary entry of one outcome, with the index of the
@@ -144,6 +151,13 @@ func (c *cli) warnFileCannotIgnore(ruleID string) {
 // writes nothing. The servers to pin for the first time are in the result:
 // savePinned writes them after the report is printed.
 //
+// pins.json has a size limit (pins.MaxFileSize), and Store.Set refuses a server
+// that would make the file larger (pins.ErrStoreFull). The report is printed
+// before savePinned runs, so the refusal must be known now, or the report could
+// not show it. So pinOutcomes adds the first-run servers to a copy of the store
+// (see pinner.budget), in the order that savePinned uses. A server that does
+// not fit gets a finding and is not saved.
+//
 // The ignore list drops pin findings by rule ID, server name and tool name,
 // but only with --ignore (see scanIgnores). A dropped finding is counted in
 // the result, and its diff is not kept. A .mcpmoat-ignore entry that would
@@ -153,10 +167,14 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		c:       c,
 		ign:     ign,
 		store:   store,
+		budget:  store.Clone(),
 		handled: make(map[pins.Identity]bool),
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
-		res:     pinReport{inspection: make(map[pins.Identity]report.InspectionStatus, len(outcomes))},
+		res: pinReport{
+			inspection:   make(map[pins.Identity]report.InspectionStatus, len(outcomes)),
+			storeExisted: store.Existed(),
+		},
 	}
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
@@ -185,7 +203,14 @@ type pinner struct {
 	// store is the store that scan read before it started the servers. The
 	// pinner only reads it.
 	store *pins.Store
-	res   pinReport
+	// budget is a copy of store (pins.Store.Clone). firstPin adds each server
+	// that it wants to pin to it with Set, as savePinned will add it to the
+	// real store, to find a server that would make pins.json too large
+	// (pins.ErrStoreFull). The report is printed before the save, so this
+	// must be known before the save. Set on the copy never changes store, and
+	// the copy is never saved.
+	budget *pins.Store
+	res    pinReport
 	// handled holds the servers that this run already checked or pinned. Two
 	// servers with one identity should not happen, but if they do, the second
 	// must not be compared with the pins of the first.
@@ -351,12 +376,28 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 // recorded and the server gets a high MOAT-T2-004 finding. Such a server is
 // never pinned, so later changes of its tools would never show: it must fail
 // the default --fail-on high, like a pinned tool that cannot be verified.
+//
+// firstPin also adds the pins to p.budget, a copy of the store. When the pins
+// would make pins.json larger than its size limit (pins.ErrStoreFull), the
+// server is not recorded either, and it gets the same high MOAT-T2-004 finding
+// with the fixed reason reasonStoreFull. The report is printed before
+// savePinned runs, so firstPin must decide this now: otherwise the server
+// would be refused at the save with no finding in the report. The servers
+// before it stay in the budget, so the servers that fit are still pinned.
 func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
 		// The row gets the fixed reason, never the error text (see
 		// pinnableReason).
 		p.addUnverified(s, pinnableReason(err), riskServerUnverified, fixNotPinnable, pins.UnverifiedSeverity(true))
+		return
+	}
+	// pinnable checked the pins with pins.ValidateServer, so the only error
+	// that Set can give here is pins.ErrStoreFull. Any other error keeps the
+	// server in the list: savePinned calls Set again, which gives the same
+	// error, and reports it there (exit code 2).
+	if err := p.budget.Set(id, snap); errors.Is(err, pins.ErrStoreFull) {
+		p.addUnverified(s, reasonStoreFull, riskServerUnverified, fixStoreFull, pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -428,12 +469,21 @@ const (
 	reasonRelativeSource = "the config path is not absolute"
 )
 
+// reasonStoreFull is the reason for a first-run server whose pins would make
+// pins.json larger than its size limit (pins.ErrStoreFull, see firstPin).
+// riskServerUnverified tells what the missing pins mean. The terminal report
+// cuts a reason at 80 runes (report.MaxShortCellRunes), so it must stay
+// shorter. It starts with pinsFullText, so the size is written in one place.
+// pinsFullText is a var, so this is a var too.
+var reasonStoreFull = pinsFullText + ", so this server is not pinned"
+
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
 // addUnverified). They hold no server text.
 const (
 	// riskServerUnverified is the risk when scan did not check the tools of
 	// the server against pins: a server listed twice, a relative config path,
-	// a pinned server that was not inspected, or a first run that cannot pin.
+	// a pinned server that was not inspected, or a first run that cannot pin
+	// (the tools are not valid, or pins.json is full).
 	riskServerUnverified = "mcpmoat cannot check the tools of this server against pins, so a changed or hostile tool could pass without a review."
 	// riskPinnedNotPinnable is the risk when scan compared the tools of a
 	// pinned server, but the current tools cannot be pinned (see compare).
@@ -450,6 +500,7 @@ const (
 	fixNotInspected   = "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."
 	fixNotPinnable    = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
 	fixRelativeSource = "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."
+	fixStoreFull      = "Remove servers you no longer use from pins.json, or remove this server from the client config, then run mcpmoat scan again."
 )
 
 // pinRow returns the report row of one pin change on the server s. The caller

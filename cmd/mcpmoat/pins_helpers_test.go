@@ -7,23 +7,30 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
-// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go) and
-// of e2e_test.go, which runs the real binary. The helpers are the pinEnv world,
-// the fake servers, and the checks of the output.
+// scan_pins_lock_test.go, pin_test.go, pin_flow_test.go, pin_expect_test.go,
+// pin_lock_test.go and pins_diff_test.go; other scan tests use some of them
+// too) and of e2e_test.go and e2e_pins_test.go, which run the real binary. The
+// helpers are the pinEnv world, the fake servers, the checks of the output,
+// the lock helpers (holdPinsLock and lockProbeWriter), and the near-full pins
+// file (writeNearFullPins and bigStoreTool).
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -277,6 +284,22 @@ func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 // fixed error "boom", so a test can check the exact warning text.
 func failingFake(server string) *inspecttest.Fake {
 	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
+}
+
+// pinAlphaOnly runs a first scan in e that pins the server "alpha" with
+// alphaTools only: the server "beta" fails with "boom", so it is not pinned
+// and is new on the next run. pins.json then exists. It fails the test when
+// the scan does not exit with 0, and returns the result, so that a test can
+// check the output of the first run.
+func pinAlphaOnly(t *testing.T, e *pinEnv, alphaTools []inspect.Tool) pinRunResult {
+	t.Helper()
+	fake := fakeServers(map[string][]inspect.Tool{"alpha": alphaTools})
+	fake.Errors = map[string]error{"beta": errors.New("boom")}
+	r := e.scan(fake)
+	if r.code != exitOK {
+		t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+	}
+	return r
 }
 
 // oneServer returns the server map of a config with one stdio server.
@@ -666,5 +689,342 @@ func assertNoExpectNote(t *testing.T, stderr string) {
 	t.Helper()
 	if stderr != noExpectNote {
 		t.Errorf("stderr = %q, want exactly the no --expect note %q", stderr, noExpectNote)
+	}
+}
+
+// newPinsNoticeLine returns the exact stderr line, without its newline, that
+// printNewPinsFile prints for the command cmd ("scan" or "pin") and the pins
+// file path. It escapes and cuts path as the production code does. It is the
+// one copy of the notice text in the tests: use it with exactLine, and
+// newPinsFileNotice for the line with its newline.
+func newPinsNoticeLine(cmd, path string) string {
+	return "mcpmoat " + cmd + ": no pins file was found, so a new one was created at " +
+		termsafe.QuoteCut(path, maxWarnPathRunes) +
+		"; if this is not your first run, the old file was removed or moved"
+}
+
+// newPinsFileNotice returns newPinsNoticeLine(cmd, path) with its newline:
+// the exact text that printNewPinsFile writes. Tests pass e.pinsPath() as
+// path.
+func newPinsFileNotice(cmd, path string) string {
+	return newPinsNoticeLine(cmd, path) + "\n"
+}
+
+// withoutPinsFileNotice returns stderr without the line of newPinsFileNotice(cmd,
+// path). It fails the test unless stderr holds that line exactly once, so a test
+// that ignores the notice still proves that the run printed it.
+func withoutPinsFileNotice(t *testing.T, stderr, cmd, path string) string {
+	t.Helper()
+	notice := newPinsFileNotice(cmd, path)
+	lines := strings.SplitAfter(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	found := 0
+	for _, line := range lines {
+		if line == notice {
+			found++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if found != 1 {
+		t.Fatalf("stderr has the new pins file notice %d times, want 1\nnotice: %q\nstderr:\n%s", found, notice, stderr)
+	}
+	return strings.Join(kept, "")
+}
+
+// holdPinsLock takes the lock on the pins directory of the pins file path, as
+// another mcpmoat run would, and returns the function that releases it. It
+// also registers the release with t.Cleanup; a second call does nothing. It
+// fails the test when pins.LoadLocked fails, and skips the test when the
+// system cannot lock the directory (pins.Store.RanWithoutLock), because then no
+// run can be "locked by another run".
+func holdPinsLock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	store, release, err := pins.LoadLocked(t.Context(), path, 0)
+	t.Cleanup(release)
+	if err != nil {
+		t.Fatalf("pins.LoadLocked(%q) error = %v, want nil", path, err)
+	}
+	if store.RanWithoutLock() {
+		release()
+		t.Skip("the system cannot lock the pins directory here")
+	}
+	return release
+}
+
+// lockProbe is the result of one lock attempt of a lockProbeWriter.
+type lockProbe struct {
+	// line is the text of the write that ran the attempt.
+	line string
+	// err is the error of pins.LoadLocked: nil when the lock was free.
+	err error
+	// ranWithoutLock is pins.Store.RanWithoutLock: the system could not lock at
+	// all, so the attempt proves nothing.
+	ranWithoutLock bool
+}
+
+// lockProbeWriter is a stdout or stderr for scan or pin that checks, from
+// inside the command, whether the command still holds the lock on the pins
+// directory when it prints a line. On each write that holds one of the texts
+// in match, it calls pins.LoadLocked on path with no wait, as another run
+// would, records the result, and releases the lock again before it writes to
+// w. The test checks the records after the command returns (see
+// assertLockFreeAt), so there is no sleep and no goroutine: the attempt runs
+// at the exact moment of the write.
+type lockProbeWriter struct {
+	t     *testing.T
+	w     io.Writer
+	path  string
+	match []string
+
+	mu     sync.Mutex // guards probes, in case a write comes from another goroutine
+	probes []lockProbe
+}
+
+// newLockProbeWriter returns a lockProbeWriter that writes to w and tries the
+// lock on the pins file path at each write that holds one of the texts in
+// match.
+func newLockProbeWriter(t *testing.T, w io.Writer, path string, match ...string) *lockProbeWriter {
+	return &lockProbeWriter{t: t, w: w, path: path, match: match}
+}
+
+// Write probes the lock when b holds one of the match texts, then writes b to
+// the wrapped writer.
+func (p *lockProbeWriter) Write(b []byte) (int, error) {
+	if slices.ContainsFunc(p.match, func(m string) bool { return bytes.Contains(b, []byte(m)) }) {
+		store, release, err := pins.LoadLocked(p.t.Context(), p.path, 0)
+		// Release inside the write, so the command never waits for the probe.
+		release()
+		probe := lockProbe{line: string(b), err: err}
+		if err == nil {
+			probe.ranWithoutLock = store.RanWithoutLock()
+		}
+		p.mu.Lock()
+		p.probes = append(p.probes, probe)
+		p.mu.Unlock()
+	}
+	return p.w.Write(b)
+}
+
+// assertLockFreeAt fails the test unless p tried the lock exactly once for each
+// text of want, in order, and found it free each time: the command had
+// released the lock before it printed those lines. It skips the test when the
+// system cannot lock the pins directory, because then a free lock proves
+// nothing.
+func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
+	t.Helper()
+	p.mu.Lock()
+	probes := slices.Clone(p.probes)
+	p.mu.Unlock()
+	if len(probes) != len(want) {
+		t.Errorf("lock attempts at %d writes, want %d (%q)\nprobes: %+v", len(probes), len(want), want, probes)
+	}
+	for i, probe := range probes {
+		if probe.ranWithoutLock {
+			t.Skip("the system cannot lock the pins directory here")
+		}
+		if i < len(want) && !strings.Contains(probe.line, want[i]) {
+			t.Errorf("lock attempt %d ran at the write %q, want the write of %q", i+1, probe.line, want[i])
+		}
+		if probe.err != nil {
+			t.Errorf("the lock was not free at the write %q: pins.LoadLocked error = %v, want nil (the command must release the lock before it prints)",
+				probe.line, probe.err)
+		}
+	}
+}
+
+// readIfExists returns the content of path and true, or nil and false when
+// the file does not exist. It fails the test on another error.
+func readIfExists(t *testing.T, path string) ([]byte, bool) {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is under the test's own t.TempDir()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, true
+}
+
+// The helpers from here to bigPinsServerNames build and read a pins file near
+// its size limit. The tests of the size limit in scan_pins_lock_test.go and
+// pin_lock_test.go use them.
+
+// nearFullGap is the free space that writeNearFullPins leaves below
+// pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
+// it, and the entry of a server with one mkTool is far smaller.
+const nearFullGap = 16 << 10
+
+// nearFullServers is the number of filler servers in the file of
+// writeNearFullPins. With 17 and the 32 MiB of pins.MaxFileSize, each entry is
+// about 1.9 MiB, well below the limit of one server (2 MiB). If the file limit
+// grows, an entry can get larger than 2 MiB: Set then refuses a filler, and
+// writeNearFullPins fails. Then raise this number.
+const nearFullServers = 17
+
+// bigStoreTool returns a tool whose pins entry is larger than nearFullGap:
+// its _meta alone is twice that size. The size is in _meta and not in the
+// description, so no description rule (for example the one for a long
+// description) adds a row, and the rule step stays fast.
+func bigStoreTool() inspect.Tool {
+	return metaTool("big_tool", `{"k":"`+strings.Repeat("a", 2*nearFullGap)+`"}`, "")
+}
+
+// fillerIdentity returns the identity of the filler server i. The names have
+// the same length, so every filler entry has the same fixed bytes.
+func fillerIdentity(i int) pins.Identity {
+	return pins.Identity{Client: "fixture", Source: "/fixture/mcp.json", Name: fmt.Sprintf("fill-%02d", i)}
+}
+
+// fillerNames returns the names of the nearFullServers filler servers.
+func fillerNames() []string {
+	names := make([]string, nearFullServers)
+	for i := range names {
+		names[i] = fillerIdentity(i).Name
+	}
+	return names
+}
+
+// fillerPins returns the pins of a filler server: one tool "fill" with the
+// canonical text and its hash. The hash is built like the one of
+// setPinCanonical (pins.HashVersion, a colon, the hex SHA-256), so it has the
+// same length for every text.
+func fillerPins(canonical string) pins.ServerPins {
+	sum := sha256.Sum256([]byte(canonical))
+	return pins.ServerPins{"fill": {Hash: pins.HashVersion + ":" + hex.EncodeToString(sum[:]), Canonical: canonical}}
+}
+
+// saveFillers saves a new pins store at path with one filler server for each
+// canonical text (fillerIdentity(i), fillerPins(canonicals[i])) and returns
+// the size of the file. It uses the pins API only: pins.Load of a missing
+// file gives an empty store, and Save writes the directory with mode 0700
+// and the file with mode 0600, as the CLI requires.
+func saveFillers(t *testing.T, path string, canonicals ...string) int {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
+	}
+	if store.Existed() {
+		t.Fatalf("pins.Load(%q): the file exists, want a new store", path)
+	}
+	for i, c := range canonicals {
+		if err := store.Set(fillerIdentity(i), fillerPins(c)); err != nil {
+			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
+		}
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(info.Size())
+}
+
+// writeNearFullPins writes a valid pins.json at path with nearFullServers
+// filler servers, so that the file has exactly pins.MaxFileSize - nearFullGap
+// bytes. A server entry larger than nearFullGap then does not fit
+// (pins.ErrStoreFull), and a small one does.
+//
+// The size of the file depends on the format of Save, so the helper measures
+// it: it saves one and two fillers with a one-byte text in scratch folders.
+// The file grows by one byte for each byte of a canonical text of letters, so
+// the sizes give the fixed bytes of the file and of one entry. The filler
+// texts share one string, so the memory use stays near the size of the file.
+func writeNearFullPins(t *testing.T, path string) {
+	t.Helper()
+	one := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a")
+	two := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a", "a")
+	entry := two - one // one entry with a one-byte text
+	fixed := one - entry
+
+	want := pins.MaxFileSize - nearFullGap
+	textBytes := want - fixed - nearFullServers*(entry-1)
+	n := textBytes / nearFullServers
+	long := strings.Repeat("a", n+textBytes%nearFullServers)
+	canonicals := make([]string, nearFullServers)
+	for i := range canonicals {
+		canonicals[i] = long[:n]
+	}
+	canonicals[nearFullServers-1] = long
+
+	if size := saveFillers(t, path, canonicals...); size != want {
+		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, want)
+	}
+}
+
+// bigPinsServerNames returns the server names in the pins file at path,
+// sorted. It is for the near-full file of writeNearFullPins: a JSON decode of
+// 32 MiB is slow with -race, so it finds each `"name": "` key with
+// bytes.Index. The key text matches the server entries only: Save writes one
+// space after the colon, and a canonical text in the file is a JSON string,
+// so its quotes are escaped (\"name\":\"...\"). The names of the tests are
+// plain words with no escape.
+func bigPinsServerNames(t *testing.T, path string) []string {
+	t.Helper()
+	const key = `"name": "`
+	data := readFileBytes(t, path)
+	var names []string
+	for {
+		i := bytes.Index(data, []byte(key))
+		if i < 0 {
+			break
+		}
+		data = data[i+len(key):]
+		end := bytes.IndexByte(data, '"')
+		if end < 0 {
+			t.Fatalf("pins file %s has a name with no end quote", path)
+		}
+		names = append(names, string(data[:end]))
+		data = data[end:]
+	}
+	slices.Sort(names)
+	return names
+}
+
+// TestNewPinsFileNotice checks that newPinsFileNotice gives the exact line of
+// printNewPinsFile, also for a path with a control byte that must be escaped.
+func TestNewPinsFileNotice(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{"scan", "pin"} {
+		for _, path := range []string{"/tmp/x/mcpmoat/pins.json", "a\x1bb"} {
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			c.printNewPinsFile(cmd, path)
+			want := newPinsFileNotice(cmd, path)
+			if got := stderr.String(); got != want {
+				t.Errorf("printNewPinsFile(%q, %q) stderr = %q, want %q", cmd, path, got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("printNewPinsFile(%q, %q) stdout = %q, want empty", cmd, path, stdout.String())
+			}
+			if strings.Contains(want, "\x1b") {
+				t.Errorf("newPinsFileNotice(%q, %q) = %q holds a raw escape byte", cmd, path, want)
+			}
+			if rest := withoutPinsFileNotice(t, "x\n"+want+"y\n", cmd, path); rest != "x\ny\n" {
+				t.Errorf("withoutPinsFileNotice() = %q, want %q", rest, "x\ny\n")
+			}
+		}
+	}
+}
+
+// TestHoldPinsLock checks that holdPinsLock makes a second LoadLocked fail
+// with pins.ErrLocked, and that its release frees the lock.
+func TestHoldPinsLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mcpmoat", "pins.json")
+	release := holdPinsLock(t, path)
+	_, again, err := pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if !errors.Is(err, pins.ErrLocked) {
+		t.Fatalf("LoadLocked() while held: error = %v, want pins.ErrLocked", err)
+	}
+	release()
+	_, again, err = pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if err != nil {
+		t.Fatalf("LoadLocked() after release: error = %v, want nil", err)
 	}
 }

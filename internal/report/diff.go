@@ -113,7 +113,7 @@ func (k DiffKind) String() string {
 //
 // The tool and server names go through findingCell, like the names in
 // WriteFindings: an empty name shows as "-", and a name is escaped and cut at
-// maxShortCellRunes.
+// MaxShortCellRunes.
 //
 // The text of a diff comes from untrusted servers: it is the first place where
 // a tool description reaches the terminal. Each line is split in two parts. The

@@ -27,6 +27,12 @@ const (
 	exitError    = 2 // execution or usage error
 )
 
+// defaultPinsLockWait is the time that scan and pin --accept wait for the lock
+// on the pins directory in a real run (see cli.pinsLockWait). Another run
+// holds the lock only while it reads, changes and saves pins.json, so a short
+// wait is enough.
+const defaultPinsLockWait = 10 * time.Second
+
 // options holds the resolved global flags. The cli passes it explicitly to
 // each command, so commands never read global state.
 type options struct {
@@ -66,6 +72,11 @@ type cli struct {
 	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
+	// pinsLockWait is how long scan and pin --accept wait for another run that
+	// holds the lock on the pins directory, before they stop with exit code 2
+	// (see readPinsLocked). runWithContext sets it to defaultPinsLockWait.
+	// Tests that build a cli directly keep the zero value: try once, no wait.
+	pinsLockWait time.Duration
 	// maxToolRows is the largest number of tool finding rows that scan keeps
 	// for one server. Zero means the default, maxToolRowsPerServer, so
 	// runWithContext does not set it. Tests set a small value, so that they
@@ -118,6 +129,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		inspector: inspect.New(inspect.SDKOptions{HiddenEnv: []string{llm.KeyEnv}}),
 		// Called only by scan --llm. It sends no request.
 		newClassifier: newLLMClassifier,
+		pinsLockWait:  defaultPinsLockWait,
 	}
 	// Decide from the writer that the report goes to, not from os.Stdout. A
 	// writer that is not a file (a buffer, a pipe wrapper) is never a terminal.

@@ -394,18 +394,18 @@ func TestWriteFindingsLongTextIsCut(t *testing.T) {
 		limit int
 		row   func(v string) report.FindingRow
 	}{
-		{"name", maxShortCellRunes, func(v string) report.FindingRow {
+		{"name", report.MaxShortCellRunes, func(v string) report.FindingRow {
 			return report.FindingRow{ServerRef: globalRef(v), Severity: "low"}
 		}},
-		{"client", maxShortCellRunes, func(v string) report.FindingRow {
+		{"client", report.MaxShortCellRunes, func(v string) report.FindingRow {
 			r := globalRef("s")
 			r.Client = discover.Client(v)
 			return report.FindingRow{ServerRef: r, Severity: "low"}
 		}},
-		{"rule id", maxShortCellRunes, func(v string) report.FindingRow {
+		{"rule id", report.MaxShortCellRunes, func(v string) report.FindingRow {
 			return report.FindingRow{ServerRef: globalRef("s"), RuleID: v, Severity: "low"}
 		}},
-		{"field", maxShortCellRunes, func(v string) report.FindingRow {
+		{"field", report.MaxShortCellRunes, func(v string) report.FindingRow {
 			return report.FindingRow{ServerRef: globalRef("s"), Severity: "low", Field: v}
 		}},
 		{"title", maxTitleRunes, func(v string) report.FindingRow {
@@ -453,9 +453,9 @@ func TestWriteFindingsLongTextIsCut(t *testing.T) {
 
 	t.Run("key and related are cut apart", func(t *testing.T) {
 		t.Parallel()
-		long := x(maxShortCellRunes * 3)
+		long := x(report.MaxShortCellRunes * 3)
 		out := writeFindings(t, plain, report.FindingRow{ServerRef: globalRef("s"), Severity: "low", Field: "f", Key: long, Related: long})
-		cut := x(maxShortCellRunes) + termsafe.CutMarker
+		cut := x(report.MaxShortCellRunes) + termsafe.CutMarker
 		if want := "Where: f " + cut + " (" + cut + ")\n"; !strings.Contains(out, want) {
 			t.Errorf("output does not hold %q:\n%s", want, out)
 		}
@@ -463,9 +463,9 @@ func TestWriteFindingsLongTextIsCut(t *testing.T) {
 
 	t.Run("a cut marker follows the closing quote", func(t *testing.T) {
 		t.Parallel()
-		long := strings.Repeat("\x1b", maxShortCellRunes*2)
+		long := strings.Repeat("\x1b", report.MaxShortCellRunes*2)
 		out := writeFindings(t, plain, report.FindingRow{ServerRef: globalRef("s"), Severity: "low", RuleID: long})
-		want := termsafe.Quote(strings.Repeat("\x1b", maxShortCellRunes)) + termsafe.CutMarker
+		want := termsafe.Quote(strings.Repeat("\x1b", report.MaxShortCellRunes)) + termsafe.CutMarker
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not hold %s:\n%s", want, out)
 		}

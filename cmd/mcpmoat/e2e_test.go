@@ -854,7 +854,9 @@ func TestE2EScanRulesExtra(t *testing.T) {
 
 		stdout, stderr, code := runBin(t, home, work, "scan", "--rules", extra)
 
-		wantErr := "mcpmoat scan: pinned 2 tools for benign\n"
+		// The first run creates pins.json, so the new pins file notice comes
+		// before the pinned line.
+		wantErr := e2eNewPinsFileNotice("scan", home) + "\nmcpmoat scan: pinned 2 tools for benign\n"
 		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{wantErr}})
 		if stderr != wantErr {
 			t.Errorf("stderr = %q, want only %q (no notice)", stderr, wantErr)
