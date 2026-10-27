@@ -16,7 +16,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		checkLabel = `the goreleaser-action step "Check" `
 		flowGood   = `        with: {distribution: goreleaser, version: "${{ env.GORELEASER_VERSION }}"}` + "\n"
 	)
-	replace := func(old, repl string) grMutation { return grReplace(ciPath, old, repl) }
+	replace := func(old, repl string) mutation { return replaceOnce(ciPath, old, repl) }
 	tests := []grCase{
 		// Positive controls.
 		{name: "block with mapping"},
@@ -109,7 +109,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		},
 		{
 			name: "uses in other case is still checked",
-			mutate: grAll(
+			mutate: applyAll(
 				replace(uses, "uses: GoReleaser/GoReleaser-Action@v7"),
 				replace(version, "version: latest"),
 			),
@@ -117,7 +117,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		},
 		{
 			name: "uses with no ref is still checked",
-			mutate: grAll(
+			mutate: applyAll(
 				replace(uses, "uses: goreleaser/goreleaser-action"),
 				replace(version, "version: latest"),
 			),
@@ -125,7 +125,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		},
 		{
 			name: "step with no name is labelled by its uses value",
-			mutate: grAll(
+			mutate: applyAll(
 				replace("      - name: Check\n        "+uses, "      - "+uses),
 				replace(version, "version: latest"),
 			),
@@ -133,7 +133,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		},
 		{
 			name: "step with an empty name is labelled by its uses value",
-			mutate: grAll(
+			mutate: applyAll(
 				replace("- name: Check", `- name: ""`),
 				replace(version, "version: latest"),
 			),

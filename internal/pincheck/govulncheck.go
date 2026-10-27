@@ -17,8 +17,9 @@ import (
 //     has the version of ci.yml.
 //   - Each of the three files has at least one step whose run value is
 //     exactly gvCall.
-//   - In the three files, a job that has such a step has no job-level if: key.
-//     GitHub skips a job whose if is false, and then the scan does not run.
+//   - In the three files, a job that has such a step has no job-level if: key
+//     and no job-level needs: key. GitHub skips a job whose if is false, and
+//     it skips a job that waits for a skipped job. Then the scan does not run.
 //   - In the three files, every scalar (key, value or list item) that names
 //     govulncheck, in any case, is a pin key, a call or, in govulncheck.yml
 //     only, one of the allowed names (see gvWeeklyNames).
@@ -61,9 +62,6 @@ func gvListedNames() string {
 	var names []string
 	for _, p := range gvListedPaths() {
 		names = append(names, path.Base(p))
-	}
-	if len(names) < 2 {
-		return strings.Join(names, "")
 	}
 	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
@@ -119,12 +117,18 @@ func gvCheckListed(p string, w *workflow, want string) []string {
 		}
 	}
 
-	calls, callMsgs := gvCalls(w)
-	msgs = append(msgs, callMsgs...)
+	// jobs is read once here and passed to the rules. gvScanJobs reports the
+	// problems of the jobs and the steps, so each one is reported once.
+	jobs, jobMsgs := gvScanJobs(w)
+	msgs = append(msgs, jobMsgs...)
+	var calls []*yaml.Node
+	for _, j := range jobs {
+		calls = append(calls, j.calls...)
+	}
 	if len(calls) == 0 {
 		msgs = append(msgs, w.problemAt(nil, "no step has the run value %s", gvCall))
 	}
-	msgs = append(msgs, gvJobIfProblems(w)...)
+	msgs = append(msgs, gvJobSkipProblems(w, jobs)...)
 
 	// allowed holds the nodes that may name govulncheck. A map with pointer
 	// keys compares node identity, not text: the same text in another place
@@ -137,7 +141,7 @@ func gvCheckListed(p string, w *workflow, want string) []string {
 		allowed[c] = true
 	}
 	if p == weeklyPath {
-		for _, n := range gvWeeklyNames(w) {
+		for _, n := range gvWeeklyNames(w, jobs) {
 			allowed[n] = true
 		}
 	}
@@ -168,28 +172,34 @@ func gvPins(w *workflow) []gvPin {
 	return pins
 }
 
-// gvCalls returns the run value nodes of the steps of w that are exactly
-// gvCall. It also returns a message for each jobs or steps value that is not
-// the shape GitHub needs, so that a broken file cannot hide a step. A run
-// value that is not a scalar is not a call; the name rule still reads it.
-// It reads the jobs with jobsAndProblems, so a bad job does not hide the call
-// in a good job, and the messages name only the real problem.
-func gvCalls(w *workflow) ([]*yaml.Node, []string) {
+// gvJob is a job of a workflow with the run value nodes of its govulncheck
+// calls. calls is empty for a job that runs no call. It is also empty for a
+// job whose steps are not a list of mappings, because gvJobCalls returns no
+// calls then.
+type gvJob struct {
+	job
+	calls []*yaml.Node
+}
+
+// gvScanJobs returns the jobs of w in file order, each with its calls, and the
+// messages for the problems of the jobs and of their steps. It is the one place
+// that reports these problems, so each one is reported once. It reads the jobs
+// with jobsAndProblems, so a bad job does not hide the call in a good job. A
+// job whose steps are broken stays in the list, with no calls, so that the name
+// rules still see its keys. A run value that is not a scalar is not a call;
+// the name rule still reads it.
+func gvScanJobs(w *workflow) ([]gvJob, []string) {
 	jobs, problems := w.jobsAndProblems()
-	var msgs []string
-	for _, err := range problems {
-		msgs = append(msgs, err.Error())
-	}
-	var calls []*yaml.Node
+	msgs := errorStrings(problems)
+	out := make([]gvJob, 0, len(jobs))
 	for _, j := range jobs {
-		jobCalls, err := gvJobCalls(w, j)
+		calls, err := gvJobCalls(w, j)
 		if err != nil {
 			msgs = append(msgs, err.Error())
-			continue
 		}
-		calls = append(calls, jobCalls...)
+		out = append(out, gvJob{job: j, calls: calls})
 	}
-	return calls, msgs
+	return out, msgs
 }
 
 // gvJobCalls returns the run value nodes of the steps of the job j that are
@@ -213,21 +223,22 @@ func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
 	return calls, nil
 }
 
-// gvJobIfProblems returns one message for each job that runs the govulncheck
-// call and has a job-level if: key. GitHub skips a job whose if is false, so
-// the scan would not run while the pin check still passes. A step-level if is
-// not read here.
-func gvJobIfProblems(w *workflow) []string {
-	jobs, _ := w.jobsAndProblems() // gvCalls reports the problems
+// gvJobSkipProblems returns one message for each job that runs the govulncheck
+// call and has a job-level if: or needs: key. GitHub skips a job whose if is
+// false. It also skips a job that waits for a skipped job. Then the scan would
+// not run while the pin check still passes. A step-level if is not read here.
+func gvJobSkipProblems(w *workflow, jobs []gvJob) []string {
 	var msgs []string
 	for _, j := range jobs {
-		calls, _ := gvJobCalls(w, j)
-		if len(calls) == 0 {
+		if len(j.calls) == 0 {
 			continue
 		}
 		for k := range pairs(j.body) {
-			if strings.EqualFold(strings.TrimSpace(k.Value), "if") {
+			switch {
+			case keyIs(k, "if"):
 				msgs = append(msgs, w.problemAt(k, "the job %s runs govulncheck, so it must not have a job-level if: a skipped job would hide a vulnerability", show(j.id)))
+			case keyIs(k, "needs"):
+				msgs = append(msgs, w.problemAt(k, "the job %s runs govulncheck, so it must not have a job-level needs: a skipped job it waits for would skip the scan too", show(j.id)))
 			}
 		}
 	}
@@ -245,21 +256,19 @@ func gvJobIfProblems(w *workflow) []string {
 //	    if: failure() || needs.govulncheck.result == 'cancelled'
 //
 // The needs and the if names are allowed only in a job that runs no call. A
-// job that runs the call must not have a job-level if (see gvJobIfProblems),
-// so the scan cannot be skipped. A key with another case, a list or another
-// value is not allowed.
-func gvWeeklyNames(w *workflow) []*yaml.Node {
+// job that runs the call must not have a job-level if or needs (see
+// gvJobSkipProblems), so the scan cannot be skipped. A key with another case,
+// a list or another value is not allowed. jobs comes from gvScanJobs.
+func gvWeeklyNames(w *workflow, jobs []gvJob) []*yaml.Node {
 	var out []*yaml.Node
 	if v := gvExactScalar(w, w.top, "name", gvName); v != nil {
 		out = append(out, v)
 	}
-	jobs, _ := w.jobsAndProblems() // gvCalls reports the problems
 	for _, j := range jobs {
 		if j.id == gvName {
 			out = append(out, j.key)
 		}
-		calls, _ := gvJobCalls(w, j)
-		if len(calls) > 0 {
+		if len(j.calls) > 0 {
 			continue // a job that runs the call may not name needs or if
 		}
 		if v := gvExactScalar(w, j.body, "needs", gvName); v != nil {
@@ -287,7 +296,8 @@ func gvExactScalar(w *workflow, m *yaml.Node, key, want string) *yaml.Node {
 }
 
 // gvContinueOnError returns one message for each continue-on-error key of w,
-// in file order. The compare ignores case and the spaces around the key.
+// in file order. The compare is keyIs: it ignores case and the spaces around
+// the key.
 func gvContinueOnError(w *workflow) []string {
 	var msgs []string
 	walk(w.top, func(n *yaml.Node) {
@@ -295,7 +305,7 @@ func gvContinueOnError(w *workflow) []string {
 			return
 		}
 		for k := range pairs(n) {
-			if strings.EqualFold(strings.TrimSpace(k.Value), "continue-on-error") {
+			if keyIs(k, "continue-on-error") {
 				msgs = append(msgs, w.problemAt(k, "continue-on-error is not allowed in this file: a step that cannot fail would hide a vulnerability"))
 			}
 		}

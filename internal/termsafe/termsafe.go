@@ -133,6 +133,10 @@ func Cut(s string, n int) (string, bool) {
 //
 // Escape differs from Quote. Quote adds quotes and writes a newline as \n, but
 // Escape writes it as \x0a, so every ASCII control character has one form.
+//
+// The output is for a person to read in one line. It is not reversible: a
+// backslash stays as it is, so the text \x0a (four characters) gives the same
+// output as a real newline. A caller that needs a reversible form uses Quote.
 func Escape(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {

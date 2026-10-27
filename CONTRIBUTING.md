@@ -183,8 +183,9 @@ The govulncheck rules:
   the file.
 - Each of the three files has a step whose `run:` value is exactly
   `go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`.
-- In the three files, a job that has that step has no job-level `if:` key. GitHub skips such a
-  job when its `if:` is false, so the scan would not run.
+- In the three files, a job that has that step has no job-level `if:` key and no job-level
+  `needs:` key. GitHub skips such a job when its `if:` is false. It also skips a job that waits
+  (`needs:`) for a skipped job. Then the scan would not run.
 - In the three files, any other key or value that names `govulncheck` (in any case) fails.
   `govulncheck.yml` may also have these, with this exact case and text: `name: govulncheck` at the
   top level, `govulncheck` as a job ID, and, in any job that does not run the call,
@@ -202,8 +203,17 @@ Not covered:
 - A name that a step builds from pieces, for example in a `$GITHUB_ENV` write.
 - Where a `GOVULNCHECK_VERSION` pin is. It can be in any mapping, not only an `env:`.
 - The other keys of the step with the govulncheck call, such as `if:`, `shell:` and
-  `working-directory:`. The check reads the job-level `if:` of the job with the call, but not the
-  `if:` of its step. For example, `shell: "true {0}"` stops the call, and the step still passes.
+  `working-directory:`. The check reads the job-level `if:` and `needs:` of the job with the call,
+  but not the `if:` of its step. For example, `shell: "true {0}"` stops the call, and the step still
+  passes.
+- The `release` job of `release.yml` waits (`needs: test`) for the job with the call. The check
+  does not read that job's `needs:` or `if:` keys, so a change there is not caught.
+- A GoReleaser step that uses a renamed or forked action, or
+  `go run github.com/goreleaser/goreleaser/...@version` instead of goreleaser-action. The check
+  does not require that `release.yml` has at least one goreleaser-action step.
+- The `ci-scripts` job of `ci.yml` runs this check (the step `run: .github/scripts/check-tool-pins.sh`)
+  and the test of the check (the step `run: .github/scripts/check-tool-pins-test.sh`). The check does
+  not read those steps, so a change that removes them is not caught.
 - `defaults.run.shell` of the workflow or the job, `strategy`, `runs-on` and the trigger filters
   under `on:`.
 - Go variables in any `env:`, such as `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GOINSECURE`,

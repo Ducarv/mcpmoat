@@ -544,22 +544,22 @@ func TestWalkJobEnv(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			w, j := onlyJob(t, tt.in)
-			env, err := w.jobEnv(j)
+			env, err := w.mappingAt(j.body, "env")
 			if tt.wantErr != "" {
 				wantErr(t, err, tt.wantErr)
 				return
 			}
 			if err != nil {
-				t.Fatalf("jobEnv() error = %v", err)
+				t.Fatalf("mappingAt() error = %v", err)
 			}
 			if tt.wantLen < 0 {
 				if env != nil {
-					t.Errorf("jobEnv() = %v, want nil", env)
+					t.Errorf("mappingAt() = %v, want nil", env)
 				}
 				return
 			}
 			if env == nil || len(env.Content)/2 != tt.wantLen {
-				t.Errorf("jobEnv() = %v, want %d keys", env, tt.wantLen)
+				t.Errorf("mappingAt() = %v, want %d keys", env, tt.wantLen)
 			}
 		})
 	}
@@ -801,6 +801,63 @@ func TestShow(t *testing.T) {
 			t.Parallel()
 			if got := show(tt.in); got != tt.want {
 				t.Errorf("show(%.20q...) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKeyIs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string // the text of the key node
+		want bool
+	}{
+		{name: "exact", key: "needs", want: true},
+		{name: "upper case", key: "NEEDS", want: true},
+		{name: "mixed case", key: "Needs", want: true},
+		{name: "padded with spaces", key: " needs ", want: true},
+		{name: "padded and upper case", key: "  NEEDS  ", want: true},
+		{name: "longer key", key: "needs2", want: false},
+		{name: "shorter key", key: "need", want: false},
+		{name: "other key", key: "gate", want: false},
+		{name: "name inside the key", key: "needs-check", want: false},
+		{name: "empty key", key: "", want: false},
+		{name: "spaces only", key: "   ", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			k := &yaml.Node{Kind: yaml.ScalarNode, Value: tt.key}
+			if got := keyIs(k, "needs"); got != tt.want {
+				t.Errorf("keyIs(%q, needs) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestErrorStrings(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		errs []error
+		want []string
+	}{
+		{name: "nil", errs: nil, want: nil},
+		{name: "empty", errs: []error{}, want: nil},
+		{name: "one", errs: []error{errors.New("a: first")}, want: []string{"a: first"}},
+		{
+			name: "many in order",
+			errs: []error{errors.New("b: second"), errors.New("a: first"), errors.New("c: third")},
+			want: []string{"b: second", "a: first", "c: third"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := errorStrings(tt.errs)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("errorStrings() = %q, want %q", got, tt.want)
 			}
 		})
 	}

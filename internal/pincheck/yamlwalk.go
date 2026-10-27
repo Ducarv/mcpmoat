@@ -306,13 +306,6 @@ func (w *workflow) steps(j job) ([]*yaml.Node, error) {
 	return seq.Content, nil
 }
 
-// jobEnv returns the env mapping of the job j, or nil when the job has no env
-// key. It returns an error when env is not a mapping, for example an
-// expression such as ${{ fromJSON(...) }} that could build a variable.
-func (w *workflow) jobEnv(j job) (*yaml.Node, error) {
-	return w.mappingAt(j.body, "env")
-}
-
 // envProblems returns one problem for each mapping key named env (compared
 // case-insensitively) whose value is not a mapping, at any depth of the
 // workflow, in file order. GitHub reads env at the workflow, the job and the
@@ -403,6 +396,25 @@ func pairs(m *yaml.Node) iter.Seq2[*yaml.Node, *yaml.Node] {
 	}
 }
 
+// keyIs reports whether the key node k names name, when case and the spaces
+// around the key are ignored. The rules that look for if, needs and
+// continue-on-error use it. They overmatch on purpose: a key that GitHub may
+// read as that name must fail the check. lookup does not trim the key, because
+// it must find the same key that GitHub finds.
+func keyIs(k *yaml.Node, name string) bool {
+	return strings.EqualFold(strings.TrimSpace(k.Value), name)
+}
+
+// errorStrings returns the text of each error in errs, in the same order. It
+// returns nil when errs is empty.
+func errorStrings(errs []error) []string {
+	var msgs []string
+	for _, err := range errs {
+		msgs = append(msgs, err.Error())
+	}
+	return msgs
+}
+
 // kindName names the kind of n for a message, such as "a mapping". It names
 // a null scalar (an empty value or null) "an empty value".
 func kindName(n *yaml.Node) string {
@@ -481,7 +493,7 @@ func cutPrefix(s string, n int) string {
 
 // isASCII reports whether s has only ASCII bytes.
 func isASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] >= 0x80 {
 			return false
 		}

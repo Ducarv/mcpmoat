@@ -75,8 +75,8 @@ jobs:
 }
 
 // gvBuild applies mutate to the good set and parses the result. mutate is a
-// grMutation, the same scheme as the GoReleaser tests; nil changes nothing.
-func gvBuild(t *testing.T, mutate grMutation) map[string]*workflow {
+// mutation from helpers_test.go; nil changes nothing.
+func gvBuild(t *testing.T, mutate mutation) map[string]*workflow {
 	t.Helper()
 	fsys := make(fstest.MapFS)
 	for p, src := range goodGovulncheckSet() {
@@ -85,7 +85,7 @@ func gvBuild(t *testing.T, mutate grMutation) map[string]*workflow {
 	if mutate != nil {
 		mutate(t, fsys)
 	}
-	return grWorkflows(t, fsys)
+	return parseWorkflows(t, fsys)
 }
 
 // hasFrag returns a function that reports whether a message contains frag,
@@ -98,16 +98,16 @@ func TestGovulncheckRules(t *testing.T) {
 	t.Parallel()
 
 	// A step of another job, inserted in the jobs mapping of release.yml.
-	extraJob := func(job string) grMutation {
-		return grReplace(releasePath, "jobs:\n  test:", "jobs:\n"+job+"\n  test:")
+	extraJob := func(job string) mutation {
+		return replaceOnce(releasePath, "jobs:\n  test:", "jobs:\n"+job+"\n  test:")
 	}
-	// A step inserted before the govulncheck step of path.
-	extraStep := func(path, step string) grMutation {
-		return grReplace(path, gvTestRunLine, gvTestRunLine+"\n"+step)
+	// A step inserted after the call line of the govulncheck step of path.
+	extraStep := func(path, step string) mutation {
+		return replaceOnce(path, gvTestRunLine, gvTestRunLine+"\n"+step)
 	}
 	// The call line of release.yml replaced with run.
-	releaseRun := func(run string) grMutation {
-		return grReplace(releasePath, gvTestRunLine, run)
+	releaseRun := func(run string) mutation {
+		return replaceOnce(releasePath, gvTestRunLine, run)
 	}
 	const noCall = `no step has the run value ` + gvCall
 	const notAllowed = `names govulncheck, but it is not the GOVULNCHECK_VERSION pin, the call or an allowed name`
@@ -118,10 +118,15 @@ func TestGovulncheckRules(t *testing.T) {
 	jobIf := func(p string, line int, job string) string {
 		return fmt.Sprintf(`%s:%d: the job %q runs govulncheck, so it must not have a job-level if: a skipped job would hide a vulnerability`, p, line, job)
 	}
+	// jobNeeds is the message for a job-level needs: key of the job job, which
+	// runs the call, in the file p at the line line.
+	jobNeeds := func(p string, line int, job string) string {
+		return fmt.Sprintf(`%s:%d: the job %q runs govulncheck, so it must not have a job-level needs: a skipped job it waits for would skip the scan too`, p, line, job)
+	}
 
 	tests := []struct {
 		name    string
-		mutate  grMutation
+		mutate  mutation
 		want    []string // each must be in some message; empty means zero messages
 		notWant []string // none may be in any message
 		n       int      // when > 0, the exact number of messages
@@ -132,24 +137,24 @@ func TestGovulncheckRules(t *testing.T) {
 		// give no message: check reports the missing file once.
 		{
 			name:   "ci.yml missing",
-			mutate: grDelete(ciPath),
+			mutate: deleteFile(ciPath),
 		},
 		{
 			name:   "release.yml missing",
-			mutate: grDelete(releasePath),
+			mutate: deleteFile(releasePath),
 		},
 		{
 			name: "govulncheck.yml missing, so the listed rules do not run",
-			mutate: grAll(
-				grDelete(weeklyPath),
-				grReplace(releasePath, "v1.9.0", "v1.8.0"),
+			mutate: applyAll(
+				deleteFile(weeklyPath),
+				replaceOnce(releasePath, "v1.9.0", "v1.8.0"),
 			),
 		},
 		{
 			name: "missing listed workflow does not skip the other workflows",
-			mutate: grAll(
-				grDelete(ciPath),
-				grSet(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}),
+			mutate: applyAll(
+				deleteFile(ciPath),
+				setFile(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}),
 			),
 			want: []string{".github/workflows/other.yml:1: " + others},
 			n:    1,
@@ -158,23 +163,23 @@ func TestGovulncheckRules(t *testing.T) {
 		// (1) Pins.
 		{
 			name:   "ci.yml has no pin",
-			mutate: grReplace(ciPath, "          GOVULNCHECK_VERSION: v1.9.0\n", ""),
+			mutate: replaceOnce(ciPath, "          GOVULNCHECK_VERSION: v1.9.0\n", ""),
 			want:   []string{".github/workflows/ci.yml: the file must pin one version of govulncheck in GOVULNCHECK_VERSION (a full version such as v1.2.3), found: none"},
 		},
 		{
 			name:   "ci.yml pins two versions",
-			mutate: grReplace(ciPath, "permissions:\n", "env:\n  GOVULNCHECK_VERSION: v1.10.0\npermissions:\n"),
+			mutate: replaceOnce(ciPath, "permissions:\n", "env:\n  GOVULNCHECK_VERSION: v1.10.0\npermissions:\n"),
 			want:   []string{"ci.yml: the file must pin one version of govulncheck in GOVULNCHECK_VERSION (a full version such as v1.2.3), found: v1.10.0, v1.9.0"},
 			// No reference pin, so the pins of the other files are not compared.
 			notWant: []string{"differs"},
 		},
 		{
 			name:   "ci.yml pins one version twice",
-			mutate: grReplace(ciPath, "permissions:\n", "env:\n  GOVULNCHECK_VERSION: v1.9.0\npermissions:\n"),
+			mutate: replaceOnce(ciPath, "permissions:\n", "env:\n  GOVULNCHECK_VERSION: v1.9.0\npermissions:\n"),
 		},
 		{
 			name:   "ci.yml short version is not a pin",
-			mutate: grReplace(ciPath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: v1.9"),
+			mutate: replaceOnce(ciPath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: v1.9"),
 			want: []string{
 				"ci.yml: the file must pin one version of govulncheck in GOVULNCHECK_VERSION (a full version such as v1.2.3), found: none",
 				`.github/workflows/ci.yml:14: "GOVULNCHECK_VERSION" ` + notAllowed,
@@ -182,74 +187,74 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name: "pre-release version is a full version",
-			mutate: grAll(
-				grReplace(ciPath, "v1.9.0", "v1.9.0-rc.1+build.5"),
-				grReplace(releasePath, "v1.9.0", "v1.9.0-rc.1+build.5"),
-				grReplace(weeklyPath, "v1.9.0", "v1.9.0-rc.1+build.5"),
+			mutate: applyAll(
+				replaceOnce(ciPath, "v1.9.0", "v1.9.0-rc.1+build.5"),
+				replaceOnce(releasePath, "v1.9.0", "v1.9.0-rc.1+build.5"),
+				replaceOnce(weeklyPath, "v1.9.0", "v1.9.0-rc.1+build.5"),
 			),
 		},
 		{
 			name:   "release.yml has no pin",
-			mutate: grReplace(releasePath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
+			mutate: replaceOnce(releasePath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
 			want:   []string{".github/workflows/release.yml: the file has no GOVULNCHECK_VERSION pin (a full version such as v1.2.3)"},
 			n:      1,
 		},
 		{
 			name:   "govulncheck.yml has no pin",
-			mutate: grReplace(weeklyPath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
+			mutate: replaceOnce(weeklyPath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
 			want:   []string{".github/workflows/govulncheck.yml: the file has no GOVULNCHECK_VERSION pin"},
 			n:      1,
 		},
 		{
 			name:   "release.yml version with a trailing newline is not a pin",
-			mutate: grReplace(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: |\n            v1.9.0"),
+			mutate: replaceOnce(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: |\n            v1.9.0"),
 			want:   []string{"release.yml: the file has no GOVULNCHECK_VERSION pin", `release.yml:11: "GOVULNCHECK_VERSION" ` + notAllowed},
 		},
 		{
 			// The ^ anchor of fullVersion: text before the v is not a pin.
 			name:    "release.yml version with text before the v is not a pin",
-			mutate:  grReplace(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: xv1.9.0"),
+			mutate:  replaceOnce(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "GOVULNCHECK_VERSION: xv1.9.0"),
 			want:    []string{".github/workflows/release.yml: the file has no GOVULNCHECK_VERSION pin (a full version such as v1.2.3)", `release.yml:11: "GOVULNCHECK_VERSION" ` + notAllowed},
 			notWant: []string{"differs"},
 			n:       2,
 		},
 		{
 			name:   "release.yml pin differs from ci.yml",
-			mutate: grReplace(releasePath, "v1.9.0", "v1.8.0"),
+			mutate: replaceOnce(releasePath, "v1.9.0", "v1.8.0"),
 			want:   []string{`.github/workflows/release.yml:11: the govulncheck pin "v1.8.0" differs from "v1.9.0", the pin in ci.yml`},
 			n:      1,
 		},
 		{
 			name:   "long pin version is cut in the message",
-			mutate: grReplace(releasePath, "v1.9.0", "v1.9.0-"+strings.Repeat("a", 100<<10)),
+			mutate: replaceOnce(releasePath, "v1.9.0", "v1.9.0-"+strings.Repeat("a", 100<<10)),
 			want:   []string{`.github/workflows/release.yml:11: the govulncheck pin "v1.9.0-` + strings.Repeat("a", 80-len("v1.9.0-")) + `"... differs from "v1.9.0", the pin in ci.yml`},
 			n:      1,
 		},
 		{
 			name:   "govulncheck.yml pin differs from ci.yml",
-			mutate: grReplace(weeklyPath, "v1.9.0", "v1.9.1"),
+			mutate: replaceOnce(weeklyPath, "v1.9.0", "v1.9.1"),
 			want:   []string{`.github/workflows/govulncheck.yml:13: the govulncheck pin "v1.9.1" differs from "v1.9.0"`},
 			n:      1,
 		},
 		{
 			name: "quoted pins are accepted",
-			mutate: grAll(
-				grReplace(ciPath, "GOVULNCHECK_VERSION: v1.9.0", `GOVULNCHECK_VERSION: 'v1.9.0'`),
-				grReplace(releasePath, "GOVULNCHECK_VERSION: v1.9.0", `"GOVULNCHECK_VERSION": "v1.9.0"`),
+			mutate: applyAll(
+				replaceOnce(ciPath, "GOVULNCHECK_VERSION: v1.9.0", `GOVULNCHECK_VERSION: 'v1.9.0'`),
+				replaceOnce(releasePath, "GOVULNCHECK_VERSION: v1.9.0", `"GOVULNCHECK_VERSION": "v1.9.0"`),
 			),
 		},
 		{
 			name: "pin in the top-level env is accepted",
-			mutate: grAll(
-				grReplace(releasePath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
-				grReplace(releasePath, "jobs:\n", "env:\n  GOVULNCHECK_VERSION: v1.9.0\njobs:\n"),
+			mutate: applyAll(
+				replaceOnce(releasePath, "          GOVULNCHECK_VERSION: v1.9.0\n", "          OTHER: x\n"),
+				replaceOnce(releasePath, "jobs:\n", "env:\n  GOVULNCHECK_VERSION: v1.9.0\njobs:\n"),
 			),
 		},
 
 		// (2) The call: accepted forms.
 		{
 			name: "call with run as the first key",
-			mutate: grReplace(releasePath, gvTestReleaseStep, `      - run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
+			mutate: replaceOnce(releasePath, gvTestReleaseStep, `      - run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
         name: Vulnerability check
         env:
           GOVULNCHECK_VERSION: v1.9.0`),
@@ -268,7 +273,7 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "call in a flow step",
-			mutate: grReplace(releasePath, gvTestReleaseStep, `      - {name: Vulnerability check, env: {GOVULNCHECK_VERSION: v1.9.0}, run: 'go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...'}`),
+			mutate: replaceOnce(releasePath, gvTestReleaseStep, `      - {name: Vulnerability check, env: {GOVULNCHECK_VERSION: v1.9.0}, run: 'go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...'}`),
 		},
 		{
 			name:   "call with a trailing comment",
@@ -284,13 +289,13 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "call missing in ci.yml",
-			mutate: grReplace(ciPath, gvTestRunLine, "        run: go test ./..."),
+			mutate: replaceOnce(ciPath, gvTestRunLine, "        run: go test ./..."),
 			want:   []string{".github/workflows/ci.yml: " + noCall},
 			n:      1,
 		},
 		{
 			name:   "call missing in govulncheck.yml",
-			mutate: grReplace(weeklyPath, gvTestRunLine, "        run: go test ./..."),
+			mutate: replaceOnce(weeklyPath, gvTestRunLine, "        run: go test ./..."),
 			want:   []string{".github/workflows/govulncheck.yml: " + noCall},
 			n:      1,
 		},
@@ -328,12 +333,12 @@ func TestGovulncheckRules(t *testing.T) {
 		// (2) The call: structure errors.
 		{
 			name:   "no jobs mapping",
-			mutate: grSet(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\n")}),
+			mutate: setFile(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\n")}),
 			want:   []string{".github/workflows/release.yml:1: the workflow has no jobs mapping", "release.yml: " + noCall},
 		},
 		{
 			name:   "jobs is not a mapping",
-			mutate: grSet(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\njobs: []\n")}),
+			mutate: setFile(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\njobs: []\n")}),
 			want:   []string{`.github/workflows/release.yml:5: the value of "jobs" must be a mapping, found a sequence`, "release.yml: " + noCall},
 		},
 		{
@@ -359,20 +364,20 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "steps not a sequence in the only job hides the call",
-			mutate: grSet(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\njobs:\n  test:\n    env:\n      GOVULNCHECK_VERSION: v1.9.0\n    steps: {}\n")}),
+			mutate: setFile(releasePath, &fstest.MapFile{Data: []byte("name: Release\non: push\njobs:\n  test:\n    env:\n      GOVULNCHECK_VERSION: v1.9.0\n    steps: {}\n")}),
 			want:   []string{`release.yml:7: the value of "steps" must be a sequence, found a mapping`, "release.yml: " + noCall},
 		},
 
 		// (3) Names.
 		{
 			name:   "step name names govulncheck",
-			mutate: grReplace(releasePath, "- name: Vulnerability check", "- name: Run govulncheck"),
+			mutate: replaceOnce(releasePath, "- name: Vulnerability check", "- name: Run govulncheck"),
 			want:   []string{`.github/workflows/release.yml:9: "Run govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "name in another case",
-			mutate: grReplace(ciPath, "- name: Vulnerability check", "- name: GoVulnCheck"),
+			mutate: replaceOnce(ciPath, "- name: Vulnerability check", "- name: GoVulnCheck"),
 			want:   []string{`.github/workflows/ci.yml:11: "GoVulnCheck" ` + notAllowed},
 			n:      1,
 		},
@@ -402,7 +407,7 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "pin key in another case is not a pin",
-			mutate: grReplace(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "govulncheck_version: v1.9.0"),
+			mutate: replaceOnce(releasePath, "GOVULNCHECK_VERSION: v1.9.0", "govulncheck_version: v1.9.0"),
 			want:   []string{"release.yml: the file has no GOVULNCHECK_VERSION pin", `release.yml:11: "govulncheck_version" ` + notAllowed},
 		},
 		{
@@ -415,77 +420,79 @@ func TestGovulncheckRules(t *testing.T) {
 		// (3) The allow-list of govulncheck.yml, accepted only exactly.
 		{
 			name:   "top-level name in another case",
-			mutate: grReplace(weeklyPath, "name: govulncheck\non:", "name: Govulncheck\non:"),
+			mutate: replaceOnce(weeklyPath, "name: govulncheck\non:", "name: Govulncheck\non:"),
 			want:   []string{`.github/workflows/govulncheck.yml:1: "Govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "top-level name with another value",
-			mutate: grReplace(weeklyPath, "name: govulncheck\non:", "name: govulncheck weekly\non:"),
+			mutate: replaceOnce(weeklyPath, "name: govulncheck\non:", "name: govulncheck weekly\non:"),
 			want:   []string{`govulncheck.yml:1: "govulncheck weekly" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "top-level name in another file",
-			mutate: grReplace(releasePath, "name: Release", "name: govulncheck"),
+			mutate: replaceOnce(releasePath, "name: Release", "name: govulncheck"),
 			want:   []string{`.github/workflows/release.yml:1: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "name govulncheck as a step name",
-			mutate: grReplace(weeklyPath, "- name: Check for known vulnerabilities", "- name: govulncheck"),
+			mutate: replaceOnce(weeklyPath, "- name: Check for known vulnerabilities", "- name: govulncheck"),
 			want:   []string{`govulncheck.yml:11: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name: "job ID in another case",
-			mutate: grAll(
-				grReplace(weeklyPath, "  govulncheck:\n", "  Govulncheck:\n"),
-				grReplace(weeklyPath, "needs: govulncheck", "needs: notify"),
-				grReplace(weeklyPath, "needs.govulncheck.result", "needs.notify.result"),
+			mutate: applyAll(
+				replaceOnce(weeklyPath, "  govulncheck:\n", "  Govulncheck:\n"),
+				replaceOnce(weeklyPath, "needs: govulncheck", "needs: notify"),
+				replaceOnce(weeklyPath, "needs.govulncheck.result", "needs.notify.result"),
 			),
 			want: []string{`govulncheck.yml:8: "Govulncheck" ` + notAllowed},
 			n:    1,
 		},
 		{
 			name:   "job ID govulncheck in ci.yml",
-			mutate: grReplace(ciPath, "  test:\n", "  govulncheck:\n"),
+			mutate: replaceOnce(ciPath, "  test:\n", "  govulncheck:\n"),
 			want:   []string{`.github/workflows/ci.yml:7: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "job ID govulncheck as a key outside jobs",
-			mutate: grReplace(weeklyPath, "permissions: {}\n", "permissions: {}\nenv:\n  govulncheck: x\n"),
+			mutate: replaceOnce(weeklyPath, "permissions: {}\n", "permissions: {}\nenv:\n  govulncheck: x\n"),
 			want:   []string{`govulncheck.yml:8: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "needs as a list",
-			mutate: grReplace(weeklyPath, "needs: govulncheck", "needs: [govulncheck]"),
+			mutate: replaceOnce(weeklyPath, "needs: govulncheck", "needs: [govulncheck]"),
 			want:   []string{`govulncheck.yml:16: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "needs with another value",
-			mutate: grReplace(weeklyPath, "needs: govulncheck", "needs: Govulncheck"),
+			mutate: replaceOnce(weeklyPath, "needs: govulncheck", "needs: Govulncheck"),
 			want:   []string{`govulncheck.yml:16: "Govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
 			name:   "needs key in another case",
-			mutate: grReplace(weeklyPath, "needs: govulncheck", "Needs: govulncheck"),
+			mutate: replaceOnce(weeklyPath, "needs: govulncheck", "Needs: govulncheck"),
 			want:   []string{`govulncheck.yml:16: "govulncheck" ` + notAllowed},
 			n:      1,
 		},
 		{
+			// The job test of release.yml runs the call, so its needs: is also a
+			// problem (see section 4c). That gives two messages.
 			name:   "needs govulncheck in another file",
-			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    needs: govulncheck\n"),
-			want:   []string{`release.yml:8: "govulncheck" ` + notAllowed},
-			n:      1,
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    needs: govulncheck\n"),
+			want:   []string{`release.yml:8: "govulncheck" ` + notAllowed, jobNeeds(releasePath, 8, "test")},
+			n:      2,
 		},
 		{
 			name:   "failure if with another value",
-			mutate: grReplace(weeklyPath, "== 'cancelled'", "== 'cancelled' || always()"),
+			mutate: replaceOnce(weeklyPath, "== 'cancelled'", "== 'cancelled' || always()"),
 			want:   []string{`govulncheck.yml:17: "failure() || needs.govulncheck.result == 'cancelled' || always()" ` + notAllowed},
 			n:      1,
 		},
@@ -493,13 +500,13 @@ func TestGovulncheckRules(t *testing.T) {
 			// The job of release.yml runs the call, so the job-level if: is also
 			// a problem (see section 4b). That gives two messages.
 			name:   "failure if in another file",
-			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    if: "+gvFailureIf+"\n"),
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    if: "+gvFailureIf+"\n"),
 			want:   []string{`release.yml:8: "` + gvFailureIf + `" ` + notAllowed, jobIf(releasePath, 8, "test")},
 			n:      2,
 		},
 		{
 			name:   "failure if key in another case",
-			mutate: grReplace(weeklyPath, "    if: failure()", "    IF: failure()"),
+			mutate: replaceOnce(weeklyPath, "    if: failure()", "    IF: failure()"),
 			want:   []string{`govulncheck.yml:17: "` + gvFailureIf + `" ` + notAllowed},
 			n:      1,
 		},
@@ -519,7 +526,7 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "continue-on-error in govulncheck.yml at job level",
-			mutate: grReplace(weeklyPath, "    needs: govulncheck\n", "    needs: govulncheck\n    continue-on-error: true\n"),
+			mutate: replaceOnce(weeklyPath, "    needs: govulncheck\n", "    needs: govulncheck\n    continue-on-error: true\n"),
 			want:   []string{".github/workflows/govulncheck.yml:17: " + coe},
 			n:      1,
 		},
@@ -552,19 +559,19 @@ func TestGovulncheckRules(t *testing.T) {
 		// call, or the if of a step.
 		{
 			name:   "job if false on the call job of ci.yml",
-			mutate: grReplace(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    if: false\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    if: false\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(ciPath, 8, "test")},
 			n:      1,
 		},
 		{
 			name:   "job if false on the call job of release.yml",
-			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    if: false\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    if: false\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(releasePath, 7, "test")},
 			n:      1,
 		},
 		{
 			name:   "job if false on the call job of govulncheck.yml",
-			mutate: grReplace(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  govulncheck:\n    if: false\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  govulncheck:\n    if: false\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(weeklyPath, 9, "govulncheck")},
 			n:      1,
 		},
@@ -572,25 +579,25 @@ func TestGovulncheckRules(t *testing.T) {
 			// The if key comes after the steps. A rule that read only the first
 			// key of the job would miss it.
 			name:   "job if false after the steps of the call job",
-			mutate: grReplace(releasePath, gvTestRunLine+"\n", gvTestRunLine+"\n    if: false\n"),
+			mutate: replaceOnce(releasePath, gvTestRunLine+"\n", gvTestRunLine+"\n    if: false\n"),
 			want:   []string{jobIf(releasePath, 13, "test")},
 			n:      1,
 		},
 		{
 			name:   "job if with runner.os on the call job",
-			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    if: runner.os == 'Linux'\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    if: runner.os == 'Linux'\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(releasePath, 7, "test")},
 			n:      1,
 		},
 		{
 			name:   "job if with the key IF in upper case on the call job",
-			mutate: grReplace(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    IF : false\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    IF : false\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(ciPath, 8, "test")},
 			n:      1,
 		},
 		{
 			name:   "job if with a padded key on the call job",
-			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    \" if \": false\n    runs-on: ubuntu-latest\n"),
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    \" if \": false\n    runs-on: ubuntu-latest\n"),
 			want:   []string{jobIf(releasePath, 7, "test")},
 			n:      1,
 		},
@@ -600,53 +607,137 @@ func TestGovulncheckRules(t *testing.T) {
 		},
 		{
 			name:   "step if on the call step is fine",
-			mutate: grReplace(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        if: runner.os == 'Linux'\n"),
+			mutate: replaceOnce(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        if: runner.os == 'Linux'\n"),
 		},
 		{
 			name:   "step if with the key IF in upper case is fine",
-			mutate: grReplace(ciPath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        IF : false\n"),
+			mutate: replaceOnce(ciPath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        IF : false\n"),
 		},
 		{
 			name:   "step if with a padded key is fine",
-			mutate: grReplace(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        \" if \": false\n"),
+			mutate: replaceOnce(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        \" if \": false\n"),
 		},
 		{
 			// needs and the failure if: are names of the failure job. On the
 			// call job they are not allowed, so the name rule reports them. The
-			// job-level if: is also a problem (section 4b).
+			// job-level if: and needs: are also problems (sections 4b and 4c).
 			name: "needs and failure if on the call job of govulncheck.yml",
-			mutate: grReplace(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n",
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n",
 				"  govulncheck:\n    needs: govulncheck\n    if: "+gvFailureIf+"\n    runs-on: ubuntu-latest\n"),
 			want: []string{
 				`govulncheck.yml:9: "govulncheck" ` + notAllowed,
 				`govulncheck.yml:10: "` + gvFailureIf + `" ` + notAllowed,
 				jobIf(weeklyPath, 10, "govulncheck"),
+				jobNeeds(weeklyPath, 9, "govulncheck"),
 			},
-			n: 3,
+			n: 4,
 		},
 		{
 			// The same two names on a job that runs no call are allowed.
 			name: "needs and failure if on a job without the call is fine",
-			mutate: grReplace(weeklyPath, "  notify-failure:\n",
+			mutate: replaceOnce(weeklyPath, "  notify-failure:\n",
 				"  other:\n    needs: govulncheck\n    if: "+gvFailureIf+"\n    steps:\n      - run: echo hi\n  notify-failure:\n"),
+		},
+
+		// (4c) A job-level needs: on a job that runs the call. GitHub skips a
+		// job that waits for a skipped job, so the scan would not run. Each
+		// problem has a twin that is fine: the needs: of a job without the
+		// call, or the needs: of a step.
+		{
+			name:   "needs gate on the call job of ci.yml",
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    needs: gate\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "needs gate on the call job of release.yml",
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    needs: gate\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			name:   "needs gate on the call job of govulncheck.yml",
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  govulncheck:\n    needs: gate\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(weeklyPath, 9, "govulncheck")},
+			n:      1,
+		},
+		{
+			name:   "needs gate in a list on the call job of ci.yml",
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    needs: [gate]\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "needs gate in a list on the call job of release.yml",
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    needs: [gate]\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			name:   "needs gate in a list on the call job of govulncheck.yml",
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  govulncheck:\n    needs: [gate]\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(weeklyPath, 9, "govulncheck")},
+			n:      1,
+		},
+		{
+			name:   "needs with an empty value on the call job of ci.yml",
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    needs:\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "NEEDS key in upper case on the call job of ci.yml",
+			mutate: replaceOnce(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    NEEDS: gate\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "padded needs key on the call job of release.yml",
+			mutate: replaceOnce(releasePath, "    runs-on: ubuntu-latest\n", "    \" needs \": gate\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobNeeds(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			// The needs key comes after the steps. A rule that read only the
+			// first key of the job would miss it.
+			name:   "needs gate after the steps of the call job of release.yml",
+			mutate: replaceOnce(releasePath, gvTestRunLine+"\n", gvTestRunLine+"\n    needs: gate\n"),
+			want:   []string{jobNeeds(releasePath, 13, "test")},
+			n:      1,
+		},
+		{
+			name:   "needs gate on a job without the call is fine",
+			mutate: extraJob("  other:\n    needs: gate\n    steps:\n      - run: echo hi"),
+		},
+		{
+			name:   "needs gate on a job without the call in ci.yml is fine",
+			mutate: replaceOnce(ciPath, "  test:\n", "  lint:\n    needs: test\n    steps:\n      - run: echo hi\n  test:\n"),
+		},
+		{
+			name:   "needs gate on the call step is not read",
+			mutate: replaceOnce(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        needs: gate\n"),
+		},
+		{
+			name:   "NEEDS key on the call step is not read",
+			mutate: replaceOnce(ciPath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        NEEDS: gate\n"),
 		},
 
 		// (5) Another workflow names govulncheck.
 		{
 			name:   "other.yml names govulncheck",
-			mutate: grSet(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: Other\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: govulncheck ./...\n      - run: govulncheck -h\n")}),
+			mutate: setFile(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: Other\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: govulncheck ./...\n      - run: govulncheck -h\n")}),
 			want:   []string{".github/workflows/other.yml:7: " + others},
 			n:      1, // one message per file
 		},
 		{
 			name:   "govulncheck.yaml is not govulncheck.yml",
-			mutate: grSet(".github/workflows/govulncheck.yaml", &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}),
+			mutate: setFile(".github/workflows/govulncheck.yaml", &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}),
 			want:   []string{".github/workflows/govulncheck.yaml:1: " + others},
 			n:      1,
 		},
 		{
 			name:   "other workflow names govulncheck in a key",
-			mutate: grSet(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: Other\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\njobs: {}\n")}),
+			mutate: setFile(".github/workflows/other.yml", &fstest.MapFile{Data: []byte("name: Other\non: push\nenv:\n  GOVULNCHECK_VERSION: v1.9.0\njobs: {}\n")}),
 			want:   []string{".github/workflows/other.yml:4: " + others},
 			n:      1,
 		},
@@ -654,7 +745,7 @@ func TestGovulncheckRules(t *testing.T) {
 		// (6) An unknown workflow that does not name govulncheck.
 		{
 			name:   "unknown workflow without the name is fine",
-			mutate: grSet(".github/workflows/lint.yml", &fstest.MapFile{Data: []byte("name: Lint\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: golangci-lint run\n")}),
+			mutate: setFile(".github/workflows/lint.yml", &fstest.MapFile{Data: []byte("name: Lint\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: golangci-lint run\n")}),
 		},
 	}
 
@@ -684,19 +775,19 @@ func TestGovulncheckRules(t *testing.T) {
 
 func TestGovulncheckStableOrder(t *testing.T) {
 	t.Parallel()
-	mutations := []grMutation{
-		grReplace(releasePath, "v1.9.0", "v1.8.0"),
-		grReplace(ciPath, "- name: Vulnerability check", "- name: govulncheck"),
+	mutations := []mutation{
+		replaceOnce(releasePath, "v1.9.0", "v1.8.0"),
+		replaceOnce(ciPath, "- name: Vulnerability check", "- name: govulncheck"),
 	}
 	// Many other workflows, so that a random map order shows.
 	var wantOthers []string
 	for i := range 20 {
 		p := fmt.Sprintf(".github/workflows/w%02d.yml", i)
-		mutations = append(mutations, grSet(p, &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}))
+		mutations = append(mutations, setFile(p, &fstest.MapFile{Data: []byte("name: govulncheck\non: push\njobs: {}\n")}))
 		wantOthers = append(wantOthers, p)
 	}
 	slices.Sort(wantOthers)
-	mutate := grAll(mutations...)
+	mutate := applyAll(mutations...)
 
 	first := checkGovulncheck(gvBuild(t, mutate))
 	for range 5 {

@@ -334,7 +334,14 @@ pins_case "govulncheck: pin value latest" 1 "govulncheck.yml: the file has no GO
 pins_case "govulncheck: pin value from vars" 1 "has no GOVULNCHECK_VERSION pin" sub "$wfdir/govulncheck.yml" 's/GOVULNCHECK_VERSION: v[0-9.]+/GOVULNCHECK_VERSION: ${{ vars.X }}/'
 pins_case "govulncheck: pin value latest and a decoy pin" 1 "$vuln_name" decoy_pin
 pins_case "govulncheck: short version in all files" 1 "must pin one version of govulncheck" float_govulncheck
-pins_case "govulncheck: two equal pins in a file" 0 "" append_step "$wfdir/release.yml" "$vuln_ver"
+# The second pin is in a job of its own: the last job of release.yml has a needs:
+# key, and a job with the call may not have one.
+pins_case "govulncheck: two equal pins in a file" 0 "" append "$wfdir/release.yml" "  again:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GOVULNCHECK_VERSION: $vuln_ver
+$call"
 pins_case "govulncheck: two different pins in a file" 1 "the govulncheck pin \"v0.0.1\" differs from" append_step "$wfdir/release.yml" v0.0.1
 pins_case "govulncheck: two pins in ci.yml" 1 "must pin one version of govulncheck" append_step "$wfdir/ci.yml" v0.0.1
 pins_case "govulncheck: same extra pin in all files" 1 "must pin one version of govulncheck" same_extra_pin_everywhere
@@ -799,6 +806,18 @@ pins_case "job if: false on a job without the call is fine" 0 "" append "$wfdir/
     if: false
     runs-on: ubuntu-latest'
 pins_case "step if on the call step of govulncheck.yml is fine" 0 "" sub "$wfdir/govulncheck.yml" 's/^      - name: Check for known vulnerabilities$/&\n        if: runner.os == "Linux"/'
+
+# A job-level needs: on the job that runs the call. GitHub skips a job that
+# waits for a skipped job, so the scan would not run. A needs: on a job without
+# the call is fine.
+needs_says='runs govulncheck, so it must not have a job-level needs'
+pins_case "needs: gate on the call job of govulncheck.yml" 1 "the job \"govulncheck\" $needs_says" sub "$wfdir/govulncheck.yml" 's/^  govulncheck:$/  govulncheck:\n    needs: gate/'
+pins_case "needs: [gate] on the call job of govulncheck.yml" 1 "the job \"govulncheck\" $needs_says" sub "$wfdir/govulncheck.yml" 's/^  govulncheck:$/  govulncheck:\n    needs: [gate]/'
+pins_case "needs: gate on the call job of ci.yml" 1 "the job \"test\" $needs_says" sub "$wfdir/ci.yml" 's/^  test:$/  test:\n    needs: gate/'
+pins_case "needs: gate on the call job of release.yml" 1 "the job \"test\" $needs_says" sub "$wfdir/release.yml" 's/^  test:$/  test:\n    needs: gate/'
+pins_case "needs: gate on a job without the call is fine" 0 "" append "$wfdir/ci.yml" '  other:
+    needs: gate
+    runs-on: ubuntu-latest'
 
 # A pin with the form of a pre-release or with quotes is still a full version.
 pins_case "GoReleaser: rc suffix in all files" 0 "" rc_goreleaser

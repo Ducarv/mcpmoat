@@ -14,6 +14,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // repoFiles are the real files that repoCopyFS copies, as slash paths
@@ -248,7 +250,7 @@ func TestRunInjectionInFileName(t *testing.T) {
 
 func TestRunReporterInjection(t *testing.T) {
 	t.Parallel()
-	const msg = "a\n::warning::x %0A b\rc\x1bd\u202ee\xfff"
+	const msg = "a\n::warning::x %0A b\rc\x1bd\u202ee\xfff\u0085\x7fg"
 	tests := []struct {
 		name       string
 		actions    bool
@@ -258,19 +260,19 @@ func TestRunReporterInjection(t *testing.T) {
 		{
 			name:       "github actions",
 			actions:    true,
-			wantStdout: `::error::a\x0a::warning::x %250A b\x0dc\x1bd\u202ee\xfff` + "\n",
+			wantStdout: `::error::a\x0a::warning::x %250A b\x0dc\x1bd\u202ee\xfff\u0085\x7fg` + "\n",
 		},
 		{
 			name:       "plain",
 			actions:    false,
-			wantStderr: msgPrefix + `a\x0a::warning::x %0A b\x0dc\x1bd\u202ee\xfff` + "\n",
+			wantStderr: msgPrefix + `a\x0a::warning::x %0A b\x0dc\x1bd\u202ee\xfff\u0085\x7fg` + "\n",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
-			newReporter(&stdout, &stderr, tt.actions).problem(msg)
+			reporter{stdout: &stdout, stderr: &stderr, actions: tt.actions}.problem(msg)
 			if stdout.String() != tt.wantStdout {
 				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
 			}
@@ -278,42 +280,6 @@ func TestRunReporterInjection(t *testing.T) {
 				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
 			}
 			assertNoRawControl(t, stdout.String()+stderr.String())
-		})
-	}
-}
-
-func TestSafeText(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "empty", in: "", want: ""},
-		{name: "plain ASCII", in: "ci.yml:3: GOVULNCHECK_VERSION is v1.2.3", want: "ci.yml:3: GOVULNCHECK_VERSION is v1.2.3"},
-		{name: "percent and colons stay", in: "::error:: 100%", want: "::error:: 100%"},
-		{name: "printable UTF-8 stays", in: "héllo 世界", want: "héllo 世界"},
-		{name: "newline", in: "a\nb", want: `a\x0ab`},
-		{name: "workflow command after newline", in: "x\n::warning::y", want: `x\x0a::warning::y`},
-		{name: "carriage return", in: "a\rb", want: `a\x0db`},
-		{name: "tab", in: "a\tb", want: `a\x09b`},
-		{name: "NUL", in: "a\x00b", want: `a\x00b`},
-		{name: "ESC", in: "\x1b[31mred", want: `\x1b[31mred`},
-		{name: "DEL", in: "a\x7fb", want: `a\x7fb`},
-		{name: "C1 control", in: "a\u0085b", want: `a\u0085b`},
-		{name: "bidi override", in: "a\u202eb", want: `a\u202eb`},
-		{name: "zero-width space", in: "a\u200bb", want: `a\u200bb`},
-		{name: "tag character above U+FFFF", in: "a\U000e0041b", want: `a\U000e0041b`},
-		{name: "invalid byte", in: "a\xffb", want: `a\xffb`},
-		{name: "truncated rune", in: "a\xe4\xb8", want: `a\xe4\xb8`},
-		{name: "literal backslash stays", in: `a\x0ab`, want: `a\x0ab`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := safeText(tt.in); got != tt.want {
-				t.Errorf("safeText(%q) = %q, want %q", tt.in, got, tt.want)
-			}
 		})
 	}
 }
@@ -515,6 +481,163 @@ func TestCheckNotLoaded(t *testing.T) {
 	}
 }
 
+// renamedEntry is a directory entry with another name. The data is the same.
+type renamedEntry struct {
+	fs.DirEntry
+	name string
+}
+
+// Name returns the name of the entry that nameFoldFS shows.
+func (e renamedEntry) Name() string { return e.name }
+
+// nameFoldFS is a file system that ignores case for ci.yml, as macOS does. Stat
+// and Open find ci.yml, but the listing of workflowDir shows the entry CI.yml.
+type nameFoldFS struct {
+	fstest.MapFS
+}
+
+// fold returns the name of the file that the case-folded name CI.yml stands for.
+func (f nameFoldFS) fold(name string) string {
+	if name == wf("CI.yml") {
+		return ciPath
+	}
+	return name
+}
+
+// Open opens the file that name stands for.
+func (f nameFoldFS) Open(name string) (fs.File, error) { return f.MapFS.Open(f.fold(name)) }
+
+// ReadFile reads the file that name stands for.
+func (f nameFoldFS) ReadFile(name string) ([]byte, error) {
+	return f.MapFS.ReadFile(f.fold(name))
+}
+
+// Stat returns the info of the file that name stands for.
+func (f nameFoldFS) Stat(name string) (fs.FileInfo, error) {
+	return f.MapFS.Stat(f.fold(name))
+}
+
+// ReadDir returns the entries of name, with ci.yml shown as CI.yml.
+func (f nameFoldFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := f.MapFS.ReadDir(name)
+	for i, e := range entries {
+		if path.Join(name, e.Name()) == ciPath {
+			entries[i] = renamedEntry{DirEntry: e, name: "CI.yml"}
+		}
+	}
+	return entries, err
+}
+
+// notInListing is the notLoaded problem for the required workflow p.
+func notInListing(p string) string {
+	return p + ": the pin checks need this workflow, but it is not in the listing of " + workflowDir
+}
+
+// TestNotLoaded checks notLoaded alone. A required workflow gets a problem only
+// when it is not in wfs and no loader put its path in reported. The text of a
+// message in an earlier problem does not matter.
+func TestNotLoaded(t *testing.T) {
+	t.Parallel()
+	loaded := mustParse(t, ciPath, "on: push\n")
+	tests := []struct {
+		name     string
+		loaded   []string // the paths that wfs holds
+		reported []string // the paths that a loader or checkRequired reported
+		want     []string // the problems, in the order of requiredFiles
+	}{
+		{
+			name: "nothing loaded or reported",
+			want: []string{notInListing(ciPath), notInListing(releasePath), notInListing(weeklyPath)},
+		},
+		{
+			name:   "a loaded workflow gives no problem",
+			loaded: []string{ciPath},
+			want:   []string{notInListing(releasePath), notInListing(weeklyPath)},
+		},
+		{
+			name:     "a path reported by a loader gives no problem",
+			reported: []string{releasePath},
+			want:     []string{notInListing(ciPath), notInListing(weeklyPath)},
+		},
+		{
+			name:     "a path reported by checkRequired gives no problem",
+			loaded:   []string{ciPath, releasePath},
+			reported: []string{weeklyPath},
+		},
+		{
+			name:     "a reported path that is not a workflow is ignored",
+			loaded:   []string{ciPath, releasePath, weeklyPath},
+			reported: []string{docPath},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wfs := make(map[string]*workflow)
+			for _, p := range tt.loaded {
+				wfs[p] = loaded
+			}
+			reported := make(map[string]bool)
+			for _, p := range tt.reported {
+				reported[p] = true
+			}
+			got := notLoaded(wfs, reported)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("notLoaded() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckNotLoadedCaseFold checks a file system that ignores case. The file
+// ci.yml is found but listed as CI.yml. It is loaded under that name, so
+// notLoaded gives one problem for ci.yml, and no other problem says so.
+func TestCheckNotLoadedCaseFold(t *testing.T) {
+	t.Parallel()
+	got := check(nameFoldFS{MapFS: repoCopyFS(t)})
+	var notListed []string
+	for _, p := range got {
+		if strings.Contains(p, "not in the listing of") {
+			notListed = append(notListed, p)
+		}
+	}
+	if want := []string{notInListing(ciPath)}; !slices.Equal(notListed, want) {
+		t.Errorf("check() problems %q, want exactly %q", notListed, want)
+	}
+}
+
+// TestCheckNotLoadedAfterRequired checks a path that checkRequired reports and
+// that the listing does not show. The problem is the one of checkRequired, and
+// notLoaded adds no second problem for the same file.
+func TestCheckNotLoadedAfterRequired(t *testing.T) {
+	t.Parallel()
+	fsys := repoCopyFS(t)
+	delete(fsys, ciPath)
+	fsys[ciPath+"/inner"] = &fstest.MapFile{Data: []byte("x")}
+	got := check(hideEntryFS{MapFS: fsys, hide: ciPath})
+	want := []string{ciPath + ": is not a regular file"}
+	if !slices.Equal(got, want) {
+		t.Errorf("check() = %q, want only %q", got, want)
+	}
+}
+
+// TestCheckLoaderReportedNotRepeated checks a workflow that does not parse.
+// loadWorkflows reports it, so notLoaded must not report it again.
+func TestCheckLoaderReportedNotRepeated(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{ciPath, releasePath, weeklyPath} {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			fsys := repoCopyFS(t)
+			fsys[p] = &fstest.MapFile{Data: []byte("a: [\n")}
+			got := check(fsys)
+			if len(got) != 1 || !strings.HasPrefix(got[0], p+": parse YAML: ") {
+				t.Errorf("check() = %q, want only the parse problem of %s", got, p)
+			}
+		})
+	}
+}
+
 func TestCheckWorkflowNames(t *testing.T) {
 	t.Parallel()
 	// Each file names govulncheck, so a file that check reads gives one
@@ -643,7 +766,7 @@ func TestCheckSameProblemOneLine(t *testing.T) {
 			want:  `the job "broken" must be a mapping, found a scalar`,
 		},
 		{
-			// The GoReleaser rule (jobEnv) and the env rule (envProblems)
+			// The GoReleaser rule (grJobPins) and the env rule (envProblems)
 			// read the env of a job.
 			name:  "job env that is not a mapping",
 			old:   "jobs:\n",
@@ -1043,17 +1166,22 @@ func TestCheckRootSymlinkWorkflow(t *testing.T) {
 
 func TestLoadWorkflowsMissingDir(t *testing.T) {
 	t.Parallel()
-	wfs, problems := loadWorkflows(fstest.MapFS{"CONTRIBUTING.md": {Data: []byte("x")}})
-	if len(wfs) != 0 || len(problems) != 0 {
-		t.Errorf("loadWorkflows(no dir) = %v, %q; want no workflow and no problem", wfs, problems)
+	reported := make(map[string]bool)
+	wfs, problems := loadWorkflows(fstest.MapFS{"CONTRIBUTING.md": {Data: []byte("x")}}, reported)
+	if len(wfs) != 0 || len(problems) != 0 || len(reported) != 0 {
+		t.Errorf("loadWorkflows(no dir) = %v, %q, reported %v; want no workflow, no problem and no reported path", wfs, problems, reported)
 	}
 }
 
 func TestLoadWorkflowsKeys(t *testing.T) {
 	t.Parallel()
-	wfs, problems := loadWorkflows(repoCopyFS(t))
+	reported := make(map[string]bool)
+	wfs, problems := loadWorkflows(repoCopyFS(t), reported)
 	if len(problems) != 0 {
 		t.Fatalf("loadWorkflows() problems = %q, want none", problems)
+	}
+	if len(reported) != 0 {
+		t.Errorf("loadWorkflows() reported %v, want no path", reported)
 	}
 	for _, name := range []string{"ci.yml", "release.yml", "govulncheck.yml"} {
 		if wfs[wf(name)] == nil {
@@ -1069,12 +1197,16 @@ func TestLoadWorkflowsTooLarge(t *testing.T) {
 	t.Parallel()
 	fsys := repoCopyFS(t)
 	fsys[wf("big.yml")] = &fstest.MapFile{Data: bytes.Repeat([]byte("#"), maxFileBytes+1)}
-	wfs, problems := loadWorkflows(fsys)
+	reported := make(map[string]bool)
+	wfs, problems := loadWorkflows(fsys, reported)
 	if wfs[wf("big.yml")] != nil {
 		t.Error("loadWorkflows() loaded a file over the size limit")
 	}
 	if countPrefix(problems, wf("big.yml")) != 1 {
 		t.Errorf("loadWorkflows() problems = %q, want one for big.yml", problems)
+	}
+	if !reported[wf("big.yml")] {
+		t.Errorf("loadWorkflows() reported = %v, want big.yml", reported)
 	}
 }
 
@@ -1128,7 +1260,7 @@ func manyProblemsFS(n int) fstest.MapFS {
 func reportLines(t *testing.T, problems []string, actions bool) (int, []string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := report(newReporter(&stdout, &stderr, actions), problems)
+	code := report(reporter{stdout: &stdout, stderr: &stderr, actions: actions}, problems)
 	out, prefix, other := stderr.String(), msgPrefix, stdout.String()
 	if actions {
 		out, prefix, other = stdout.String(), "::error::", stderr.String()
@@ -1215,7 +1347,7 @@ func TestCheckManyProblemsAreCapped(t *testing.T) {
 				t.Fatalf("report() wrote %d lines, want %d", len(lines), maxProblems+1)
 			}
 			for i := range maxProblems {
-				if want := safeText(problems[i]); lines[i] != want {
+				if want := termsafe.Escape(problems[i]); lines[i] != want {
 					t.Errorf("line %d = %q, want %q", i, lines[i], want)
 				}
 			}

@@ -102,7 +102,7 @@ func main() {
 // are the command-line arguments without the program name. getenv reads an
 // environment variable (os.Getenv in main). It returns the exit code.
 func run(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	out := newReporter(stdout, stderr, getenv("GITHUB_ACTIONS") == "true")
+	out := reporter{stdout: stdout, stderr: stderr, actions: getenv("GITHUB_ACTIONS") == "true"}
 
 	// A FlagSet of its own, with ContinueOnError, returns an error instead of
 	// calling os.Exit, and does not touch the global flag.CommandLine.
@@ -176,10 +176,13 @@ func checkRoot(dir string) ([]string, error) {
 // workflow that did not load gets exactly one problem, here: the rules skip
 // it without a message.
 func check(fsys fs.FS) []string {
-	problems := checkRequired(fsys)
-	wfs, parseProblems := loadWorkflows(fsys)
+	// reported gets each path that checkRequired or loadWorkflows names in a
+	// problem. notLoaded reads it, so it never reads the text of a message.
+	reported := make(map[string]bool)
+	problems := checkRequired(fsys, reported)
+	wfs, parseProblems := loadWorkflows(fsys, reported)
 	problems = append(problems, parseProblems...)
-	problems = append(problems, notLoaded(wfs, problems)...)
+	problems = append(problems, notLoaded(wfs, reported)...)
 	problems = append(problems, checkEnv(wfs)...)
 	problems = append(problems, checkGoreleaser(fsys, wfs)...)
 	problems = append(problems, checkGovulncheck(wfs)...)
@@ -200,23 +203,29 @@ func checkEnv(wfs map[string]*workflow) []string {
 }
 
 // checkRequired returns one problem for each file of requiredFiles that is
-// missing or is not a regular file. fs.Stat follows a symlink, so a required
-// file can be a symlink to a regular file inside the root (the os.Root of
-// checkRoot stops a link that leaves the root). A symlinked CONTRIBUTING.md
-// is a normal file for its readers. loadWorkflows still fails a symlinked
-// workflow, because this check does not follow symlinks in workflowDir.
-func checkRequired(fsys fs.FS) []string {
+// missing or is not a regular file. It adds the path of each such file to
+// reported. fs.Stat follows a symlink, so a required file can be a symlink to
+// a regular file inside the root (the os.Root of checkRoot stops a link that
+// leaves the root). A symlinked CONTRIBUTING.md is a normal file for its
+// readers. loadWorkflows still fails a symlinked workflow, because this check
+// does not follow symlinks in workflowDir.
+func checkRequired(fsys fs.FS, reported map[string]bool) []string {
 	var problems []string
 	for _, name := range requiredFiles() {
 		info, err := fs.Stat(fsys, name)
+		var problem string
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			problems = append(problems, name+": the file is missing")
+			problem = name + ": the file is missing"
 		case err != nil:
-			problems = append(problems, fmt.Sprintf("%s: %v", name, noPath(err)))
+			problem = fmt.Sprintf("%s: %v", name, noPath(err))
 		case !info.Mode().IsRegular():
-			problems = append(problems, notRegular(name))
+			problem = notRegular(name)
+		default:
+			continue
 		}
+		problems = append(problems, problem)
+		reported[name] = true
 	}
 	return problems
 }
@@ -229,27 +238,22 @@ func notRegular(p string) string {
 }
 
 // notLoaded returns one problem for each required workflow that is not in
-// wfs and that no problem in earlier names yet. checkRequired and
+// wfs and that no earlier problem names. The set reported holds the paths
+// that checkRequired and loadWorkflows named in a problem. checkRequired and
 // loadWorkflows report almost every such case: a missing file, a file that
 // is not regular, a symlink or a file that did not parse. One case is left:
 // fs.Stat finds the file, but the listing of workflowDir has no entry with
 // this exact name. That happens on a file system that ignores case, with
 // CI.yml in place of ci.yml, or when the directory cannot be read in full.
 // The rules skip a workflow that is not in wfs, so without this problem the
-// check could pass. Each problem from checkRequired and loadWorkflows starts
-// with the path and a colon, so the prefix finds them.
-func notLoaded(wfs map[string]*workflow, earlier []string) []string {
+// check could pass.
+func notLoaded(wfs map[string]*workflow, reported map[string]bool) []string {
 	var problems []string
 	for _, p := range requiredFiles() {
-		if path.Dir(p) != workflowDir || wfs[p] != nil {
+		if path.Dir(p) != workflowDir || wfs[p] != nil || reported[p] {
 			continue
 		}
-		reported := slices.ContainsFunc(earlier, func(m string) bool {
-			return strings.HasPrefix(m, p+":")
-		})
-		if !reported {
-			problems = append(problems, p+": the pin checks need this workflow, but it is not in the listing of "+workflowDir)
-		}
+		problems = append(problems, p+": the pin checks need this workflow, but it is not in the listing of "+workflowDir)
 	}
 	return problems
 }
@@ -257,14 +261,15 @@ func notLoaded(wfs map[string]*workflow, earlier []string) []string {
 // loadWorkflows reads and parses every workflow file in workflowDir. The map
 // key is the slash path relative to the root, such as
 // ".github/workflows/ci.yml". A file that cannot be read or parsed gives one
-// problem and is not in the map. A missing workflowDir gives no problem,
-// because checkRequired reports the missing workflows.
+// problem and is not in the map. It adds the path of each such file to
+// reported. A missing workflowDir gives no problem, because checkRequired
+// reports the missing workflows.
 //
 // Every value in the map is a non-nil *workflow with a non-nil top node,
 // because parseWorkflow returns an error for any file it cannot load. So the
 // rules do not test a value for nil: a missing key is the only "not loaded"
 // state.
-func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
+func loadWorkflows(fsys fs.FS, reported map[string]bool) (map[string]*workflow, []string) {
 	wfs := make(map[string]*workflow)
 	var problems []string
 	// fs.ReadDir returns the entries it could read and the error, so a read
@@ -284,14 +289,17 @@ func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
 		switch {
 		case e.Type()&fs.ModeSymlink != 0:
 			problems = append(problems, p+": is a symlink. This check does not follow symlinks in "+workflowDir)
+			reported[p] = true
 			continue
 		case !e.Type().IsRegular():
 			problems = append(problems, notRegular(p))
+			reported[p] = true
 			continue
 		}
 		w, err := readWorkflow(fsys, p)
 		if err != nil {
 			problems = append(problems, err.Error())
+			reported[p] = true
 			continue
 		}
 		wfs[p] = w
@@ -402,17 +410,14 @@ type reporter struct {
 	actions        bool
 }
 
-// newReporter returns a reporter that writes to stdout and stderr.
-func newReporter(stdout, stderr io.Writer, actions bool) reporter {
-	return reporter{stdout: stdout, stderr: stderr, actions: actions}
-}
-
 // problem writes one problem line. The message can hold text from a workflow
-// file or a file name, so safeText first makes every control character
+// file or a file name, so termsafe.Escape first makes every control character
 // visible. A message then has no line break, and cannot start a second log
-// line or a second workflow command.
+// line or a second workflow command. termsafe.Escape is used, not
+// termsafe.Quote: Quote adds quotes and writes a newline as \n, and a log line
+// needs neither.
 func (r reporter) problem(msg string) {
-	msg = safeText(msg)
+	msg = termsafe.Escape(msg)
 	// A write error to stdout or stderr cannot be reported anywhere else, and
 	// the exit code still tells the result. The blank identifier drops it.
 	if r.actions {
@@ -422,17 +427,11 @@ func (r reporter) problem(msg string) {
 	_, _ = fmt.Fprintln(r.stderr, msgPrefix+msg)
 }
 
-// safeText returns s with each unsafe rune escaped, as termsafe.Escape does.
-// It does not use termsafe.Quote, which adds quotes and writes a newline as \n.
-func safeText(s string) string {
-	return termsafe.Escape(s)
-}
-
 // escapeCommandData escapes s for the data part of a GitHub workflow command,
 // such as ::error::<data>. GitHub decodes %25, %0D and %0A back to %, \r and
 // \n. A strings.Replacer makes all the replacements in one pass, so the % of
-// a new %0A is not escaped again. problem calls safeText first, so s has no
-// \r or \n; the two escapes are a second guard.
+// a new %0A is not escaped again. problem calls termsafe.Escape first, so s
+// has no \r or \n; the two escapes are a second guard.
 func escapeCommandData(s string) string {
 	return strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").Replace(s)
 }

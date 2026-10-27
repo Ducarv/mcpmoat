@@ -17,8 +17,9 @@ import (
 // The directories and the names that the GoReleaser rules read. The files are
 // ciPath, releasePath and docPath in main.go.
 const (
-	grGitHubDir  = githubDir
 	grActionsDir = "actions" // the directory of the local actions, below .github
+	// grActionsPath is the directory of the local actions, relative to the root.
+	grActionsPath = githubDir + "/" + grActionsDir
 
 	// grPinKey is the env key of the pin. The key must have this exact case.
 	grPinKey = "GORELEASER_VERSION"
@@ -129,9 +130,7 @@ func grScanWorkflow(p string, w *workflow) grScan {
 	// text of a bad-job problem is the same as in the govulncheck rule, so
 	// dedupe keeps one line.
 	jobs, problems := w.jobsAndProblems()
-	for _, err := range problems {
-		s.msgs = append(s.msgs, err.Error())
-	}
+	s.msgs = append(s.msgs, errorStrings(problems)...)
 	for _, j := range jobs {
 		hasPin, pins, msgs := grJobPins(w, j, okPin)
 		s.pins = append(s.pins, pins...)
@@ -171,7 +170,8 @@ func grScanWorkflow(p string, w *workflow) grScan {
 // reports whether the env has the key, and returns the pin when its value is a
 // full version. It adds the key and the value nodes to okPin.
 func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins []grPin, msgs []string) {
-	env, err := w.jobEnv(j)
+	// An env that is not a mapping, such as an expression, is an error.
+	env, err := w.mappingAt(j.body, "env")
 	if err != nil {
 		return false, nil, []string{err.Error()}
 	}
@@ -292,12 +292,12 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 // symlink there fails too, because the check does not follow it. A missing
 // .github/actions is fine.
 func grCheckActions(fsys fs.FS) []string {
-	entries, err := fs.ReadDir(fsys, grGitHubDir)
+	entries, err := fs.ReadDir(fsys, githubDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return []string{fmt.Sprintf("%s: read the directory: %v", grGitHubDir, noPath(err))}
+		return []string{fmt.Sprintf("%s: read the directory: %v", githubDir, noPath(err))}
 	}
 	var msgs []string
 	for _, e := range entries {
@@ -306,14 +306,21 @@ func grCheckActions(fsys fs.FS) []string {
 		if !strings.EqualFold(e.Name(), grActionsDir) {
 			continue
 		}
-		dir := path.Join(grGitHubDir, e.Name())
+		dir := path.Join(githubDir, e.Name())
 		if e.Type()&fs.ModeSymlink != 0 {
-			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions", dir))
+			msgs = append(msgs, symlinkUnder(dir, grActionsPath))
 			continue
 		}
 		msgs = append(msgs, grWalkActions(fsys, dir)...)
 	}
 	return msgs
+}
+
+// symlinkUnder returns the problem for the symlink p, which is under dir. The
+// check does not follow a symlink, so it fails the link. grCheckActions and
+// grWalkActions both use it, so their text is the same.
+func symlinkUnder(p, dir string) string {
+	return fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under %s", p, dir)
 }
 
 // grWalkActions walks the tree dir and returns the problems. fs.WalkDir does
@@ -329,12 +336,12 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 		}
 		switch {
 		case d.Type()&fs.ModeSymlink != 0:
-			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions", p))
+			msgs = append(msgs, symlinkUnder(p, grActionsPath))
 			return nil
 		case d.IsDir():
 			return nil
 		case !d.Type().IsRegular():
-			msgs = append(msgs, fmt.Sprintf("%s: is not a regular file. This check reads only regular files under .github/actions", p))
+			msgs = append(msgs, fmt.Sprintf("%s: is not a regular file. This check reads only regular files under %s", p, grActionsPath))
 			return nil
 		}
 		data, err := readLimited(fsys, p, maxFileBytes)
@@ -343,7 +350,7 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 			return nil
 		}
 		if bytes.Contains(bytes.ToLower(data), []byte(grAction)) {
-			msgs = append(msgs, fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file", p))
+			msgs = append(msgs, fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read %s. Extend the check before you add such a file", p, grActionsPath))
 		}
 		return nil
 	})
