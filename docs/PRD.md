@@ -480,8 +480,12 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   has another version or does not match its text, `scan` and `pin` show the whole current text of
   the tool, so the user can review it before they accept it.
 - The pins directory and `pins.json` must belong to the user and must not be writable by group or
-  others. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
-  [docs/pins.md](pins.md).
+  others. On macOS, their ACL must not give a write right to any user or group. `pins.json` must
+  not be a symlink. mcpmoat checks the directory and the file that it reads, not only their paths.
+  Each parent directory of the pins directory must belong to the user or to root, and must not be
+  writable by group or others unless the sticky bit is set. A pins path where no part exists is an
+  error, not a first run. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are
+  in [docs/pins.md](pins.md).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).
@@ -537,6 +541,11 @@ text diff.
   than 2 MiB, or a config path that is not absolute) is a `high` `MOAT-T2-004`. Such a server is
   never pinned, so its tools are never checked for changes: a hostile server could send one bad tool
   on purpose to stay outside the rug-pull check.
+- `pins.json` has a limit of 32 MiB. A first-run server that would make the file larger is not
+  pinned. It is a `high` `MOAT-T2-004` with a reason that says that the pins file is full, and the
+  other servers are still pinned. If the server no longer fits at save time (another run made the
+  file larger after the report), `scan` prints a warning on stderr, saves the other servers and
+  exits with code 2.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
   (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
@@ -546,8 +555,12 @@ text diff.
   with code 2 before a server starts. They read it again just before they save, to keep what
   another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold
   yet, and prints `pinned N tools for <server>` only for those, after the save. `pin --accept`
-  changes only the entry of its server. This narrows the lost-update window. It does not close it:
-  a lock is issue #150.
+  changes only the entry of its server. For that read and the save, they hold an advisory lock on
+  the pins directory, so two parallel runs keep each other's changes. A run waits up to 10 seconds
+  for the lock, then exits with code 2. A file system that cannot lock runs without the lock, after
+  one warning on stderr. When a save creates a new `pins.json`, `scan` and `pin --accept` print one
+  notice on stderr, because a removed file makes every server look new (see
+  [docs/pins.md](pins.md)).
 
 **FR-13: Accept changes.** `mcpmoat pin --accept <server>` accepts the new version.
 

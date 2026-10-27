@@ -37,9 +37,15 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
-- Not done yet: a lock for `pins.json` (#150).
-- The owner and mode check of the pins directory and `pins.json` does not cover everything. For
-  example, it skips parent directories, ACLs and Windows. See [Known
+- The lock on the pins directory is advisory. mcpmoat v0.1.0 does not lock, so a v0.1.0 run in
+  parallel with a newer run can lose an update. A file system that cannot lock (some network
+  mounts) and Windows run without the lock, after one warning.
+- The owner and mode check covers the pins directory, `pins.json` and each parent directory of the
+  pins directory. On macOS it also checks the ACL of the pins directory and `pins.json`, but not the
+  ACL of a parent. On Windows the owner, mode and parent checks are skipped.
+- `pins.json` has a limit of 32 MiB. A server that would make the file larger is reported and not
+  pinned, so a later change to its tools is not detected. The other servers are still pinned.
+- For the detail, see [Pins and rug pulls](pins.md) and [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 
 ## See also

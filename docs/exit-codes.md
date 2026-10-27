@@ -37,8 +37,9 @@ here.
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
-`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
-that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
+`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved (see [Pins
+errors](#pins-errors)), a report that cannot be written (a closed stdout), an unknown home or
+working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
 error of the LLM step, or more than 500 tools), an internal error of the tool rule step, or another
 internal error. Some of these errors still
@@ -77,6 +78,30 @@ At other times the scan ends with exit code 0 or 1, as if no signal came. A seco
 mcpmoat at once.
 
 To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git hooks](ci.md).
+
+## Pins errors
+
+`scan` and `pin --accept` exit with code 2 when they cannot read or update `pins.json`. With
+`scan`, the report is still printed. The causes are:
+
+- The pins directory, a parent directory of it, or `pins.json` is unsafe: another user owns it,
+  group or others can write it, a macOS ACL lets a user or group write the pins directory or
+  `pins.json`, or `pins.json` is a symlink. A parent passes when root owns it, and a parent with the
+  sticky bit (as `/tmp`) passes. The error names the path and gives a fix (see [Pins and rug
+  pulls](pins.md)).
+- No part of the pins path exists, or a part of it is a file.
+- Another run still holds the lock on the pins directory after 10 seconds. The command prints two
+  lines on stderr: the read error, then `mcpmoat <cmd>: another mcpmoat run is updating the pins
+  file; run the command again in a moment`.
+- At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
+  the file larger after the report. `scan` prints `mcpmoat scan: warning: server <server> not
+  pinned: the pins file is full (32 MiB)` and still saves the other servers.
+- `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
+  32 MiB. It prints `mcpmoat pin: cannot pin <server>: the pins file is full (32 MiB limit); remove
+  servers you no longer use from pins.json` and saves nothing.
+
+A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
+not an execution error.
 
 ## See also
 
