@@ -160,7 +160,8 @@ jobs:
       # boundary: a build that rewrites the git config, the index file or the
       # git object store itself could still hide a change. It also does not
       # cover a build that writes $GITHUB_PATH or $GITHUB_ENV (for example
-      # BASH_ENV, GIT_* or a planted git) or leaves a background process. The real fix is a separate publish
+      # BASH_ENV, GIT_* or a planted git), a global or system git config, or
+      # that leaves a background process. The real fix is a separate publish
       # job with a fresh checkout and no build code (issue #174).
       - name: Check that the build left the scripts unchanged
         shell: bash

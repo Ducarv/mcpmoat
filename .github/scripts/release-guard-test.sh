@@ -84,32 +84,41 @@ awk -v step="$step" '
   fail "$workflow has no run block in the step '$step'."
 grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step '$step' is empty."
 
-# The body is shell that this PR adds. CI has no other lint for it.
+# The run body is inline shell in the workflow, and `shellcheck
+# .github/scripts/*.sh` does not see it.
 if command -v shellcheck >/dev/null 2>&1; then
   total=$((total + 1))
   shellcheck -s bash "$tmp/run.sh" || record_failure "shellcheck reports a problem in the run block"
 fi
 
-# step_text prints the lines of the guard step, up to the next step.
+# A step starts at a line with six spaces and a dash. An unnamed step has the
+# name "". step_text prints the lines of the guard step, up to the next step.
 step_text() {
   awk -v step="$step" '
-    /^ *- name: / {
-      name = $0
-      sub(/^ *- name: */, "", name)
-      sub(/ *$/, "", name)
+    /^      - / {
+      name = ""
+      if ($0 ~ /^      - name: /) {
+        name = $0
+        sub(/^ *- name: */, "", name)
+        sub(/ *$/, "", name)
+      }
       on = (name == step)
     }
     on { print }
   ' "$workflow"
 }
 
-# next_step_name prints the name of the step after the guard step.
+# next_step_name prints the name of the step after the guard step. It prints an
+# empty line when that step has no name.
 next_step_name() {
   awk -v step="$step" '
-    /^ *- name: / {
-      name = $0
-      sub(/^ *- name: */, "", name)
-      sub(/ *$/, "", name)
+    /^      - / {
+      name = ""
+      if ($0 ~ /^      - name: /) {
+        name = $0
+        sub(/^ *- name: */, "", name)
+        sub(/ *$/, "", name)
+      }
       if (seen) { print name; exit }
       seen = (name == step)
     }

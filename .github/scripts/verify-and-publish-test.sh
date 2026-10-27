@@ -2,8 +2,8 @@
 # Tests verify-and-publish.sh with a fake gh. The ci-scripts job in ci.yml
 # runs it. Maintainers can also run it on their machine, from any directory:
 # see CONTRIBUTING.md, Checks. It needs no network and no token. It needs bash
-# and the standard tools mktemp, mkdir, cp, cat, ls, head, tail, find, sed,
-# sort, diff, cmp, grep, cut, tr, wc, printf, chmod and rm.
+# and the standard tools env, mktemp, mkdir, cp, cat, ls, head, tail, find,
+# sed, sort, diff, cmp, grep, cut, tr, wc, printf, chmod and rm.
 #
 # Each case builds a temp tree with a copy of the script, a small dist/ and a
 # fake gh at the front of PATH. The fake keeps a draft or published release in
@@ -128,7 +128,7 @@ new_tree() {
 }
 
 # Changes to the fake release. A case runs one of them.
-good() { :; }
+good() { true; }
 extra_on_draft() { echo extra >"$S/assets/extra.zip"; }
 missing_on_draft() { rm "$S/assets/checksums.txt"; }
 changed_draft() { echo changed >"$S/assets/mcpmoat_9.9.9_darwin_arm64.tar.gz"; }

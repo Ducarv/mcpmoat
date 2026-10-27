@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Tests the notify-failure job of govulncheck.yml with a fake gh. The ci-scripts
 # job in ci.yml runs it. Maintainers can also run it on their machine, from any
-# directory: see CONTRIBUTING.md, Checks. It needs bash, awk and jq. It needs
-# no network and no token.
+# directory: see CONTRIBUTING.md, Checks. It needs bash, jq and the standard
+# tools (awk, grep, sed, cat, mktemp and so on). It needs no network and no
+# token.
 #
 # The job cannot call a script: it has no checkout, so that it can keep
 # `permissions: issues: write` and nothing else. So this test takes the real
 # code out of the workflow. The run body is tested by running it: the test
 # reads the `run: |` body of the step "Open or update the failure issue" in the
-# job notify-failure, and it runs that body. The job keys are checked by text:
-# needs, if, permissions, env and no checkout. A change to the workflow is a
-# change to the code under test.
+# job notify-failure, and it runs that body. The job and step keys are checked
+# by text: needs, if, permissions (only issues: write), env, no checkout, no
+# continue-on-error and no step key other than name and run. A change to the
+# workflow is a change to the code under test.
 #
 # The fake gh keeps a call log. It exits 99 on an unknown subcommand, on a
 # missing `-R owner/repo`, on a missing token, and on a list call without
-# `--label security --state open --limit 200`. A case sets the list that the
+# `--label security --state open --limit 200 --json number,title`. A case sets the list that the
 # fake prints, runs the body, and wants an exit code, the exact calls and a
 # text in the output.
 #
@@ -106,7 +108,8 @@ extract_run "$workflow" >"$tmp/run.sh" ||
   fail "$workflow has no run block in the step 'Open or update the failure issue' of the job notify-failure."
 grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step 'Open or update the failure issue' is empty."
 
-# The body is shell that this PR adds. CI has no other lint for it.
+# The run body is inline shell in the workflow, and `shellcheck
+# .github/scripts/*.sh` does not see it.
 if command -v shellcheck >/dev/null 2>&1; then
   total=$((total + 1))
   shellcheck -s bash "$tmp/run.sh" || record_failure "shellcheck reports a problem in the run block"
@@ -237,29 +240,29 @@ check_text() {
   total=$((total + 1))
   "$@" || record_failure "the job notify-failure: $name"
 }
-can_write_issues() { job_section permissions | grep -Eq '^      issues: write *$'; }
 # shellcheck disable=SC2016 # the ${{ }} must stay literal
 has_job_token() { job_section env | grep -Fqx '      GH_TOKEN: ${{ github.token }}'; }
 no_checkout() { ! grep -q 'actions/checkout' "$tmp/job.txt"; }
-no_contents() { ! job_section permissions | grep -q 'contents:'; }
 
-# The step must not be switched off by a step key, and the job must not hide a
-# failure of its own.
-step_has_no_switch() {
+# The step has only a name and a run key. Any other key, such as if:,
+# continue-on-error:, shell:, env: or working-directory:, could change how the
+# body runs. The job must not hide a failure of its own.
+step_has_only_run() {
   ! awk '
     /^      - name: Open or update the failure issue *$/ { s = 1; next }
     s && /^      - / { s = 0 }
-    s && /^        (if|continue-on-error):/ { print }
+    s && /^        [A-Za-z_-]+:/ && $1 != "run:" { print }
   ' "$tmp/job.txt" | grep -q .
 }
+# The job has the permission issues: write and no other permission.
+only_issues_write() { [ "$(job_section permissions)" = "      issues: write" ]; }
 job_has_no_switch() { ! grep -Eq '^    continue-on-error:' "$tmp/job.txt"; }
 
 check_text "lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
 check_text "lacks the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"
-check_text "the step has an if: or continue-on-error: key" step_has_no_switch
+check_text "the step has a key other than name and run" step_has_only_run
 check_text "the job has a continue-on-error: key" job_has_no_switch
-check_text "lacks 'issues: write' under permissions" can_write_issues
-check_text "has a contents permission" no_contents
+check_text "the permissions are not exactly 'issues: write'" only_issues_write
 check_text "has a checkout step" no_checkout
 check_text "lacks 'GH_TOKEN: \${{ github.token }}' under the job env" has_job_token
 

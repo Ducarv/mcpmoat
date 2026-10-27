@@ -166,8 +166,8 @@ jobs:
 
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
   # fails here and not at tag time. It then tests the snapshot check script and
-  # checks the snapshot artifacts. It uses no secrets: a snapshot does
-  # not publish, so the tap token is not needed.
+  # checks the snapshot artifacts. It uses no secrets: a snapshot does not
+  # publish, so the tap token is not needed.
   release-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -209,8 +209,8 @@ jobs:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
 
-      # check-snapshot-test.sh reads dist/ from the step above. It needs jq,
-      # file and go, which this job has.
+      # check-snapshot-test.sh reads dist/ from the step above. Its header lists
+      # the tools that it needs, which this job has.
       - name: Test the snapshot check
         run: .github/scripts/check-snapshot-test.sh
 
