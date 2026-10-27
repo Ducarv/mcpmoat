@@ -172,6 +172,9 @@ func TestSDKInspectHiddenEnvOthers(t *testing.T) {
 		hidden []string
 		env    map[string]string
 		want   map[string]string
+		// wantSecrets is Result.Secrets. A hidden variable is never read,
+		// so its value is not in it.
+		wantSecrets []string
 	}{
 		{
 			name:   "other variables expand",
@@ -184,12 +187,14 @@ func TestSDKInspectHiddenEnvOthers(t *testing.T) {
 				"MCPMOAT_TEST_EXPANDED": sdkExpandSecret,
 				"MCPMOAT_TEST_DEFAULT":  "fallback-value",
 			},
+			wantSecrets: []string{sdkExpandSecret, "fallback-value"},
 		},
 		{
-			name:   "nil HiddenEnv reads the variable",
-			hidden: nil,
-			env:    map[string]string{"MCPMOAT_TEST_KEY": "${MCPMOAT_TEST_HIDDEN}"},
-			want:   map[string]string{"MCPMOAT_TEST_KEY": sdkHiddenValue},
+			name:        "nil HiddenEnv reads the variable",
+			hidden:      nil,
+			env:         map[string]string{"MCPMOAT_TEST_KEY": "${MCPMOAT_TEST_HIDDEN}"},
+			want:        map[string]string{"MCPMOAT_TEST_KEY": sdkHiddenValue},
+			wantSecrets: []string{sdkHiddenValue},
 		},
 	}
 	for _, tt := range tests {
@@ -211,7 +216,7 @@ func TestSDKInspectHiddenEnvOthers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult())
+			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.wantSecrets...)
 
 			vars, _ := sdkReadEnvFile(t, filepath.Join(dir, "env"))
 			for k, v := range tt.want {

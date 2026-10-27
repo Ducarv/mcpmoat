@@ -20,7 +20,18 @@
 //   - the tool name, cut to [MaxToolNameBytes];
 //   - the tool description, cut to [MaxDescriptionBytes] (or less, so the
 //     encoded message fits in [MaxToolMessageBytes]);
-//   - a flag that tells the model whether one of the two was cut.
+//   - a flag that tells the model whether one of the two was cut;
+//   - a "redacted" flag, only when a secret value was removed (see below).
+//
+// Before the cut, toolMessage replaces each value in [Input.Secrets] of at
+// least 8 bytes (minSecretBytes) with [discover.Mask] in the name and the
+// description (redactSecrets). It marks every byte of every match first,
+// also of matches that overlap, so no part of a secret stays. The values are
+// the secret values that inspect gave to the server (inspect.Result.Secrets),
+// so a token that a server echoes in its tool text does not reach the
+// provider. [SystemPrompt] tells the model that the mask is removed text, not
+// an instruction. A shorter value, or an encoded form of a value (base64,
+// URL-encoded, split across words), is not removed.
 //
 // Nothing else is sent. In particular the request never holds the client
 // config, the server command, its arguments, env values or names, header
@@ -58,5 +69,8 @@
 // # Imports
 //
 // The package uses the standard library and, from this module, only
-// internal/discover (for [discover.Secret] and [discover.IsLoopbackHost]).
+// internal/discover (for [discover.Secret], [discover.Mask] and
+// [discover.IsLoopbackHost]). It does not import internal/inspect: cmd/mcpmoat
+// copies the tool name, the description and inspect.Result.Secrets into an
+// [Input].
 package llm

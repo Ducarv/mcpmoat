@@ -39,10 +39,26 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
   tool schemas and `pins.json`. The key goes only in the auth header of the provider.
-- **The description goes as the server wrote it:** mcpmoat does not remove secret values from it.
-  A server that got a token through its env or headers can put that token into a description, and
-  `--llm` then sends it to the provider. Run `--llm` only if you accept that a tool description can
-  leave your machine as the server wrote it.
+- **Secret values are removed from the tool text:** a server that got a token through its env or
+  headers can put that token into a tool name or description. So before the cut, mcpmoat replaces
+  each secret value that it gave to the server with `********` in the name and the description of
+  the tools of that server. The values are the env values and the header values of the server
+  config, the credential in a header value with an auth scheme (the token in `Bearer <token>`, or
+  the password in a `Basic` value), the user info and the secret query and path parts of the URL,
+  and the values of the expanded placeholders. A value of one server is removed only from the
+  tools of that server. When mcpmoat replaced a value, the user message also has
+  `"redacted": true`. The fixed instruction text tells the model that `********` is removed text
+  and not an instruction. The limits:
+  - A value shorter than 8 bytes is not removed, because it would also hide ordinary words such as
+    `true` or `json`.
+  - An encoded form of a value is not removed, for example the value in base64, URL-encoded, or
+    split with spaces.
+  - A header value of 8 bytes or more is removed also when it is not secret, for example
+    `application/json`. The model then sees `********` in place of that text.
+  - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
+    removed a secret.
+  - The report on your terminal and the `--json` output show the tool name as the server sent it.
+    A server that puts a secret in a tool name can make it show there.
 - **No tool to send:** when no server was inspected, or the inspected servers list no tools,
   `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
   change.

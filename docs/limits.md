@@ -37,6 +37,16 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
+- `--llm` replaces the secret values of a server with `********` in the tool text that it sends,
+  but not all of them (see [What is sent](llm.md)):
+  - A value shorter than 8 bytes is not removed.
+  - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
+    removed.
+  - A header value of 8 bytes or more is replaced also when it is not secret, for example
+    `application/json`.
+- The report on the terminal and the `--json` output show the tool names as the server sent them.
+  mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
+  can make it show on stdout.
 - Not done yet: a lock for `pins.json` (#150).
 - The owner and mode check of the pins directory and `pins.json` does not cover everything. For
   example, it skips parent directories, ACLs and Windows. See [Known

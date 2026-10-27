@@ -46,7 +46,8 @@ docs/                   PRD and other documentation
   holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
   `scan_rules.go` loads the rules and builds the `rules.Analyzer` (`loadRules`), and
   `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds the `--llm`
-  step: it maps each `inspect.Tool` to an `llm.Input` and calls a
+  step: it maps each `inspect.Tool` and the `inspect.Result.Secrets` of its server to an
+  `llm.Input` and calls a
   `toolClassifier`, a small interface that `*llm.Client` implements. The `cli.newClassifier`
   factory builds it, and tests replace the factory with a fake.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
@@ -74,7 +75,8 @@ docs/                   PRD and other documentation
   `scan --json` (`WriteJSON`). See [JSON output](#json-output).
 - `internal/llm`: the optional `--llm` client (FR-17). It sends the name and description of one tool
   to an Anthropic or OpenAI-compatible API and accepts only a fixed verdict. It uses the standard
-  library only. See [The `--llm` classifier](#the---llm-classifier).
+  library and, from this module, only `discover` (see [Import direction](#import-direction)). See
+  [The `--llm` classifier](#the---llm-classifier).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -110,7 +112,10 @@ only in `_test.go` files, so none of them reaches the binary.
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
 `internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.
 This direction is allowed: `inspect` does not import `rules`, so there is no cycle.
-`internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name and description.
+`internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name, the
+description and the secret values of the server (`llm.Input`). `internal/llm` imports `discover`
+for the `discover.Secret` type of these values and of the API key, for `discover.Mask` and for
+`discover.IsLoopbackHost`.
 
 You can check this table with:
 
@@ -289,12 +294,13 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     error)`, prints no report and gives exit code 2.
 - 5e. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the tool
   rule step. It sends the name and description of each tool of each server with status `StatusOK`
-  to the classifier, and adds one advisory row for each tool that the model rates as risky, for
-  each tool with an unusable answer, and for each cut tool (see the verdict rules in
-  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
-  rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
-  the pin rows. The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the
-  dropped LLM rows.
+  to the classifier, with the secret values of that server (`inspect.Result.Secrets` goes to
+  `llm.Input.Secrets`, and `internal/llm` replaces them before the request). It adds one advisory
+  row for each tool that the model rates as risky, for each tool with an unusable answer, and for
+  each cut tool (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It
+  only adds rows: it never changes or drops a rule finding, and it never touches pins, diffs or
+  hints. Only `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not
+  (see step 3). The ignored count includes the dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
   tool and a new tool also get a diff, so the user can review the content of a new tool before
   they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
@@ -805,11 +811,33 @@ directly. The limits of a scan (tool count, workers, timeout, body size) are in 
 
 What is sent: `internal/llm` builds one request for each tool from the fixed system prompt
 (`llm.SystemPrompt`), the fixed verdict schema and one user message. The message is a JSON object
-with `tool_name`, `tool_description` and `truncated`. The description goes into it as a JSON string
-value, never into the system prompt, so it cannot change the instructions of the model.
-`cmd/mcpmoat` gives `internal/llm` only the name and the description (see
-[Import direction](#import-direction)). The cuts are made at a rune boundary: `llm.MaxToolNameBytes`,
-`llm.MaxDescriptionBytes` and, for the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
+with `tool_name`, `tool_description`, `truncated` and, only after a replacement, `redacted`. The
+description goes into it as a JSON string value, never into the system prompt, so it cannot change
+the instructions of the model.
+`cmd/mcpmoat` gives `internal/llm` only the name, the description and the secret values of the
+server (see [Import direction](#import-direction)).
+
+Secret values: a server gets the env values, the header values, the URL secrets and the expanded
+placeholder values from its config, and it can echo them in its tool text. So the path is:
+
+1. On success, `inspect` puts these values in `inspect.Result.Secrets` (`resultSecrets` in
+   `internal/inspect/secrets.go`). Each value has at least 8 bytes and is in the list one time,
+   longest first. The values are `discover.Secret`, so they print and encode only as the mask.
+2. `llmJobs` in `cmd/mcpmoat/scan_llm.go` copies the slice of each server into
+   `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
+   the tools of that server.
+3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`minSecretBytes`) with
+   `discover.Mask` (`********`) in the name and the description, before the cut, so a cut cannot
+   leave a part of a secret. `redactSecrets` marks every byte of every match first, also of
+   matches that overlap, then writes one mask for each run of marked bytes. When it replaced
+   something, the message has `redacted: true`. The field is omitted otherwise. The system prompt
+   tells the model that the mask is removed text, not an instruction.
+
+The report and the JSON output do not use `Result.Secrets`: they print the tool names as the
+server sent them. docs/llm.md lists the limits of the replacement.
+
+The cuts are made at a rune boundary: `llm.MaxToolNameBytes`, `llm.MaxDescriptionBytes` and, for
+the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
 `Verdict.Truncated` when it cut the name or the description. The flag never comes from the model
 output. A cut name or description is a sign of risk, because the part that is not shown can hold
 the payload. The system prompt tells the model to rate it at least `medium`, but the code does not

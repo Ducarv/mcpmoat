@@ -155,11 +155,27 @@ func (v *rmVictim) assertUntouched(t *testing.T) {
 	}
 }
 
+// rmHeaderSecrets are the values of Result.Secrets for rmHeaders: the two
+// header values and the credential after "Bearer", longest first, then by
+// value.
+var rmHeaderSecrets = []string{"Bearer " + rmBearerSecret, rmBearerSecret, rmAPIKeySecret}
+
+// rmQuerySecrets are the values of Result.Secrets for rmHeaders and
+// rmWithSecretQuery (also with the fragment: a fragment never goes to the
+// server, so it is not in Result.Secrets).
+var rmQuerySecrets = []string{"Bearer " + rmBearerSecret, rmBearerSecret, rmAPIKeySecret, rmQuerySecret}
+
 // rmCheckResult compares got with fixtureWant, the way the fixture comment
 // asks: the protocol version must be set, and the schemas are compared by
-// their property names.
-func rmCheckResult(t *testing.T, got Result) {
+// their property names. It checks got.Secrets against wantSecrets (none
+// means nil) on its own, and compares the rest without Secrets, because
+// fixtureWant holds what the server sends and Secrets does not come from the
+// server.
+func rmCheckResult(t *testing.T, got Result, wantSecrets ...string) {
 	t.Helper()
+	checkSecrets(t, got.Secrets, wantSecrets)
+	got.Secrets = nil // got is a copy
+
 	if got.ProtocolVersion == "" {
 		t.Error("ProtocolVersion is empty, want the negotiated version")
 	}
@@ -263,7 +279,12 @@ func TestRemote(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			wantSecrets := rmQuerySecrets
+			if tt.cfgUA {
+				// A User-Agent of the config is a header value like the others.
+				wantSecrets = []string{"Bearer " + rmBearerSecret, cfgUA, rmBearerSecret, rmAPIKeySecret, rmQuerySecret}
+			}
+			rmCheckResult(t, got, wantSecrets...)
 
 			// The query is part of the configured URL, so the server sees it.
 			delete(headers, "user-agent")
@@ -546,7 +567,7 @@ func TestRemoteSameOriginRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Remote() error = %v", err)
 	}
-	rmCheckResult(t, got)
+	rmCheckResult(t, got, rmHeaderSecrets...)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -780,7 +801,7 @@ func TestRemoteFragment(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 
 				urls.mu.Lock()
@@ -1020,7 +1041,7 @@ func TestRemoteUntrusted(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 			})
 		})
@@ -1134,7 +1155,7 @@ func TestRemoteStateGate(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Remote() error = %v", err)
 					}
-					rmCheckResult(t, got)
+					rmCheckResult(t, got, rmQuerySecrets...)
 					return
 				}
 				ce := rmRequireConnectError(t, err, KindConfig)
@@ -1194,7 +1215,9 @@ func TestRemoteUserinfo(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			// "pw" has under 8 bytes, so only the Basic token and header value of
+			// the user info are in Secrets.
+			rmCheckResult(t, got, wantAuth, "dXNlcjpwdw==", rmQuerySecret)
 			rmCheckHeaders(t, rec.requests(), map[string]string{"Authorization": wantAuth}, rmDefaultUA, sse)
 		})
 
@@ -1209,7 +1232,9 @@ func TestRemoteUserinfo(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				// The user info stays in Secrets although the config header wins: it
+				// is in the configured URL.
+				rmCheckResult(t, got, wantAuth, "Bearer "+rmBearerSecret, "dXNlcjpwdw==", rmBearerSecret, rmQuerySecret)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 				for _, req := range rec.requests() {
 					if got := req.Header.Values("Authorization"); len(got) != 1 {
@@ -1464,7 +1489,7 @@ func TestRemoteNewProtocol(t *testing.T) {
 					t.Errorf("InputSchema = %s, want the annotation kept", hidden.InputSchema)
 				}
 				got.Tools = rest
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 
 				reqs := rec.requests()
 				rmCheckHeaders(t, reqs, headers, rmDefaultUA, false)
@@ -1594,7 +1619,7 @@ func TestRemoteStaleStatus(t *testing.T) {
 			t.Fatalf("Remote() error = %v", err)
 		}
 		requireProbe(t, p)
-		rmCheckResult(t, got)
+		rmCheckResult(t, got, rmQuerySecrets...)
 		// The recorder sits inside the wrapper, so it never saw the 404 POST.
 		rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, false)
 	})
@@ -1900,7 +1925,9 @@ func TestSDKInspectRemoteExpand(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Inspect() error = %v", err)
 					}
-					rmCheckResult(t, got)
+					// The token is in the header and in the expanded values: it is
+					// in Secrets one time.
+					rmCheckResult(t, got, "Bearer "+rmExpandToken, rmExpandToken, rmTenant)
 					return
 				}
 

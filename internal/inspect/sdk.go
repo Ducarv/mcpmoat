@@ -117,6 +117,10 @@ func New(opts SDKOptions) *SDKInspector {
 // controls, so callers must escape it with internal/termsafe before they
 // print it. errors.Is(err, context.DeadlineExceeded) works for timeouts.
 //
+// On success, Result.Secrets holds the configured values and the expanded
+// values that have at least minBareSecretLen bytes (see Result.Secrets and
+// resultSecrets). For a remote server, [Remote] sets it.
+//
 // For a stdio server, Inspect:
 //
 //   - builds the command with stdioCommand (NFR-04): no shell, a scrubbed
@@ -198,8 +202,9 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 
 // inspectStdio is Inspect for a server that is not remote. s is the expanded
 // server, parent is the environment for buildEnv, and lookedUp holds the
-// values of the expanded variables, for the scrub of error text. Inspect
-// checked the gates before, and stdioCommand checks them again.
+// values of the expanded variables, for the scrub of error text and for
+// Result.Secrets. Inspect checked the gates before, and stdioCommand checks
+// them again.
 func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent, lookedUp []string) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, classify(err, s, nil, nil)
@@ -293,6 +298,10 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	if err := listInto(ctx, cs, initRes.Capabilities, raw, &result); err != nil {
 		return fail(err)
 	}
+	// The configured env values and the expanded values, for consumers that
+	// remove them from the Result text (see Result.Secrets). Both lists hold
+	// only values of at least minBareSecretLen bytes already.
+	result.Secrets = resultSecrets(secrets)
 	return result, nil
 }
 
@@ -508,7 +517,8 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 }
 
 // envSecrets returns the configured env values of at least minBareSecretLen
-// bytes, for classify to remove from error text. A shorter value is too
+// bytes, for classify to remove from error text and for Result.Secrets (see
+// resultSecrets). A shorter value is too
 // likely to match ordinary words ("1", "true", "info"), and too short to be
 // a token.
 func envSecrets(env discover.SecretMap) []string {

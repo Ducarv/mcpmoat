@@ -157,6 +157,16 @@ func (f *llmFake) received() []llm.Input {
 	return out
 }
 
+// llmSameInput reports whether a and b hold the same tool name, the same
+// description and the same secret values, in the same order. llm.Input holds
+// a slice (Secrets), so == cannot compare it. The values stay in memory: the
+// helper never prints them, and %+v of an llm.Input prints each secret as
+// discover.Mask.
+func llmSameInput(a, b llm.Input) bool {
+	return a.ToolName == b.ToolName && a.Description == b.Description &&
+		slices.EqualFunc(a.Secrets, b.Secrets, func(x, y discover.Secret) bool { return x.Reveal() == y.Reveal() })
+}
+
 // llmFactory is the cli.newClassifier of a test. It counts its calls and keeps
 // the last config. With a nil cl, every call fails the test: the scan must
 // not build a client.
@@ -2007,7 +2017,7 @@ func TestScanLLMSendsOnlyNameAndDescription(t *testing.T) {
 		{ToolName: "t3", Description: "Read a note. " + llmMarkLow},
 	}
 	got := fake.received()
-	if !slices.Equal(got, want) {
+	if !slices.EqualFunc(got, want, llmSameInput) {
 		t.Errorf("classifier inputs = %+v, want %+v", got, want)
 	}
 	dump := fmt.Sprintf("%#v", got)

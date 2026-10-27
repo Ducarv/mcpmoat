@@ -268,7 +268,11 @@ type llmJob struct {
 	// ref is the server of the finding row. ref.Name is the server name
 	// from the config file. It is untrusted.
 	ref report.ServerRef
-	// in is what the classifier gets: the tool name and description only.
+	// in is what the classifier gets: the tool name and description, and the
+	// secret values of the server (inspect.Result.Secrets). The classifier
+	// sends only the name and the description, after it replaces each secret
+	// value in them with discover.Mask (FR-17). The jobs of one server share
+	// one Secrets slice: it is read only.
 	in llm.Input
 }
 
@@ -490,7 +494,9 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 
 // classifyTools sends the name and the description of each tool of each
 // inspected server (inspect.StatusOK) to cl, and returns the LLM findings.
-// It sends nothing else of the tool and nothing of the server.
+// It sends nothing else of the tool and nothing of the server. Each request
+// also carries the secret values of the server (see llmJobs), so that cl
+// removes them from the name and the description before it sends them.
 //
 // The tools go in the order of the servers (inspect.Outcome.Index), then in
 // the order that the server lists them. Only the first maxLLMTools tools are
@@ -561,6 +567,12 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 // llmJobs returns one job for each tool of each inspected server, in the order
 // of the servers (inspect.Outcome.Index), then of the tools. inspect.Run sorts
 // the outcomes, so their order is not the order of the servers.
+//
+// Every job of a server gets the secret values of that server
+// (inspect.Result.Secrets) in llm.Input.Secrets, so that llm removes them
+// from the tool text before the request (FR-17). A server that got a token
+// can put it in a tool name or description. The jobs share the slice of the
+// outcome and never change it.
 func llmJobs(outcomes []inspect.Outcome) []llmJob {
 	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(a, b inspect.Outcome) int {
 		return cmp.Compare(a.Index, b.Index)
@@ -575,7 +587,11 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 			jobs = append(jobs, llmJob{
 				index: o.Index,
 				ref:   ref,
-				in:    llm.Input{ToolName: t.Name, Description: t.Description},
+				in: llm.Input{
+					ToolName:    t.Name,
+					Description: t.Description,
+					Secrets:     o.Result.Secrets,
+				},
 			})
 		}
 	}

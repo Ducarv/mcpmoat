@@ -40,7 +40,8 @@ const (
 	// removes wherever it stands in error text: a token after its auth
 	// scheme, a token used as the URL user name, a query value or a secret
 	// path segment. A server can echo such a part alone ("invalid token
-	// <token>"). A shorter part is too likely to match ordinary words.
+	// <token>"). A shorter part is too likely to match ordinary words. It
+	// is also the shortest value in Result.Secrets (see resultSecrets).
 	minBareSecretLen = 8
 )
 
@@ -92,7 +93,8 @@ type RemoteOptions struct {
 	// top of the ones that Remote finds in srv (header values, URL user
 	// info, query and path parts). SDKInspector.Inspect passes the values of
 	// the variables that it expanded in srv, because they can stand in any
-	// part of the URL. They are never shown.
+	// part of the URL. They are never shown. On success, Remote also puts
+	// them in Result.Secrets.
 	secrets []string
 }
 
@@ -129,6 +131,10 @@ type RemoteOptions struct {
 // These connection warnings go to Result.Warnings on success, before the
 // warnings that the lists add (see listInto), and to ConnectError.Warnings
 // when the inspection fails after the connect started.
+//
+// On success, Result.Secrets holds the header values, the URL user info, the
+// secret URL parts and opts.secrets that have at least minBareSecretLen bytes
+// (see resultSecrets).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -168,7 +174,9 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	endpointURL, user := splitUserinfo(u)
 	endpoint := endpointURL.String()
 
-	// secrets are all the strings that classify removes from error text.
+	// secrets are all the strings that classify removes from error text. On
+	// success, the ones of at least minBareSecretLen bytes also go to
+	// Result.Secrets.
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
 	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
@@ -303,6 +311,12 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// listInto can have added warnings about the lists. Keep them, after
 	// the connection warnings. slices.Concat gives nil when both are empty.
 	result.Warnings = slices.Concat(warnings, result.Warnings)
+	// The same values as the error scrub, for consumers that remove them
+	// from the Result text (see Result.Secrets). resultSecrets drops the
+	// values under minBareSecretLen bytes, such as a short header value or
+	// a short password: in ordinary text they would garble words. The error
+	// scrub still removes them.
+	result.Secrets = resultSecrets(secrets)
 	return result, nil
 }
 

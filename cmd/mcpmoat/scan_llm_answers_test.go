@@ -370,7 +370,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 		slices.SortStableFunc(gotIn, func(a, b llm.Input) int {
 			return strings.Compare(a.ToolName+"\x00"+a.Description, b.ToolName+"\x00"+b.Description)
 		})
-		if !slices.Equal(gotIn, wantIn) {
+		if !slices.EqualFunc(gotIn, wantIn, llmSameInput) {
 			t.Errorf("classifier inputs = %+v, want %+v", gotIn, wantIn)
 		}
 	})

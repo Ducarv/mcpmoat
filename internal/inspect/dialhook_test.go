@@ -327,7 +327,7 @@ func TestDialHookSDKInspect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			rmCheckResult(t, got, rmHeaderSecrets...)
 
 			dials := rec.dials()
 			if len(dials) == 0 {

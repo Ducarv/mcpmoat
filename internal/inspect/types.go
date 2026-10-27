@@ -1,6 +1,10 @@
 package inspect
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
 
 // This file holds the result types of an inspection. They do not import the
 // MCP SDK on purpose: they are the stable contract between inspect and the
@@ -9,10 +13,11 @@ import "encoding/json"
 // Every string in these types comes from the MCP server, and a malicious
 // server controls it. Treat it as untrusted text. Callers must escape it with
 // internal/termsafe before they print it to a terminal, and must never
-// execute it or put it into a command or a format string. The one exception
-// is Warning: its strings come from the client config or from fixed lists in
-// mcpmoat, never from the server. Callers must still escape them with
-// internal/termsafe.
+// execute it or put it into a command or a format string. There are two
+// exceptions. Warning: its strings come from the client config or from fixed
+// lists in mcpmoat, never from the server. Callers must still escape them
+// with internal/termsafe. Result.Secrets: its values come from the client
+// config and the environment, and they must never be printed at all.
 //
 // The types have no methods and no struct tags on purpose: output types live
 // in internal/report.
@@ -286,4 +291,39 @@ type Result struct {
 	// or items in a list that the server did not declare. It is nil when there
 	// are none.
 	Warnings []Warning
+
+	// Secrets are the secret values that Inspect gave to the server:
+	//
+	//   - stdio: each configured env value.
+	//   - remote: each configured header value, and the credential after an
+	//     auth scheme ("Bearer <token>").
+	//   - remote: for a "Basic <base64>" header and for the URL user info, the
+	//     password. When the password is empty, the user name instead: the
+	//     name is then the credential, as in https://<token>@host/. The name
+	//     is never in the list when there is a password.
+	//   - remote: for both of these, also the Basic token that Inspect builds
+	//     from the name and the password, alone and as "Basic <token>".
+	//   - remote: the secret query and path parts of the URL, the ones that
+	//     discover.RedactURL masks.
+	//   - both: the values of the expanded variables.
+	//
+	// Each value has at least 8 bytes (minBareSecretLen) and is in the list
+	// one time. A shorter value is too likely to match ordinary words, so a
+	// short password or name is not in the list. Unlike the other fields,
+	// Secrets does not come from the server.
+	//
+	// A server gets these values and can echo them in its tools, prompts or
+	// instructions. Consumers that send Result text off the machine (scan
+	// --llm) use Secrets to remove the values from that text first. The
+	// report does not scrub Result text.
+	//
+	// Never print, log, encode (JSON, gob) or store the values. A
+	// discover.Secret prints and encodes as discover.Mask, so a mistake shows
+	// only the mask. Read a value with Reveal only to compare it with text.
+	// Result is never encoded as a whole, and the pin hash reads Tools only,
+	// so Secrets is not in any output.
+	//
+	// It is nil on error, and nil when no value is long enough. Inspect sets
+	// it on success only. A [Run] Outcome has it in Outcome.Result.
+	Secrets []discover.Secret
 }

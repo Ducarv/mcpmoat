@@ -75,8 +75,14 @@ func sdkJSON(v any) string {
 // prints both values as JSON. JSON does not show the difference between a
 // nil and an empty slice, so if the JSON is equal it prints the Go values
 // too.
-func sdkAssertResult(t *testing.T, got, want inspect.Result) {
+//
+// It checks got.Secrets against wantSecrets (none means nil) on its own, and
+// compares the rest without Secrets: want is what the server sends, and
+// Secrets does not come from the server.
+func sdkAssertResult(t *testing.T, got, want inspect.Result, wantSecrets ...string) {
 	t.Helper()
+	inspect.CheckSecrets(t, got.Secrets, wantSecrets)
+	got.Secrets, want.Secrets = nil, nil // both are copies
 	if reflect.DeepEqual(got, want) {
 		return
 	}
@@ -478,23 +484,30 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 		name string
 		env  map[string]string
 		want map[string]string
+		// wantSecrets is Result.Secrets: the configured env values of at
+		// least 8 bytes. The parent values never are in it.
+		wantSecrets []string
 	}{
 		{
-			name: "configured key is added",
-			env:  map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
-			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv, "npm_config_yes": "false"},
+			name:        "configured key is added",
+			env:         map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
+			want:        map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv, "npm_config_yes": "false"},
+			wantSecrets: []string{discovertest.CanaryEnv},
 		},
 		{
-			name: "configured PATH replaces the parent PATH",
-			env:  map[string]string{"PATH": "/mcpmoat/config/bin"},
-			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/mcpmoat/config/bin", "npm_config_yes": "false"},
+			name:        "configured PATH replaces the parent PATH",
+			env:         map[string]string{"PATH": "/mcpmoat/config/bin"},
+			want:        map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/mcpmoat/config/bin", "npm_config_yes": "false"},
+			wantSecrets: []string{"/mcpmoat/config/bin"},
 		},
 		{
-			name: "configured key with a parent name gets the configured value",
-			env:  map[string]string{"AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
-			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv, "npm_config_yes": "false"},
+			name:        "configured key with a parent name gets the configured value",
+			env:         map[string]string{"AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
+			want:        map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv, "npm_config_yes": "false"},
+			wantSecrets: []string{discovertest.CanaryEnv},
 		},
 		{
+			// "true" has under 8 bytes, so Secrets is nil.
 			name: "configured npm_config_yes wins over the forced entry",
 			env:  map[string]string{"npm_config_yes": "true"},
 			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "npm_config_yes": "true"},
@@ -513,7 +526,7 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult())
+			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.wantSecrets...)
 
 			vars, raw := sdkReadEnvFile(t, envfile)
 			if !reflect.DeepEqual(vars, tt.want) {
@@ -764,7 +777,7 @@ func TestSDKInspectStateGate(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Inspect() error = %v, want nil", err)
 				}
-				sdkAssertResult(t, res, inspecttest.BenignResult())
+				sdkAssertResult(t, res, inspecttest.BenignResult(), discovertest.CanaryEnv)
 				sdkReadPID(t, pidfile)
 				return
 			}
@@ -885,6 +898,10 @@ func TestSDKInspectExpand(t *testing.T) {
 		envfile   string // the envfile arg; ${MCPMOAT_TEST_DIR} etc. are placeholders
 		env       map[string]string
 		want      func(dir string) map[string]string
+		// secrets gives the values that Result.Secrets must hold: the
+		// looked-up values and the expanded env values. inspect.WantSecrets
+		// drops the short ones and sorts them.
+		secrets func(dir, fixture string) []string
 	}{
 		{
 			name:    "claude code",
@@ -906,6 +923,9 @@ func TestSDKInspectExpand(t *testing.T) {
 					"npm_config_yes":        "false",
 				}
 			},
+			secrets: func(dir, fixture string) []string {
+				return []string{fixture, dir, sdkExpandSecret, "fallback-value", "a-" + sdkExpandSecret + "-b"}
+			},
 		},
 		{
 			name:    "cursor global",
@@ -925,6 +945,9 @@ func TestSDKInspectExpand(t *testing.T) {
 					"npm_config_yes":        "false",
 				}
 			},
+			secrets: func(dir, fixture string) []string {
+				return []string{fixture, dir, sdkExpandSecret, "/home/mcpmoat-test"}
+			},
 		},
 		{
 			name:    "cursor project",
@@ -940,6 +963,11 @@ func TestSDKInspectExpand(t *testing.T) {
 					"MCPMOAT_TEST_BASE": filepath.Base(dir),
 					"npm_config_yes":    "false",
 				}
+			},
+			secrets: func(dir, fixture string) []string {
+				// ${workspaceFolder} is no lookup, and the base name of a
+				// test directory is short.
+				return []string{fixture, filepath.Base(dir)}
 			},
 		},
 		{
@@ -958,6 +986,9 @@ func TestSDKInspectExpand(t *testing.T) {
 					"MCPMOAT_TEST_EXPANDED": sdkExpandSecret,
 					"npm_config_yes":        "false",
 				}
+			},
+			secrets: func(_, fixture string) []string {
+				return []string{fixture, sdkExpandSecret}
 			},
 		},
 		{
@@ -982,6 +1013,11 @@ func TestSDKInspectExpand(t *testing.T) {
 					"npm_config_yes":       "false",
 				}
 			},
+			secrets: func(_, _ string) []string {
+				// MCPMOAT_TEST_VALUE is refused before the lookup, so its
+				// value is not in Secrets.
+				return []string{"fallback-value", "/home/mcpmoat-test"}
+			},
 		},
 		{
 			// An untrusted server reads only the base variables, also
@@ -1004,6 +1040,9 @@ func TestSDKInspectExpand(t *testing.T) {
 					"npm_config_yes":    "false",
 				}
 			},
+			secrets: func(_, _ string) []string {
+				return []string{"/home/mcpmoat-test", "/usr/bin:/bin"}
+			},
 		},
 		{
 			// An untrusted stdio server keeps the workspace folder: it is
@@ -1023,6 +1062,9 @@ func TestSDKInspectExpand(t *testing.T) {
 					"npm_config_yes":    "false",
 				}
 			},
+			secrets: func(dir, _ string) []string {
+				return []string{filepath.Base(dir)}
+			},
 		},
 		{
 			// Codex does not expand, so the placeholder reaches the child
@@ -1039,6 +1081,10 @@ func TestSDKInspectExpand(t *testing.T) {
 					"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}",
 					"npm_config_yes":        "false",
 				}
+			},
+			secrets: func(_, _ string) []string {
+				// The placeholder as written is the configured value.
+				return []string{"${MCPMOAT_TEST_VALUE}"}
 			},
 		},
 	}
@@ -1074,7 +1120,8 @@ func TestSDKInspectExpand(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
-			sdkAssertResult(t, got, inspecttest.BenignResult())
+			wantSecrets := inspect.WantSecrets(tt.secrets(dir, inspecttest.Fixture(t, "benign"))...)
+			sdkAssertResult(t, got, inspecttest.BenignResult(), wantSecrets...)
 
 			vars, _ := sdkReadEnvFile(t, filepath.Join(dir, "env"))
 			want := tt.want(dir)

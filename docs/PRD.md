@@ -646,19 +646,31 @@ the machine**.
   also with `--json`.
 - What is sent: for each tool of each server that was inspected, only the tool name and the tool
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
-  message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
-  URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
+  message with a fixed system prompt. Secret values are removed from the name and the description
+  first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs, schemas or
+  pins into a request. A cap on the number of tools per scan (500): more tools
   than the cap give exit code 2. docs/llm.md holds the sizes and the other limits. `--ignore` does
   not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
   rule.
-- The description is sent as the server returned it. mcpmoat does not remove configured secret
-  values from it. A server that got a token through its env or headers can put that token into its
-  description, and `--llm` then sends it to the provider. The server already holds the value. The
-  docs/llm.md tells the user to run `--llm` only if they accept that a tool description can leave the
-  machine as the server wrote it.
+- Secret values are removed before the cut. A server that got a token through its env or headers
+  can put that token into a tool name or description. So mcpmoat replaces each secret value that
+  it gave to that server with `********` in the name and the description of the tools of that
+  server, before it cuts them. The values are the configured env values, the header values, the
+  credential parts of a header, the URL user info and the secret URL parts, and the expanded
+  placeholder values. The user message then has the field `redacted: true`, and the system prompt
+  tells the model that `********` is removed text and not an instruction. The limits:
+  - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
+  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed.
+  - A header value that is not secret but has 8 bytes or more (for example `application/json`) is
+    replaced too.
+  - A server can write `********` itself.
+  - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
+    secret that a server puts in a tool name can show on stdout.
+
+  docs/llm.md holds the user text of this rule.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule

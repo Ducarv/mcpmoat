@@ -385,11 +385,11 @@ func TestScanLLMRealClient(t *testing.T) {
 			}
 			slices.SortFunc(got, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
 			want := []llm.Input{{ToolName: "t1", Description: "Read keys. " + llmMarkHigh}, {ToolName: "t2", Description: "Add two numbers."}}
-			if tt.status == 0 && !slices.Equal(got, want) {
+			if tt.status == 0 && !slices.EqualFunc(got, want, llmSameInput) {
 				t.Errorf("tool messages = %+v, want %+v", got, want)
 			}
 			for _, in := range got {
-				if !slices.Contains(want, in) {
+				if !slices.ContainsFunc(want, func(w llm.Input) bool { return llmSameInput(w, in) }) {
 					t.Errorf("tool message %+v is not one of %+v", in, want)
 				}
 			}
