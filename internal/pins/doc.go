@@ -7,6 +7,12 @@
 // copy of the pins of one server, Set checks and changes the pins of one
 // server, and Save writes the file atomically.
 //
+// Load only reads and takes no lock. A run that saves loads with LoadLocked
+// and holds the lock until after Save. Clone gives a copy of the store, so a
+// caller can test Set on the copy without a change to the store. Load and
+// LoadLocked check the path to the pins file before they read it: see
+// docs/pins.md and docs/ARCHITECTURE.md.
+//
 // The file stores per tool the hash and the canonical text (see Pin). The text
 // lets a later run show a diff of a changed tool. The store treats both as
 // opaque strings. The file holds server identities (client, config path,

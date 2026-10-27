@@ -380,13 +380,13 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 	})
 }
 
-// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
-// reads pins.json again before it saves the first-run pins, and sets only the
-// identities that the fresh store does not hold.
 // parallelPinWarning is the warning of scan when another run pinned a server
 // with other tools during the scan.
 const parallelPinWarning = "mcpmoat scan: warning: server srv was pinned by another run with other tools during this scan; run scan again\n"
 
+// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
+// reads pins.json again before it saves the first-run pins, and sets only the
+// identities that the fresh store does not hold.
 func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 	t.Parallel()
 
@@ -802,6 +802,15 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 		if n := strings.Count(out, noExpectNote); n != 1 {
 			t.Errorf("output has the note %d times, want 1", n)
 		}
+		// The save created pins.json: its notice comes after the note and
+		// before the "accepted" line, once.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		if i := strings.Index(out, notice); i < 0 || i <= note || i >= accepted {
+			t.Errorf("want the note (%d), then the new pins file notice (%d), then accepted (%d)\noutput:\n%s", note, i, accepted, out)
+		}
+		if n := strings.Count(out, notice); n != 1 {
+			t.Errorf("output has the new pins file notice %d times, want 1", n)
+		}
 	})
 
 	t.Run("the note shows when the save fails", func(t *testing.T) {
@@ -850,9 +859,12 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 
 		got := e.pin(fakeServers(tools), "--accept", "srv", "--expect", digestOf(t, tools["srv"]...))
 
-		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}})
-		if got.stderr != "" {
-			t.Errorf("stderr = %q, want empty", got.stderr)
+		// The save creates pins.json, so stderr holds the new pins file notice
+		// and nothing else: no note.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}, stderr: []string{notice}})
+		if rest := withoutPinsFileNotice(t, got.stderr, "pin", e.pinsPath()); rest != "" {
+			t.Errorf("stderr without the notice = %q, want empty", rest)
 		}
 	})
 
@@ -1092,7 +1104,7 @@ func TestRelativeConfigPathIsNotPinned(t *testing.T) {
 		e := newPinEnv(t, oneServer("srv"))
 		c, stdout, stderr := e.cli(nil)
 
-		code := c.acceptTools(t.Context(), srv, tools, "")
+		code := c.acceptTools(t.Context(), srv, tools, "", false)
 
 		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the path of its config file is not absolute") {
 			t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d and the path error", code, stdout, stderr, exitError)

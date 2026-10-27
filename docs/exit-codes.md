@@ -22,8 +22,8 @@ here.
   rug pull (`MOAT-T2-001` is high). `scan` says so on stderr: `mcpmoat scan: note: no built-in
   rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1`. It fails
   only in the two fail-closed cases above, or when a description or schema rule from `--rules` is
-  critical: then a finding of that rule and a `MOAT-T1-023` budget finding (see below) give exit
-  code 1.
+  critical: then a finding of that rule and a `MOAT-T1-023` budget finding or a `MOAT-T1-024` cap
+  finding (see below) give exit code 1.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high
   `MOAT-T2-004` finding.
@@ -34,10 +34,18 @@ here.
   `--fail-on critical` item above). It is not an execution error: it gives exit code 1 with the
   default `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on
   stderr, and the other servers still get their own budget.
+- `scan` lists at most 1000 tool rule findings for each server, the most severe ones. It counts the
+  rest and adds one `MOAT-T1-024` finding that says how many it left out ("N more tool findings are
+  not listed; limit M"). Its severity is the highest severity of the description and schema rules that `scan`
+  applies, but never lower than high, as for `MOAT-T1-023`. It is not an execution error: it gives
+  exit code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. The exit code
+  follows `--fail-on` like for any other finding. A `.mcpmoat-ignore` file cannot drop it, because
+  it can come from a cloned repository. Only `--ignore MOAT-T1-024` can.
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
-`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
+`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved (see [Pins
+errors](#pins-errors)), a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, a provider
 refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM
@@ -82,6 +90,33 @@ At other times the scan ends with exit code 0 or 1, as if no signal came. A seco
 mcpmoat at once.
 
 To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git hooks](ci.md).
+
+## Pins errors
+
+`scan` and `pin --accept` exit with code 2 when they cannot read or update `pins.json`. With
+`scan`, the report is still printed. The causes are:
+
+- The pins directory, a parent directory of it, or `pins.json` is unsafe: another user owns it,
+  group or others can write it, a macOS ACL lets a user or group write the pins directory or
+  `pins.json`, or `pins.json` is a symlink, or another user owns a symlink on the path to the pins
+  directory. A parent passes the owner check when root owns it (group or other write without the
+  sticky bit is still refused), and a parent with the sticky bit (as `/tmp`) passes the write
+  check. The error names the path and gives a fix (see [Pins and rug pulls](pins.md)).
+- No part of the pins path exists, or a part of it is a file.
+- Another process still holds the lock on the pins directory after 10 seconds. The command prints
+  two lines on stderr: the read error, then a line that tells you to run the command again (see
+  [Pins and rug pulls](pins.md)).
+- `pins.json` existed at the first read of the command, but it was removed while the command ran.
+  The command saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A
+  real first run is not affected.
+- At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
+  the file larger after the report. `scan` prints a warning for that server and still saves the
+  other servers (see [Pins and rug pulls](pins.md)).
+- `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
+  32 MiB. It prints a message that the pins file is full and saves nothing.
+
+A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
+not an execution error.
 
 ## See also
 

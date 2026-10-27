@@ -500,6 +500,25 @@ type llmLimitsRun struct {
 	// early counts the requests that arrived while stderr did not yet hold
 	// the notice.
 	early int32
+	// pinsPath is the pins.json that the scan created.
+	pinsPath string
+}
+
+// withPinsNotice returns the exact stderr lines for lines, which hold the
+// text after scanPrefix, with the notice of the new pins file before the
+// first pin line. The pin step saves the new pins after the LLM step, so the
+// notice comes after the lines of the LLM step.
+func withPinsNotice(pinsPath string, lines []string) []lineWant {
+	var want []lineWant
+	noticed := false
+	for _, line := range lines {
+		if !noticed && strings.HasPrefix(line, "pinned ") {
+			want = append(want, exactLine(newPinsNoticeLine("scan", pinsPath)))
+			noticed = true
+		}
+		want = append(want, exactLine(scanPrefix+line))
+	}
+	return want
 }
 
 // llmLimitsScan runs "mcpmoat scan --config <file> --llm --llm-base-url
@@ -528,7 +547,7 @@ func llmLimitsScan(t *testing.T, tools map[string][]inspect.Tool, insp inspect.I
 
 	code := c.dispatch(append([]string{"scan", "--config", e.config, "--llm", "--llm-base-url", api.srv.URL}, args...))
 
-	r := llmLimitsRun{code: code, host: api.host, early: early.Load()}
+	r := llmLimitsRun{code: code, host: api.host, early: early.Load(), pinsPath: e.pinsPath()}
 	r.stdout, r.stderr, r.events = log.snapshot()
 	llmAssertNoKey(t, llmTestKey, r.stdout, r.stderr)
 	assertNoEscape(t, r.stdout, r.stderr)
@@ -649,9 +668,7 @@ func TestScanLLMFairCap(t *testing.T) {
 				// The cap line names all the tools over the shares, in one
 				// line also when two servers are cut.
 				want := []lineWant{exactLine(llmWarning("anthropic", r.host)), exactLine(notice), exactLine(llmCapLine(tt.notSent))}
-				for _, line := range tt.pinned {
-					want = append(want, exactLine(scanPrefix+line))
-				}
+				want = append(want, withPinsNotice(r.pinsPath, tt.pinned)...)
 				assertStderrLines(t, r.stderr, want)
 				if llmNotClassified.MatchString(r.stderr) || llmInternalFailed.MatchString(r.stderr) {
 					t.Errorf("stderr reports a failure of the LLM step, want only the cap line:\n%s", r.stderr)
@@ -823,14 +840,13 @@ func TestScanLLMSendingNotice(t *testing.T) {
 				}
 				// The exact lines, in order: the setup warning, the warnings
 				// of the inspection, the notice before the requests (or the
-				// line for no tool), then the pin lines.
+				// line for no tool), then the notice of the new pins file and
+				// the pin lines.
 				want := []lineWant{exactLine(llmWarning("anthropic", r.host))}
 				if tt.failed && jsonOut {
 					want = append(want, exactLine(scanWarnPrefix+"server alpha: failed: inspect: boom"))
 				}
-				for _, line := range tt.wantLines {
-					want = append(want, exactLine(scanPrefix+line))
-				}
+				want = append(want, withPinsNotice(r.pinsPath, tt.wantLines)...)
 				assertStderrLines(t, r.stderr, want)
 				assertContainsNone(t, "stdout", r.stdout, []string{"sending ", "KiB"})
 				// No stdout write comes before the notice.

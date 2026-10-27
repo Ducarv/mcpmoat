@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"text/tabwriter"
 
@@ -26,16 +27,22 @@ import (
 //  2. findPinServer: find the one server that has the --accept name.
 //  3. readPins: check that pins.json can be read. This comes before the next
 //     step, so a corrupt or newer file stops pin before it starts a stdio
-//     server.
+//     server. This is the first read of the command. Whether the file existed
+//     here goes to acceptTools.
 //  4. inspectOne: inspect only that server.
-//  5. acceptTools: read pins.json again, show the diffs, check --expect, set
-//     the pins of this server only and save the file.
+//  5. acceptTools: read pins.json again, show the diffs and check --expect.
+//     Then saveAccepted reads the file once more with the lock on the pins
+//     directory, sets the pins of this server only and saves the file.
 //
-// Nothing is written unless every step before the save worked. The server runs
-// in its own session, so the terminal does not signal it. When the process gets
-// SIGINT, SIGTERM or SIGHUP (see main), the context ends and inspect.Run stops
-// the server. The usage text (pinUsage and usage in cli.go) lists the flags and
-// the exit codes (FR-16).
+// When the pins file existed at the first read of the command and a later read
+// does not find it, pin saves nothing and gives exit code 2 (see
+// pinsRemovedWhileRunning). Nothing is written unless every step before the
+// save worked.
+//
+// The server runs in its own session, so the terminal does not signal it. When
+// the process gets SIGINT, SIGTERM or SIGHUP (see main), the context ends and
+// inspect.Run stops the server. The usage text (pinUsage and usage in cli.go)
+// lists the flags and the exit codes (FR-16).
 func (c *cli) runPin(_ options, args []string) int {
 	a, code, ok := c.parsePinArgs(args)
 	if !ok {
@@ -49,14 +56,15 @@ func (c *cli) runPin(_ options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	if _, ok := c.readPins("pin"); !ok {
+	first, ok := c.readPins("pin")
+	if !ok {
 		return exitError
 	}
 	tools, ok := c.inspectOne(ctx, server, a.connOpts)
 	if !ok {
 		return exitError
 	}
-	return c.acceptTools(ctx, server, tools, a.expect)
+	return c.acceptTools(ctx, server, tools, a.expect, first.Existed())
 }
 
 // pinArgs holds the checked flags of "pin".
@@ -164,15 +172,22 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 
 // acceptTools sets the pins of the server to its tools and saves the store. It
 // prints the diff of each changed or new tool first, so the user sees what the
-// accept changes. It returns the exit code.
+// accept changes. Then saveAccepted does the save with the lock. It returns
+// the exit code.
 //
 // The server can run for a long time, so acceptTools reads pins.json again
-// after the inspection. The diffs, the counts and the save all use that fresh
-// store: the diffs show the change against the entry that the save replaces,
-// and the save keeps an entry that another run wrote in the meantime. An
-// accept always overwrites the entry of this one server. This makes the window
-// for a lost update short but does not close it. A lock on the file is issue
-// #150.
+// after the inspection, without the lock, and prints the diffs against that
+// store. A slow reader of stdout must not hold the lock, so the lock comes
+// only after the diffs, in saveAccepted.
+//
+// firstExisted tells whether pins.json existed at the first read of the
+// command (in runPin, before the server started). When the file existed at the
+// first read and a later read does not find it, it was removed while pin ran.
+// A save would drop every older pin, so pin saves nothing and gives exit code 2
+// (see pinsRemovedWhileRunning). pin checks this twice. The first check is
+// here, right after the read for the diffs, and covers the inspection: it
+// stops pin before it prints a diff in which every tool looks new. The second
+// check is in saveAccepted, at the locked read.
 //
 // With a non-empty expect, it compares that digest with pins.Digest of the
 // tools that it just inspected. This closes a time-of-check to time-of-use gap:
@@ -181,7 +196,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
 // before it saves.
-func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string) int {
+func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string, firstExisted bool) int {
 	name := cutName(server.Name)
 	id := serverIdentity(server)
 	// A relative path gives another identity than the one in the store, so
@@ -199,12 +214,20 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		return exitError
 	}
 
-	// A read error stops pin before the save.
-	store, ok := c.readPins("pin")
+	// A read error stops pin before the save. This read takes no lock: the
+	// diffs below go to stdout, which can be slow (a pager, for example), and
+	// another run must not wait for that.
+	shown, ok := c.readPins("pin")
 	if !ok {
 		return exitError
 	}
-	counts, diffs := c.pinChanges(store, id, server.Name, tools)
+	// The file can go away while the server is inspected. Then every tool
+	// would look new in the diffs, so stop before they print.
+	if pinsRemovedWhileRunning(firstExisted, shown) {
+		c.cmdPrintf("pin", "%s", pinsRemovedText)
+		return exitError
+	}
+	diffs := c.pinChanges(shown, id, server.Name, tools)
 
 	// Show the diffs before pin saves. Do not use fprintf: a write error (a
 	// closed pipe) must stop pin before the save, because the user did not see
@@ -223,17 +246,107 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	if c.interrupted(ctx, "pin") {
 		return exitError
 	}
-	if err := store.Set(id, snap); err != nil {
-		c.cmdErr("pin", "cannot set the pins of server "+name, err)
+	return c.saveAccepted(ctx, name, id, tools, snap, shown)
+}
+
+// saveAccepted is the locked part of acceptTools, like savePinned for scan. It
+// reads pins.json a third time, now with the lock on the pins directory (see
+// readPinsLocked), sets the pins of the server id to snap, saves the file and
+// returns the exit code. name is the server name, already escaped and cut for
+// the messages. tools are the tools that snap pins. shown is the store that
+// acceptTools read for the diffs. acceptTools has already stopped when the file
+// existed at the first read of the command and was gone at the read for the
+// diffs, so shown.Existed() is true whenever the file existed at the first read.
+//
+// saveAccepted holds the lock until the save is done. No other run that locks
+// can save between this read and this save, so the save keeps every entry that
+// another run wrote, and no update is lost. An accept always overwrites the
+// entry of this one server. The counts of the "accepted" line come from the
+// locked store, because they describe the entry that the save replaces. If
+// another run changed that entry after the diffs printed, a warning says that
+// the diffs are against the older pins.
+//
+// saveAccepted writes nothing on stdout or stderr while it holds the lock, so
+// a blocked stdout or stderr never holds the lock. While it holds the lock, it
+// only notes what to print: whether the pins changed, and the error of Set or
+// Save. It releases the lock right after the Save, or right after the step
+// that failed, and only then prints, in this order: the warning, the error,
+// and on success the new pins file notice and the "accepted" line.
+//
+// This is the second check for a removed pins file (see acceptTools). When the
+// file existed at the read for the diffs (shown), and the locked read does not
+// find it, it was removed while pin showed the diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
+// and gives exit code 2. A file that is missing at every read is a real first
+// run: the save creates it.
+//
+// A Set that would make pins.json larger than its size limit
+// (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
+// tells the user to remove old servers. When the save created a new pins file,
+// saveAccepted prints a notice before the "accepted" line (see
+// printNewPinsFile).
+func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store) int {
+	store, release, ok := c.readPinsLocked(ctx, "pin")
+	// release is never nil. Each path below calls release before it prints.
+	// The deferred call is a safety net: a second call does nothing.
+	defer release()
+	if !ok {
+		// readPinsLocked holds no lock after an error, and it printed the
+		// message.
 		return exitError
 	}
-	if err := store.Save(); err != nil {
-		c.cmdErr("pin", "cannot save the pins file", err)
+	// A file that existed at the read for the diffs and is gone now was
+	// removed while pin showed the diffs.
+	if pinsRemovedWhileRunning(shown.Existed(), store) {
+		release()
+		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError
+	}
+	// changed is printed as a warning after the release.
+	changed := pinsChanged(shown, store, id)
+	counts := changeCounts(store, id, tools)
+
+	setErr := store.Set(id, snap)
+	var saveErr error
+	if setErr == nil {
+		saveErr = store.Save()
+	}
+	// The last step that needs the lock is done. Free the lock before the
+	// output: a blocked pipe must not keep other runs from the pins file.
+	release()
+
+	if changed {
+		c.warnf("pin", "another mcpmoat run changed the pins of server %s while pin showed the diff; the diff is against the older pins", name)
+	}
+	if errors.Is(setErr, pins.ErrStoreFull) {
+		c.cmdPrintf("pin", "cannot pin %s: %s; remove servers you no longer use from pins.json", name, pinsFullText)
+		return exitError
+	}
+	if setErr != nil {
+		c.cmdErr("pin", "cannot set the pins of server "+name, setErr)
+		return exitError
+	}
+	if saveErr != nil {
+		c.cmdErr("pin", "cannot save the pins file", saveErr)
+		return exitError
+	}
+	if !store.Existed() {
+		c.printNewPinsFile("pin", store.Path())
 	}
 
 	fprintf(c.stdout, "accepted %s: %s\n", name, counts)
 	return exitOK
+}
+
+// pinsChanged reports whether the entry of the server id differs between the
+// store a, which pin read for the diffs, and the store b, which pin read with
+// the lock. A server that is in one store but not in the other has changed,
+// also when its entry has no tools.
+func pinsChanged(a, b *pins.Store, id pins.Identity) bool {
+	pa, inA := a.Get(id)
+	pb, inB := b.Get(id)
+	// maps.Equal compares the keys and the values. A Pin holds only strings,
+	// so == on two Pins compares their text.
+	return inA != inB || !maps.Equal(pa, pb)
 }
 
 // checkExpect compares expect, when it is not empty, with pins.Digest of snap,
@@ -402,32 +515,49 @@ func (p pinCounts) String() string {
 	return s
 }
 
-// pinChanges counts what accepting tools changes in the pins of the server id,
-// and returns the diff of each changed or new tool. server is the name that the
-// diffs show. A server that is not pinned yet has no pins, so all its tools are
-// new, and each one gets a diff of added lines. It reads the store and does not
-// change it. It prints a warning on stderr for each diff that was cut at the
-// size limit (see appendDiff).
-func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) (pinCounts, []report.ToolDiff) {
+// add counts one change of the kind k.
+func (p *pinCounts) add(k pins.ChangeKind) {
+	switch k {
+	case pins.KindNew:
+		p.added++
+	case pins.KindChanged:
+		p.changed++
+	case pins.KindRemoved:
+		p.removed++
+	case pins.KindUnverified:
+		p.unverified++
+	}
+}
+
+// changeCounts counts what accepting tools changes in the pins of the server
+// id. It makes no diff and prints nothing. saveAccepted uses it on the locked
+// store, after pinChanges gave the diffs, because the counts describe the
+// entry that the save replaces.
+func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pinCounts {
 	var n pinCounts
+	stored, _ := store.Get(id)
+	for _, ch := range pins.Compare(stored, tools) {
+		n.add(ch.Kind)
+	}
+	return n
+}
+
+// pinChanges returns the diff of each tool that accepting tools changes in the
+// pins of the server id: a changed tool, a new tool, and a pinned tool whose
+// pin cannot be checked (see appendDiff). server is the name that the diffs
+// show. A server that is not pinned yet has no pins, so all its tools are new,
+// and each one gets a diff of added lines. It reads the store and does not
+// change it. It prints a warning on stderr for each diff that was cut at the
+// size limit. It does not count the changes: changeCounts does that.
+func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) []report.ToolDiff {
 	var diffs []report.ToolDiff
 	// An unpinned server gives nil pins, and pins.Compare then reports every
 	// valid tool as new.
 	stored, _ := store.Get(id)
 	for _, ch := range pins.Compare(stored, tools) {
-		switch ch.Kind {
-		case pins.KindNew:
-			n.added++
-		case pins.KindChanged:
-			n.changed++
-		case pins.KindRemoved:
-			n.removed++
-		case pins.KindUnverified:
-			n.unverified++
-		}
 		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
-	return n, diffs
+	return diffs
 }
 
 // notInspectedText returns "server <name>: <status>: <reason>" for an outcome

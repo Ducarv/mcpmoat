@@ -611,9 +611,7 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 			assertContainsNone(t, "stdout", stdout, []string{e2eLLMBodyCanary, pinEnvCanary})
 			assertContainsNone(t, "stderr", stderr, []string{e2eLLMBodyCanary, pinEnvCanary})
 			if tt.args == nil {
-				if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{server}) {
-					t.Errorf("server names = %v, want [%s]\nstdout:\n%s", got, server, stdout)
-				}
+				assertServerNames(t, stdout, server)
 			} else {
 				doc := decodeScanJSON(t, stdout)
 				if doc.Complete {
@@ -694,7 +692,7 @@ func TestE2ELLMRetryThenSuccess(t *testing.T) {
 			}
 			e2eNetAssertNoKeyOutput(t, stdout, stderr)
 			// The same stderr as a scan whose provider never fails.
-			wantStderr := []string{e2eLLMWarning(t, provider.srv.URL), llmSendingLine(2, 1), scanPrefix + "pinned 2 tools for " + server}
+			wantStderr := []string{e2eLLMWarning(t, provider.srv.URL), llmSendingLine(2, 1), e2eNewPinsFileNotice("scan", home), scanPrefix + "pinned 2 tools for " + server}
 			if got := nonEmptyLines(stderr); !slices.Equal(got, wantStderr) {
 				t.Errorf("stderr lines = %q, want %q", got, wantStderr)
 			}

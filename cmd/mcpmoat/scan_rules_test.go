@@ -379,15 +379,17 @@ func TestScanRulesWithConnectJSON(t *testing.T) {
 
 	got := scanInWith(t, fake, home, work, "--json", "--rules", scanRulesFixture("extra"))
 
-	// The first scan of the server pins its tool. The low finding does not
+	// The first scan of the server creates pins.json (no XDG_CONFIG_HOME, so
+	// it is under home/.config) and pins its tool. The low finding does not
 	// reach the default --fail-on high.
+	wantStderr := newPinsFileNotice("scan", filepath.Join(home, ".config", "mcpmoat", "pins.json")) + scanRulesPinned
 	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
 		code:     exitOK,
 		noStdout: scanRulesToolTexts,
 		stderr:   []string{scanRulesPinned},
 	})
-	if got.stderr != scanRulesPinned {
-		t.Errorf("stderr = %q, want %q", got.stderr, scanRulesPinned)
+	if got.stderr != wantStderr {
+		t.Errorf("stderr = %q, want %q", got.stderr, wantStderr)
 	}
 	doc := decodeScanJSON(t, got.stdout)
 	want := []report.JSONFinding{toolRow("MOAT-X-001", "low", "ok-srv", "lookup", "description")}

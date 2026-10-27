@@ -12,6 +12,10 @@
 //   - A size cap, checked on Stat and checked again on the bytes read, so a
 //     file that grew after Stat is still caught.
 //
+// ReadBoundedRegularFile does all four steps from a directory path. A caller
+// that must check the directory on its open handle opens it with OpenRoot,
+// checks it, and then opens the file with OpenIfExistsInRoot in the same root.
+//
 // The helpers return OS errors and the sentinel errors below, and no error
 // holds file content. The OS errors are *fs.PathError values that hold the path
 // and the errno only. The sentinels hold no path, so the caller adds the path
@@ -57,54 +61,32 @@ var ErrOutsideRoot = errors.New("path leaves the directory")
 // maxSize is the largest file size in bytes that is read. It must not be
 // negative: with a negative maxSize every file gives ErrTooLarge.
 func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found bool, err error) {
-	data, _, found, err = ReadBoundedRegularFileInfo(dir, name, maxSize)
-	return data, found, err
-}
-
-// ReadBoundedRegularFileInfo works as ReadBoundedRegularFile and also returns
-// the fs.FileInfo of the file that it read. The info comes from Stat on the
-// open file, not from the path, so a caller that checks the owner or the mode
-// of the info checks the same file as the data. found is true exactly when
-// info is not nil. Both are zero when err is not nil. found stays in the result
-// for symmetry with ReadBoundedRegularFile.
-func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, info fs.FileInfo, found bool, err error) {
 	root, err := OpenRoot(dir)
 	if err != nil {
 		if IsMissing(err) {
-			return nil, nil, false, nil
+			return nil, false, nil
 		}
-		return nil, nil, false, err
+		return nil, false, err
 	}
 	defer func() {
 		// Closing the root does not close the files opened through it.
 		_ = root.Close()
 	}()
 
-	f, err := OpenInRoot(root, name)
-	switch {
-	case err == nil:
-		// Go on below.
-	case IsMissing(err):
-		return nil, nil, false, nil
-	case !isOSError(err):
-		// os.Root refuses a path that leaves the root with an error that has no
-		// OS error number (the error type is not exported, so we cannot test
-		// for it with errors.Is). A few other refusals have no number either,
-		// for example an empty name, so the cause is kept in the error.
-		return nil, nil, false, fmt.Errorf("%w: %w", ErrOutsideRoot, err)
-	default:
-		return nil, nil, false, err
+	f, found, err := OpenIfExistsInRoot(root, name)
+	if err != nil || !found {
+		return nil, false, err
 	}
 	defer func() {
 		// The file is read-only, so a close error is not useful.
 		_ = f.Close()
 	}()
 
-	data, info, err = readOpenedInfo(f, maxSize)
+	data, err = ReadOpened(f, maxSize)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, false, err
 	}
-	return data, info, true, nil
+	return data, true, nil
 }
 
 // ReadOpened reads the open file f with a hard size cap. It checks the open
@@ -116,22 +98,15 @@ func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, i
 // ReadBoundedRegularFile). The errors of Stat and of the read come back as they
 // are.
 func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
-	data, _, err := readOpenedInfo(f, maxSize)
-	return data, err
-}
-
-// readOpenedInfo works as ReadOpened and also returns the fs.FileInfo from the
-// Stat of f. info is nil when err is not nil.
-func readOpenedInfo(f fs.File, maxSize int64) ([]byte, fs.FileInfo, error) {
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, ErrNotRegular
+		return nil, ErrNotRegular
 	}
 	if info.Size() > maxSize {
-		return nil, nil, ErrTooLarge
+		return nil, ErrTooLarge
 	}
 
 	// Read one byte more than the limit, so we can tell if the file grew after
@@ -142,12 +117,12 @@ func readOpenedInfo(f fs.File, maxSize int64) ([]byte, fs.FileInfo, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(f, readMax))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if int64(len(data)) > maxSize {
-		return nil, nil, ErrTooLarge
+		return nil, ErrTooLarge
 	}
-	return data, info, nil
+	return data, nil
 }
 
 // OpenRoot opens the directory dir as an os.Root without blocking.
@@ -178,8 +153,43 @@ func OpenRoot(dir string) (*os.Root, error) {
 // OpenFlags, so opening a FIFO returns at once and does not wait for a writer;
 // ReadOpened then refuses the FIFO. The file is nil when the error is not nil.
 // A path that leaves root gives the os.Root error as it is, not ErrOutsideRoot.
+// OpenIfExistsInRoot gives ErrOutsideRoot and the found result.
 func OpenInRoot(root *os.Root, name string) (*os.File, error) {
 	return root.OpenFile(name, OpenFlags, 0)
+}
+
+// OpenIfExistsInRoot opens the file called name, below root, with OpenInRoot
+// and sorts the error the same way as ReadBoundedRegularFile. Use it when the
+// caller already holds root, so the directory checks and the file open use the
+// same directory handle and no path race is possible between them. Unlike
+// OpenInRoot, it returns found, and it turns a path that leaves root into
+// ErrOutsideRoot.
+//
+// found is false, with a nil file and a nil error, when no file can exist at
+// the path (see IsMissing). A path that leaves root gives ErrOutsideRoot. Other
+// OS errors come back as they are, so callers can still use errors.As with
+// *fs.PathError and errors.Is with fs.ErrPermission. f is nil when found is
+// false or err is not nil.
+//
+// OpenIfExistsInRoot does not check the file type or the size. The caller must
+// Stat the returned file (ReadOpened does this) before it trusts the file, and
+// the caller must close it.
+func OpenIfExistsInRoot(root *os.Root, name string) (f *os.File, found bool, err error) {
+	f, err = OpenInRoot(root, name)
+	switch {
+	case err == nil:
+		return f, true, nil
+	case IsMissing(err):
+		return nil, false, nil
+	case !isOSError(err):
+		// os.Root refuses a path that leaves the root with an error that has no
+		// OS error number (the error type is not exported, so we cannot test
+		// for it with errors.Is). A few other refusals have no number either,
+		// for example an empty name, so the cause is kept in the error.
+		return nil, false, fmt.Errorf("%w: %w", ErrOutsideRoot, err)
+	default:
+		return nil, false, err
+	}
 }
 
 // IsMissing reports whether err means that no file exists at the path: the

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // testBuild is the build information that the CLI tests inject.
@@ -389,7 +390,10 @@ func TestUsageContent(t *testing.T) {
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
 		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
 		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
-		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis",
+		// The ignore file line is checked in two parts, so a comma between the
+		// listed rules does not break the test.
+		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		"the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
@@ -413,13 +417,16 @@ func TestUsageContent(t *testing.T) {
 		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
 		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a finding (MOAT-T1-023):\n",
 		"  high, or critical when a description or schema rule from --rules is critical.\n",
+		// The tool findings cap (MOAT-T1-024) has its own two lines.
+		fmt.Sprintf("  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer),
+		"  at least high.\n",
 		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
 		// exception to "offline". The flag lines and their continuation lines
 		// are checked without the tabwriter padding where it can change.
 		"mcpmoat finds malicious or tampered MCP servers. It runs offline, unless you use scan --llm.\n",
-		"(schema: docs/schema/scan-output.v2.json)\n",
+		fmt.Sprintf("(schema: docs/schema/scan-output.v%d.json)\n", report.SchemaVersion),
 		"  --llm ",
 		"Also ask an LLM to rate each tool description. Off by default. Not with --no-connect\n",
 		"It sends the name and description of every tool to the LLM provider: this data leaves your machine\n",
@@ -459,7 +466,12 @@ func TestUsageContent(t *testing.T) {
 		"built-in config rules (T4 and T5)",
 		"List the servers in the configs and check the configs.",
 		"description and schema rules (T1 and T3",
-		"MOAT-T1-023",
+		// The ignore file line also names MOAT-T1-023, so the scan note is
+		// matched by its full phrase.
+		"is a finding (MOAT-T1-023)",
+		// The ignore file line also names MOAT-T1-024, so the scan note is
+		// matched by its full phrase.
+		"gets one finding (MOAT-T1-024)",
 		"time budget",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once
@@ -486,6 +498,7 @@ func TestUsageContent(t *testing.T) {
 		// schema had version 1.
 		"It runs offline.\n",
 		"scan-output.v1.json",
+		"scan-output.v2.json",
 		// Before issue #143 scan did not apply the tool rules (YAML) or the
 		// rules from --rules.
 		"not applied yet",

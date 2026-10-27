@@ -173,6 +173,8 @@ const (
 // The reserved IDs are:
 //
 //   - RuleAnalysisBudget (MOAT-T1-023), the rule analysis budget finding.
+//   - RuleToolFindingCap (MOAT-T1-024), the summary finding for a server with
+//     more tool findings than the per-server cap.
 //   - Every ID that starts with "MOAT-T2-", the pin findings MOAT-T2-001 to
 //     MOAT-T2-004 of internal/pins.
 //   - Every ID that starts with "MOAT-LLM-", the LLM findings MOAT-LLM-001
@@ -186,7 +188,7 @@ const (
 // them, so a test (TestReservedRuleIDCoversNativeIDs) checks that the list
 // covers their IDs.
 func ReservedRuleID(id string) bool {
-	if strings.EqualFold(id, RuleAnalysisBudget) {
+	if strings.EqualFold(id, RuleAnalysisBudget) || strings.EqualFold(id, RuleToolFindingCap) {
 		return true
 	}
 	return hasPrefixFold(id, pinRuleIDPrefix) || hasPrefixFold(id, llmRuleIDPrefix)
