@@ -83,30 +83,38 @@ type pinnedServer struct {
 // the classifier for every server of a user who runs "scan --llm" there. If it
 // could ignore the budget finding (MOAT-T1-023), it could hide that a server
 // used up its rule time budget, so that the tools after the cut look clean.
-// So the file never ignores these rules (see fileCannotIgnore). Only --ignore
-// on the command line does, because the user typed it.
+// If it could ignore the tool findings cap (MOAT-T1-024), it could hide that
+// findings were left out of the report. So the file never ignores these rules
+// (see fileCannotIgnore). Only --ignore on the command line does, because the
+// user typed it. For the same reason, only --ignore can drop the summary row
+// of the tool findings cap: a cloned repository cannot hide that findings
+// were omitted.
 type scanIgnores struct {
 	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
 	// the findings of the config rules and of the tool rules. It does not drop
-	// the findings of the pin rules, of the LLM rules and of the budget rule
-	// (see ignored).
+	// the findings of the pin rules, of the LLM rules, of the budget rule
+	// and of the tool findings cap (see ignored).
 	all rules.IgnoreList
 	// flags holds only the --ignore entries. It drops the findings of the pin
-	// rules, of the LLM rules and of the budget rule.
+	// rules, of the LLM rules, of the budget rule and of the tool findings
+	// cap.
 	flags rules.IgnoreList
 }
 
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
-// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid or
-// rules.RuleAnalysisBudget. Only --ignore drops the findings of these rules
-// (see scanIgnores).
+// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid,
+// rules.RuleAnalysisBudget or rules.RuleToolFindingCap. Only --ignore drops
+// the findings of these rules (see scanIgnores). In particular, only --ignore
+// can drop the summary row of the tool findings cap, so a cloned repository
+// cannot hide that findings were omitted.
 func fileCannotIgnore(id string) bool {
-	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid || id == rules.RuleAnalysisBudget
+	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid ||
+		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap
 }
 
 // ignored reports whether the user asked to ignore the finding k. For a pin
-// rule, an LLM rule or the budget rule (see fileCannotIgnore) only the
-// --ignore list counts.
+// rule, an LLM rule, the budget rule or the tool findings cap (see
+// fileCannotIgnore) only the --ignore list counts.
 // The second result is true when the .mcpmoat-ignore file has an entry that
 // matches k but is not applied, so that the caller can warn about it (see
 // warnFileCannotIgnore).

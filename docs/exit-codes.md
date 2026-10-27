@@ -22,8 +22,8 @@ here.
   rug pull (`MOAT-T2-001` is high). `scan` says so on stderr: `mcpmoat scan: note: no built-in
   rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1`. It fails
   only in the two fail-closed cases above, or when a description or schema rule from `--rules` is
-  critical: then a finding of that rule and a `MOAT-T1-023` budget finding (see below) give exit
-  code 1.
+  critical: then a finding of that rule and a `MOAT-T1-023` budget finding or a `MOAT-T1-024` cap
+  finding (see below) give exit code 1.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high
   `MOAT-T2-004` finding.
@@ -34,6 +34,13 @@ here.
   `--fail-on critical` item above). It is not an execution error: it gives exit code 1 with the
   default `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on
   stderr, and the other servers still get their own budget.
+- `scan` lists at most 1000 tool rule findings for each server. It counts the rest and adds one
+  `MOAT-T1-024` finding that says how many it left out ("N more tool findings are not listed;
+  limit M"). Its severity is the highest severity of the description and schema rules that `scan`
+  applies, but never lower than high, as for `MOAT-T1-023`. It is not an execution error: it gives
+  exit code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. The exit code
+  follows `--fail-on` like for any other finding. A `.mcpmoat-ignore` file cannot drop it, because
+  it can come from a cloned repository. Only `--ignore MOAT-T1-024` can.
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable

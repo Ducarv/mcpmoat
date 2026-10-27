@@ -42,7 +42,8 @@ const maxToolKeyRunes = 512
 type toolRulesResult struct {
 	// rows are the findings that the ignore list does not drop, in the order
 	// of the servers (inspect.Outcome.Index), then of the tools. The
-	// rules.RuleAnalysisBudget row of a server comes after its tool rows.
+	// rules.RuleAnalysisBudget row and the rules.RuleToolFindingCap row of a
+	// server come after its tool rows.
 	rows []report.FindingRow
 	// ignored counts the findings that the ignore list dropped, by rule ID.
 	// It is nil when the list dropped nothing.
@@ -70,6 +71,17 @@ const (
 		"and found out why they take so long to check. Then run mcpmoat scan again."
 )
 
+// The fixed texts of a rules.RuleToolFindingCap row (see capRow). Like the
+// budget rule, this rule has no YAML file, so the rule set does not hold its
+// texts.
+const (
+	capTitle = "Tool findings over the limit are not listed"
+	capRisk  = "This server has more tool findings than the report lists for one server, " +
+		"so the report is short but not complete. A hostile server can use this to hide a finding among many."
+	capRemediation = "Do not use this server until you have read its tool descriptions and schemas yourself. " +
+		"Treat the findings that the report lists as a sample, not as the full list."
+)
+
 // toolRulesStep applies the description and schema rules of setup.analyzer
 // to the tools of the inspected servers in outcomes (FR-07, FR-09). The rule
 // set setup.checks.set gives the severity and the texts of each finding (see
@@ -89,9 +101,17 @@ const (
 // target ("description" or "schema") in Related. It never holds tool text or
 // pattern text. The ignore list ignore drops rows like the rows of the config
 // rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
-// row, which only --ignore drops (see fileCannotIgnore). It compares the real
+// row and the rules.RuleToolFindingCap row, which only --ignore drops (see
+// fileCannotIgnore). It compares the real
 // tool name, not the Key. The step prints one warning for each rule ID that
 // .mcpmoat-ignore cannot ignore.
+//
+// A server keeps at most toolRulesRun.maxRows tool rows (maxToolRowsPerServer
+// by default), counted after the ignore list: a row that the list drops does
+// not count. The rows over the limit are not kept. At the end of the check of
+// the server, the step adds one rules.RuleToolFindingCap row for them (see
+// capRow) and prints one warning on stderr. The budget row and the cap row do
+// not count toward the limit.
 //
 // counts holds the finding counts of each server by the index of the server
 // (see serverStatuses). The step adds the rows that it keeps for a server to
@@ -110,11 +130,13 @@ func (c *cli) toolRulesStep(ctx context.Context, setup scanSetup, outcomes []ins
 		return toolRulesResult{}, nil
 	}
 	run := toolRulesRun{
-		c:              c,
-		a:              a,
-		set:            setup.checks.set,
-		ignore:         ignore,
-		budget:         setup.toolBudget,
+		c:      c,
+		a:      a,
+		set:    setup.checks.set,
+		ignore: ignore,
+		budget: setup.toolBudget,
+		// maxRows caps the tool rows per server; the cli method picks the default.
+		maxRows:        c.maxToolRowsOrDefault(),
 		budgetSeverity: budgetSeverity(a),
 		counts:         counts,
 	}
@@ -144,12 +166,23 @@ type toolRulesRun struct {
 	set    *rules.Set
 	ignore *scanIgnores
 	budget time.Duration
+	// maxRows is the largest number of tool rows that the step keeps for one
+	// server. Zero or less means maxToolRowsPerServer (see rowLimit). The
+	// budget row and the cap row do not count toward it.
+	maxRows int
 	// budgetSeverity is the severity of a rules.RuleAnalysisBudget row (see
 	// budgetSeverity). It is the same for each server, so the step computes
 	// it once.
 	budgetSeverity rules.Severity
 	counts         []int
 	res            toolRulesResult
+	// kept counts the tool rows that the step kept for the server that it
+	// checks now. checkServer sets it to zero at the start of each server.
+	kept int
+	// omitted counts the tool rows that the step did not keep for the server
+	// that it checks now, because kept reached the limit. checkServer sets it
+	// to zero at the start of each server.
+	omitted int
 	// fileBlocked lists the rule IDs that have a .mcpmoat-ignore entry that
 	// matches a kept row but is not applied (see scanIgnores). Each ID is in
 	// it once, in the order of the first row that it matched.
@@ -164,6 +197,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 	serverCtx, cancel := context.WithTimeout(ctx, r.budget)
 	defer cancel()
 
+	r.kept, r.omitted = 0, 0
 	ref := report.NewServerRef(o.Server)
 	tools := o.Result.Tools
 	for i, t := range tools {
@@ -171,7 +205,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 		// Keep the findings also when err is not nil: every finding that
 		// CheckTool returns is a real match.
 		for _, f := range found {
-			r.add(o.Index, t.Name, textRow(r.set, ref, t.Name, f))
+			r.addTool(o.Index, t.Name, textRow(r.set, ref, t.Name, f))
 		}
 		if err == nil {
 			continue
@@ -190,6 +224,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			r.add(o.Index, "", budgetRow(ref, r.budgetSeverity, notChecked, len(tools)))
 			r.c.scanWarnf("server %s: the rule analysis stopped after %s; %s",
 				cutName(o.Server.Name), r.budget, notCheckedText(notChecked, len(tools)))
+			r.addCapRow(o, ref)
 			return nil
 		default:
 			// A guard: CheckTool fails only when its context ends. The text
@@ -198,23 +233,81 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			return errToolRulesFailed
 		}
 	}
+	r.addCapRow(o, ref)
 	return nil
+}
+
+// rowLimit returns the largest number of tool rows that the step keeps for one
+// server: r.maxRows, or maxToolRowsPerServer when r.maxRows is zero or less.
+func (r *toolRulesRun) rowLimit() int {
+	if r.maxRows > 0 {
+		return r.maxRows
+	}
+	return maxToolRowsPerServer
+}
+
+// addCapRow adds the rules.RuleToolFindingCap row of the server o, with the
+// severity r.budgetSeverity (the same fail-closed severity as the budget row),
+// and prints one warning on stderr. It does nothing when the step kept all the
+// tool rows of the server. The row goes through the ignore list like the
+// budget row: --ignore drops it, .mcpmoat-ignore does not. The warning holds
+// the server name, cut and quoted (see cutName), and two numbers. The
+// warning also appears when --ignore drops the row, as the budget warning does.
+func (r *toolRulesRun) addCapRow(o inspect.Outcome, ref report.ServerRef) {
+	if r.omitted == 0 {
+		return
+	}
+	limit := r.rowLimit()
+	r.add(o.Index, "", capRow(ref, r.budgetSeverity, r.omitted, limit))
+	r.c.scanWarnf("server %s: %s", cutName(o.Server.Name), capText(r.omitted, limit))
 }
 
 // add keeps row, a row of the server at index, or counts it when the ignore
 // list drops it. toolName is the real tool name of the row ("" for a row
 // about the whole server): the ignore list compares it, not the Key of the
-// row.
+// row. add has no limit. It is for the budget row and the cap row (see
+// addTool for the tool rows).
 func (r *toolRulesRun) add(index int, toolName string, row report.FindingRow) {
+	if r.passIgnore(toolName, row) {
+		r.keep(index, row)
+	}
+}
+
+// addTool keeps the tool row row of the server at index, with the limit
+// r.rowLimit. A row that the ignore list drops is counted as ignored and does
+// not count toward the limit. A row over the limit is not kept: it is counted
+// in r.omitted, and addCapRow reports the count at the end of the server.
+func (r *toolRulesRun) addTool(index int, toolName string, row report.FindingRow) {
+	if !r.passIgnore(toolName, row) {
+		return
+	}
+	if r.kept >= r.rowLimit() {
+		r.omitted++
+		return
+	}
+	r.kept++
+	r.keep(index, row)
+}
+
+// passIgnore applies the ignore list to row. It returns false, after it
+// counted the row as ignored, when the list drops the row. It notes the rule
+// ID when a .mcpmoat-ignore entry matches the row but is not applied.
+func (r *toolRulesRun) passIgnore(toolName string, row report.FindingRow) bool {
 	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: toolName}
 	drop, fileBlocked := r.ignore.ignored(key)
 	if drop {
 		r.res.ignored = addIgnored(r.res.ignored, row.RuleID, 1)
-		return
+		return false
 	}
 	if fileBlocked && !slices.Contains(r.fileBlocked, row.RuleID) {
 		r.fileBlocked = append(r.fileBlocked, row.RuleID)
 	}
+	return true
+}
+
+// keep adds row to the result and to the finding count of the server at
+// index.
+func (r *toolRulesRun) keep(index int, row report.FindingRow) {
 	r.res.rows = append(r.res.rows, row)
 	if index >= 0 && index < len(r.counts) {
 		r.counts[index]++
@@ -304,4 +397,32 @@ func budgetRow(ref report.ServerRef, severity rules.Severity, notChecked, total 
 // and the Related text of the budget row both use it, so they say the same.
 func notCheckedText(notChecked, total int) string {
 	return fmt.Sprintf("%d of %d %s not fully checked", notChecked, total, plural(total, "tool", "tools"))
+}
+
+// capRow returns the rules.RuleToolFindingCap row of the server ref, which has
+// omitted tool findings that the step did not keep, over the limit. severity is
+// the severity of the row (see budgetSeverity: the omitted findings could be of
+// the highest severity, so the row fails closed). The row is about the whole
+// server, so its Key is empty. All its texts are fixed (see capTitle), apart
+// from the two numbers in Related. They do not come from the rule set: the
+// rule has no YAML file (NewSet refuses the ID, see rules.ReservedRuleID).
+func capRow(ref report.ServerRef, severity rules.Severity, omitted, limit int) report.FindingRow {
+	return report.FindingRow{
+		ServerRef:   ref,
+		RuleID:      rules.RuleToolFindingCap,
+		Severity:    string(severity),
+		Title:       capTitle,
+		Risk:        capRisk,
+		Remediation: capRemediation,
+		Field:       rules.FieldTool,
+		Related:     capText(omitted, limit),
+	}
+}
+
+// capText returns "N more tool findings are not listed; limit M". The stderr
+// warning and the Related text of the cap row both use it, so they say the
+// same. It holds two numbers and fixed words only.
+func capText(omitted, limit int) string {
+	return fmt.Sprintf("%d more tool %s not listed; limit %d",
+		omitted, plural(omitted, "finding is", "findings are"), limit)
 }

@@ -66,6 +66,11 @@ type cli struct {
 	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
+	// maxToolRows is the largest number of tool finding rows that scan keeps
+	// for one server. Zero means the default, maxToolRowsPerServer, so
+	// runWithContext does not set it. Tests set a small value, so that they
+	// do not need a thousand findings. Use the maxToolRowsOrDefault method.
+	maxToolRows int
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -79,6 +84,21 @@ func (c *cli) ctxOrBackground() context.Context {
 		return context.Background()
 	}
 	return c.ctx
+}
+
+// maxToolRowsPerServer is the largest number of tool finding rows that scan
+// keeps for one server. A server with more findings gets one summary finding
+// (rules.RuleToolFindingCap) in place of the rest, so that a hostile server
+// cannot flood the report.
+const maxToolRowsPerServer = 1000
+
+// maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
+// field is zero (or negative).
+func (c *cli) maxToolRowsOrDefault() int {
+	if c.maxToolRows > 0 {
+		return c.maxToolRows
+	}
+	return maxToolRowsPerServer
 }
 
 // command is one subcommand of mcpmoat.
@@ -268,7 +288,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis: it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")
 	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
 	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
 	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
