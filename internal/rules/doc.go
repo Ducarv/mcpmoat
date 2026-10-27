@@ -530,12 +530,16 @@
 // so a broken schema is still scanned. Its hits have a Detail that starts with
 // "schema raw text".
 //
-// The shadowing check (MOAT-T3-001) still reads a narrower text: the value of
-// every "description" and "title" string of the schema (InputSchema or
-// OutputSchema), at any depth, in document order, with the keys matched in
-// any case. It scans this text, together with the tool description, the tool
-// title and the annotations title. The rules do not model JSON Schema
-// keywords.
+// The shadowing check (MOAT-T3-001) reads every string value and every object
+// key of the schema (InputSchema and OutputSchema), at any depth, in document
+// order, with the same caps. In a schema object it leaves out only three kinds
+// of text: a key that is a JSON Schema keyword name, a format value that is
+// exactly a registered format name (such as date-time), and a $schema value
+// that is exactly a standard meta-schema URI. These are fixed words that fold
+// into compound names such as read_only or date_time. Every other format and
+// $schema value is read, and a property name is always read. It scans these
+// texts, together with the tool description, the tool title and the
+// annotations title. The schema rules do not model JSON Schema keywords.
 //
 // # The ignore file
 //

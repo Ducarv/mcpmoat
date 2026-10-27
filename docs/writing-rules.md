@@ -172,8 +172,18 @@ How mcpmoat prepares the text of a `target: schema` rule:
   starts with `schema raw text`.
 - For a schema, `match_window` fires when the budget cuts the strings, when one string is longer
   than its window, or when the JSON cannot be read in full.
-- The shadowing rule MOAT-T3-001 does not read a schema this way. It reads only the `description`
-  and `title` strings of the schema.
+- The shadowing rule MOAT-T3-001 does not read a schema this way. It reads every string value and
+  every object key of the input and output schema, each one alone. This includes `default`,
+  `examples`, `enum`, `const`, `$comment` and vendor keys such as `x-*` or
+  `markdownDescription`. In a schema object it leaves out three kinds of text: a key that is a JSON
+  Schema keyword (such as `readOnly`, `anyOf` or `$defs`), a `format` value that is exactly a
+  registered format name (such as `date-time`, `uuid` or `int64`), and a `$schema` value that is
+  exactly a standard meta-schema URI (such as `http://json-schema.org/draft-07/schema#`). The rule
+  turns `readOnly` into `read_only`, and that name could equal a tool of another server. Every
+  other `format` or `$schema` value is read, such as `send_email` or
+  `https://json-schema.org/send_email`. The keys of `properties`, `patternProperties`, `$defs`,
+  `definitions`, `dependentSchemas` and `dependencies` are names that the server chose, so the rule
+  always reads them. Limits: `scan` does not call the rule yet (#200).
 
 ### Schema copies
 
