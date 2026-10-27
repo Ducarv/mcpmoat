@@ -98,7 +98,7 @@ func WriteSummary(w io.Writer, servers []ServerStatus, st Style) error {
 		b.WriteString(s.label())
 		b.WriteString(": ")
 
-		status := termsafe.QuoteCut(s.Status, maxShortCellRunes)
+		status := termsafe.QuoteCut(s.Status, MaxShortCellRunes)
 		b.WriteString(st.status(s.Status, status))
 		if s.Status == StatusOK {
 			fmt.Fprintf(&b, ", %d %s", s.Tools, plural(s.Tools, "tool", "tools"))

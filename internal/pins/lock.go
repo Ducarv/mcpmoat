@@ -9,10 +9,18 @@ import (
 	"time"
 )
 
-// ErrLocked means that another mcpmoat run held the lock on the pins
-// directory for the whole wait time. The caller can try again later. Test for
-// it with errors.Is.
-var ErrLocked = errors.New("the pins file is locked by another mcpmoat run")
+// ErrLocked means that another process held the lock on the pins directory
+// for the whole wait time. Normally that is another mcpmoat run, but the lock
+// is an advisory flock(2) on the directory, so any local process that can open
+// the directory can hold it. The caller can try again later. Test for it with
+// errors.Is.
+var ErrLocked = errors.New("the pins file is locked by another process")
+
+// errLockUnsupported means that the operating system or the file system
+// cannot lock the pins directory. tryLock returns it (lock_unix.go and
+// lock_other.go), and lock then goes on without the lock, so the caller can
+// warn once.
+var errLockUnsupported = errors.New("file locking is not supported here")
 
 // defaultLockPoll is the time between two lock attempts when locker.poll is
 // zero.
@@ -21,11 +29,12 @@ const defaultLockPoll = 50 * time.Millisecond
 // locker takes the advisory lock on the pins directory, so two parallel runs
 // cannot lose each other's pins.
 //
-// The zero value tries once, does not wait and uses the real lock functions.
+// The zero value tries once, does not wait and uses the real lock function.
 // The function fields exist so that a test can inject a busy or an
-// unsupported result. We pass them in a struct instead of package-level
-// variables, so there is no global mutable state and the tests can run in
-// parallel (the same pattern as atomicWriter).
+// unsupported result, or run code at a fixed step of LoadLocked. We pass
+// them in a struct instead of package-level variables, so there is no global
+// mutable state and the tests can run in parallel (the same pattern as
+// atomicWriter).
 type locker struct {
 	// wait is how long lock keeps trying while another run holds the lock.
 	// Zero (or a negative value) means: try once.
@@ -37,8 +46,10 @@ type locker struct {
 	onBusy func()
 	// tryLock, when not nil, replaces the package function tryLock.
 	tryLock func(*os.File) (bool, error)
-	// unlock, when not nil, replaces the package function unlock.
-	unlock func(*os.File) error
+	// afterEnsureDir, when not nil, runs in LoadLocked after ensurePinsDir
+	// and before the second check of the parent directories. A test uses it
+	// to change a parent between the two checks, as another user could.
+	afterEnsureDir func()
 }
 
 // lock takes an exclusive advisory lock on d, the open handle of the pins
@@ -90,7 +101,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		case tryErr != nil:
 			return noop, false, fmt.Errorf("lock pins directory %s: %w", d.Name(), tryErr)
 		case acquired:
-			return l.releaser(d), true, nil
+			return releaser(d), true, nil
 		}
 
 		// The lock is busy.
@@ -114,20 +125,16 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 	}
 }
 
-// releaser returns the release function for a lock that l took on d. The
-// function unlocks d once; later calls do nothing. It does not close d,
-// because the caller owns the handle.
-func (l locker) releaser(d *os.File) func() {
-	un := l.unlock
-	if un == nil {
-		un = unlock
-	}
+// releaser returns the release function for a lock that locker.lock took on
+// d. The function unlocks d once; later calls do nothing. It does not close
+// d, because the caller owns the handle.
+func releaser(d *os.File) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			// Ignore the error: the caller closes d later, and closing the
 			// handle releases the lock anyway.
-			_ = un(d)
+			_ = unlock(d)
 		})
 	}
 }

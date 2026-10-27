@@ -12,6 +12,16 @@ import (
 // groupOrOtherWrite is the mode bits that let the group or others write.
 const groupOrOtherWrite fs.FileMode = 0o022
 
+// The problem texts of a permission error. checkOwnerAndMode and
+// checkParentOwnerAndMode share them, so the same problem has the same words
+// for the pins directory, pins.json and a parent directory. Each function adds
+// its own fix hint.
+const (
+	problemForeignOwner         = "owned by another user"
+	problemWritable             = "writable by group or others"
+	problemForeignOwnerWritable = problemForeignOwner + ", " + problemWritable
+)
+
 // checkOwnerAndMode returns an error that wraps ErrInsecurePermissions when
 // info says that another user than uid owns the path, or that its group or
 // others can write it (mode bits groupOrOtherWrite). Modes such as 0o755 and
@@ -38,13 +48,13 @@ func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
 	var problem, fix string
 	switch {
 	case foreignOwner && writable:
-		problem = "owned by another user, writable by group or others"
+		problem = problemForeignOwnerWritable
 		fix = "ask the owner or root to run chown, then chmod go-w -- " + shellQuote(path) + ", or to remove the path"
 	case foreignOwner:
-		problem = "owned by another user"
+		problem = problemForeignOwner
 		fix = "ask the owner or root to run chown, or to remove the path"
 	case writable:
-		problem = "writable by group or others"
+		problem = problemWritable
 		fix = "chmod go-w -- " + shellQuote(path)
 	default:
 		return nil
@@ -102,16 +112,16 @@ func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 	var problem, fix string
 	switch {
 	case foreignOwner && writable:
-		problem = "owned by another user, writable by group or others"
+		problem = problemForeignOwnerWritable
 		fix = "ask the owner or root to run chown, then " + chmod + ", " + privateConfigHint
 	case foreignOwner:
-		problem = "owned by another user"
+		problem = problemForeignOwner
 		fix = "ask the owner or root to run chown, " + privateConfigHint
 	case writable && rootOwner:
-		problem = "writable by group or others"
+		problem = problemWritable
 		fix = "ask root to run " + chmod + ", " + privateConfigHint
 	case writable:
-		problem = "writable by group or others"
+		problem = problemWritable
 		fix = chmod + ", " + privateConfigHint
 	default:
 		return nil

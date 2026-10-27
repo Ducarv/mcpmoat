@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -265,6 +266,76 @@ func TestLoadLockedFirstRunCreatesDir(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("LoadLocked created pins.json (Lstat error = %v)", err)
+	}
+}
+
+// TestLoadLockedParentsCheckedAfterCreate covers the race between the first
+// parents check and MkdirAll. The first check skips a missing ancestor. If
+// another user creates that ancestor, with an unsafe mode, before MkdirAll
+// runs, MkdirAll uses it. The AfterEnsureDir hook makes the same state: it
+// changes the mode of a parent that ensurePinsDir has just created. The
+// second parents check must refuse it.
+func TestLoadLockedParentsCheckedAfterCreate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// mode is the mode that the hook gives to the new ancestor. Zero
+		// means that the hook does not change it.
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{"new chain unchanged", 0, false},
+		{"writable by group and others", 0o777, true},
+		{"writable by group", 0o770, true},
+		{"writable by all, sticky", os.ModeSticky | 0o777, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Only t.TempDir exists. LoadLocked creates new, chain and
+			// mcpmoat, so the first parents check sees none of them.
+			ancestor := filepath.Join(t.TempDir(), "new")
+			path := filepath.Join(ancestor, "chain", "mcpmoat", "pins.json")
+
+			var hookRuns int
+			s, release, err := pins.LoadLockedWith(t.Context(), path, pins.LockHooks{
+				AfterEnsureDir: func() {
+					hookRuns++
+					if tt.mode == 0 {
+						return
+					}
+					if err := os.Chmod(ancestor, tt.mode); err != nil {
+						t.Errorf("chmod %s: %v", ancestor, err)
+					}
+				},
+			})
+			if release == nil {
+				t.Fatal("LoadLocked() release = nil, want a function")
+			}
+			defer release()
+			if hookRuns != 1 {
+				t.Errorf("AfterEnsureDir ran %d times, want 1", hookRuns)
+			}
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("LoadLocked() error = %v, want nil", err)
+				}
+				if s.Existed() {
+					t.Error("Existed() = true on a first run, want false")
+				}
+				return
+			}
+			if !errors.Is(err, pins.ErrInsecurePermissions) {
+				t.Fatalf("LoadLocked() error = %v, want errors.Is ErrInsecurePermissions", err)
+			}
+			if !strings.Contains(err.Error(), "pins parent directory "+ancestor+" ") {
+				t.Errorf("LoadLocked() error = %v, want it to name the parent %s", err, ancestor)
+			}
+			if s != nil {
+				t.Errorf("LoadLocked() store = %v, want nil", s)
+			}
+		})
 	}
 }
 

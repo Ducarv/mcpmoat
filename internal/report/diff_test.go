@@ -382,7 +382,7 @@ func TestWriteDiffsCutsLongLine(t *testing.T) {
 func TestWriteDiffsCutsLongNames(t *testing.T) {
 	t.Parallel()
 
-	const limit = 80 // maxShortCellRunes
+	const limit = 80 // report.MaxShortCellRunes
 	long := strings.Repeat("n", limit+20)
 	out := writeDiffs(t, report.ToolDiff{Server: long, Tool: long})
 	header, note, ok := strings.Cut(strings.TrimPrefix(out, "\n"), "\n")

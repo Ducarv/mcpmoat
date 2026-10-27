@@ -1462,6 +1462,50 @@ func TestExisted(t *testing.T) {
 	}
 }
 
+// TestPath checks that Path returns the path that the Store was loaded from,
+// for Load and LoadLocked, on a first run and with an existing file, and for
+// a Clone.
+func TestPath(t *testing.T) {
+	t.Parallel()
+	existing := storeTestPath(t)
+	storeTestMustSave(t, storeTestMustLoad(t, existing))
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"first run", storeTestPath(t)},
+		{"first run, missing directory", filepath.Join(t.TempDir(), "no", "such", "pins.json")},
+		{"existing file", existing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := storeTestMustLoad(t, tt.path)
+			if got := s.Path(); got != tt.path {
+				t.Errorf("Load: Path() = %q, want %q", got, tt.path)
+			}
+			if got := s.Clone().Path(); got != tt.path {
+				t.Errorf("Clone: Path() = %q, want %q", got, tt.path)
+			}
+
+			locked, release, err := pins.LoadLocked(t.Context(), tt.path, 0)
+			if err != nil {
+				t.Fatalf("LoadLocked(%q) error = %v, want nil", tt.path, err)
+			}
+			defer release()
+			if got := locked.Path(); got != tt.path {
+				t.Errorf("LoadLocked: Path() = %q, want %q", got, tt.path)
+			}
+		})
+	}
+
+	var zero pins.Store
+	if got := zero.Path(); got != "" {
+		t.Errorf("zero-value Store: Path() = %q, want empty", got)
+	}
+}
+
 // TestLoadLockedDanglingSymlink checks that LoadLocked, like Load, does not
 // treat a pins.json symlink with a missing target as a first run.
 func TestLoadLockedDanglingSymlink(t *testing.T) {

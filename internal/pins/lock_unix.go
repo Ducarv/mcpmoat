@@ -9,12 +9,6 @@ import (
 	"syscall"
 )
 
-// errLockUnsupported means that the operating system or the file system
-// cannot lock the pins directory. The caller decides what to do (for example,
-// go on without the lock and warn). The version for systems that are not Unix
-// declares the same name.
-var errLockUnsupported = errors.New("file locking is not supported here")
-
 // tryLock tries to take an exclusive advisory lock on the open file f
 // (normally the handle of the pins directory). It does not wait.
 //
@@ -85,7 +79,7 @@ func flock(f *os.File, how int) (syscall.Errno, error) {
 			// The descriptor fits in an int: the kernel returned it as an int.
 			callErr := syscall.Flock(int(fd), how)
 			if callErr == nil {
-				errno = 0
+				// errno keeps its zero value: success.
 				return
 			}
 			var e syscall.Errno

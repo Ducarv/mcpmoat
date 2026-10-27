@@ -119,12 +119,11 @@ type ServerPins map[string]Pin
 // (ErrStoreFull), so one large server cannot stop the others from being
 // saved: only the refused server is not pinned.
 type Store struct {
-	path string
-
-	// existed and unlocked are set once, before Load or LoadLocked returns
-	// the Store, and never change after that. So they need no mutex.
-	existed  bool // the pins file was on disk (see Existed)
-	unlocked bool // LoadLocked ran without the lock (see Unlocked)
+	// path, existed and unlocked are set once, before Load or LoadLocked
+	// returns the Store, and never change after that. So they need no mutex.
+	path     string // the pins file (see Path)
+	existed  bool   // the pins file was on disk (see Existed)
+	unlocked bool   // LoadLocked ran without the lock (see Unlocked)
 
 	mu      sync.Mutex // guards servers, sizes and entryBytes
 	servers map[Identity]ServerPins
@@ -136,6 +135,13 @@ type Store struct {
 	// it. Load and Set keep sizes and entryBytes up to date.
 	sizes      map[Identity]int
 	entryBytes int
+}
+
+// Path returns the path of the pins file: the path that Load or LoadLocked
+// read from, and that Save writes to. The CLI uses it, for example, in the
+// notice that Save created a new pins file. A zero-value Store returns "".
+func (s *Store) Path() string {
+	return s.path
 }
 
 // Existed reports whether Load or LoadLocked found the pins file on disk. It is
@@ -245,37 +251,19 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 func Load(path string) (*Store, error) {
 	dir, name := filepath.Dir(path), filepath.Base(path)
 
-	if err := checkParents(dir); err != nil {
-		// Wrap with %w, so errors.Is still finds ErrInsecurePermissions.
-		return nil, fmt.Errorf("read %s: %w", path, err)
+	root, d, missing, err := openCheckedDir(path, dir)
+	if missing {
+		return firstRun(newStore(path), path)
 	}
-
-	root, err := safefile.OpenRoot(dir)
 	if err != nil {
-		if safefile.IsMissing(err) {
-			return firstRun(newStore(path), path)
-		}
-		return nil, dirOpenError(path, dir, err)
-	}
-	defer func() {
-		// Closing the root does not close the files opened through it.
-		_ = root.Close()
-	}()
-
-	// "." is the root directory itself. The handle is the directory that the
-	// file is opened from, so the checks below see that directory and not
-	// whatever the path names now.
-	d, err := root.Open(".")
-	if err != nil {
-		return nil, dirOpenError(path, dir, err)
-	}
-	defer func() {
-		// The handle is read-only, so a close error is not useful.
-		_ = d.Close()
-	}()
-	if err := checkDirHandle(dir, d); err != nil {
 		return nil, err
 	}
+	defer func() {
+		// Both are read-only, so a close error is not useful. Closing the root
+		// does not close the files opened through it, so close both.
+		_ = d.Close()
+		_ = root.Close()
+	}()
 
 	s, err := loadFromRoot(path, root, name)
 	if err != nil {
@@ -326,10 +314,16 @@ func Load(path string) (*Store, error) {
 //     without the lock and Store.Unlocked returns true. The caller must warn
 //     the user once.
 //
-// The checks, the errors and the first run are the same as in Load. The one
-// difference: a missing pins.json in the directory (which exists now) is
-// always a first run or a deleted file, so Store.Existed returns false and
-// there is no error.
+// The checks, the errors and the first run are the same as in Load, with two
+// differences:
+//   - LoadLocked checks the parent directories (checkParents) twice: before it
+//     creates a missing pins directory, so it never creates one under an
+//     unsafe parent, and again after that. The parents check skips a missing
+//     ancestor, and MkdirAll uses an ancestor that another user created in
+//     the meantime, so the second check sees what MkdirAll used.
+//   - A missing pins.json in the directory (which exists now) is always a
+//     first run or a deleted file, so Store.Existed returns false and there
+//     is no error.
 func LoadLocked(ctx context.Context, path string, wait time.Duration) (*Store, func(), error) {
 	return loadLocked(ctx, path, locker{wait: wait})
 }
@@ -345,29 +339,35 @@ func loadLocked(ctx context.Context, path string, l locker) (s *Store, release f
 	noop := func() {}
 	dir, name := filepath.Dir(path), filepath.Base(path)
 
+	// Check the parents before ensurePinsDir, so it never creates a directory
+	// under an unsafe parent.
 	if err := checkParents(dir); err != nil {
 		return nil, noop, fmt.Errorf("read %s: %w", path, err)
 	}
 	if err := ensurePinsDir(path, dir); err != nil {
 		return nil, noop, err
 	}
+	if l.afterEnsureDir != nil {
+		l.afterEnsureDir()
+	}
 
-	root, err := safefile.OpenRoot(dir)
-	if err != nil {
+	// openCheckedDir runs checkParents a second time, on purpose. The first
+	// check skips an ancestor that is missing. ensurePinsDir then creates the
+	// missing ancestors with MkdirAll, but MkdirAll uses a directory that
+	// another user created a moment before, with any owner and mode. The
+	// second check sees each ancestor as it is now, before the lock and the
+	// read.
+	root, d, missing, err := openCheckedDir(path, dir)
+	if missing {
 		// The directory exists after ensurePinsDir, so a missing one here was
 		// removed or replaced meanwhile, or it is not a directory. checkFirstRun
 		// gives the better text for a path that is not a directory.
-		if safefile.IsMissing(err) {
-			if frErr := checkFirstRun(path); frErr != nil {
-				return nil, noop, frErr
-			}
+		if frErr := checkFirstRun(path); frErr != nil {
+			return nil, noop, frErr
 		}
-		return nil, noop, dirOpenError(path, dir, err)
 	}
-	d, err := root.Open(".")
 	if err != nil {
-		_ = root.Close()
-		return nil, noop, dirOpenError(path, dir, err)
+		return nil, noop, err
 	}
 
 	// unlockDir releases the lock. It starts as a no-op, and is set below when
@@ -391,10 +391,6 @@ func loadLocked(ctx context.Context, path string, l locker) (s *Store, release f
 			releaseAll()
 		}
 	}()
-
-	if err := checkDirHandle(dir, d); err != nil {
-		return nil, noop, err
-	}
 
 	unlockFn, locked, err := l.lock(ctx, d)
 	// lock never returns a nil function, so unlockDir is always callable.
@@ -434,6 +430,55 @@ func ensurePinsDir(path, dir string) error {
 		return fmt.Errorf("read %s: create the pins directory: %w", path, err)
 	}
 	return nil
+}
+
+// openCheckedDir opens and checks the pins directory dir of the pins file
+// path. Load and LoadLocked share it, so the two check the directory in the
+// same way. The steps are:
+//   - checkParents: the parent directories of dir, by path.
+//   - safefile.OpenRoot(dir): the os.Root that the pins file is opened through.
+//   - root.Open("."): a handle of the root directory itself. The checks see
+//     the directory that the file is opened from, not whatever the path names
+//     now.
+//   - checkDirHandle: the owner, the mode and (macOS only) the ACL of that
+//     handle.
+//
+// On success, the caller owns root and d and must close both. Closing root
+// does not close d. On an error, openCheckedDir closes what it opened, and
+// root and d are nil.
+//
+// missing is true only when OpenRoot found no directory at dir. Then err is
+// not nil either, and the caller decides what a missing directory means: Load
+// treats it as a first run, LoadLocked as a directory that changed after it
+// created it. A missing directory at a later step is a plain error.
+//
+// The errors name path. A permission error of OpenRoot or root.Open gets the
+// owner check by path (dirOpenError).
+func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, err error) {
+	if parentErr := checkParents(dir); parentErr != nil {
+		// Wrap with %w, so errors.Is still finds ErrInsecurePermissions.
+		return nil, nil, false, fmt.Errorf("read %s: %w", path, parentErr)
+	}
+
+	root, err = safefile.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, safefile.IsMissing(err), dirOpenError(path, dir, err)
+	}
+
+	// "." is the root directory itself.
+	d, err = root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, false, dirOpenError(path, dir, err)
+	}
+
+	if checkErr := checkDirHandle(dir, d); checkErr != nil {
+		// Both are read-only, so a close error is not useful.
+		_ = d.Close()
+		_ = root.Close()
+		return nil, nil, false, checkErr
+	}
+	return root, d, false, nil
 }
 
 // newStore returns an empty Store that saves to path. existed and unlocked
@@ -527,6 +572,9 @@ func loadFromRoot(path string, root *os.Root, name string) (*Store, error) {
 			return nil, fmt.Errorf("parse %s: servers[%d]: a field is missing or null", path, i)
 		}
 		id := Identity{Client: *srv.Client, Source: *srv.Source, ProjectPath: *srv.ProjectPath, Name: *srv.Name}
+		// ValidateServer and entrySize below both encode the entry, on
+		// purpose: compact JSON for the per-server limit, and the indented
+		// form for the file size that Set tracks (see Set).
 		if err := ValidateServer(id, *srv.Tools); err != nil {
 			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
 		}
@@ -737,6 +785,10 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// Check the copy that is stored, so a caller that changes p later cannot
 	// change what was checked.
 	c := cloneOrEmpty(p)
+	// The entry is encoded twice, on purpose: ValidateServer measures compact
+	// JSON for the per-server limit (maxServerSize), and entrySize measures
+	// the indented form that Save writes, for the file limit (maxFileSize).
+	// One encode for both is a possible later optimisation.
 	if err := ValidateServer(id, c); err != nil {
 		return err
 	}

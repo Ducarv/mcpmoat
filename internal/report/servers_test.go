@@ -375,8 +375,9 @@ func TestWriteServersWriteError(t *testing.T) {
 	}
 }
 
-// The caps of the padded columns. They repeat the unexported constants in
-// servers.go, so a change there must change these tests on purpose.
+// The caps of the padded columns. They repeat report.MaxShortCellRunes and the
+// unexported maxPathRunes in servers.go as literals, so a change there must
+// change these tests on purpose.
 const (
 	maxShortCellRunes = 80  // NAME, CLIENT, TRANSPORT, STATE
 	maxPathRunes      = 256 // SCOPE, SOURCE
