@@ -66,6 +66,12 @@ type cli struct {
 	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
+	// llmStepTimeout is the time limit of the whole LLM step of scan --llm
+	// (FR-17). Zero means the default, the constant llmStepTimeout, so
+	// runWithContext does not set it and no flag changes it. Tests set a
+	// short value to reach the limit (see runLLMJobs). A negative value is
+	// used up at once: no request starts.
+	llmStepTimeout time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -312,6 +318,9 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n")
 	fprintf(w, "  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools)
 	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
+	fprintf(w, "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to 3 tries in total for each tool.\n")
+	fprintf(w, "  When the provider asks to wait (Retry-After), scan waits at most 30 seconds before the next try.\n")
+	fprintf(w, "  The LLM step stops after %s: the tools that are not classified yet give exit 2; the report still prints.\n", stepTimeoutText(llmStepTimeout))
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

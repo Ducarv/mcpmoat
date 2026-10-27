@@ -138,9 +138,18 @@ var (
 // ErrRejected for the codes of classRejected, and to ErrProvider for every
 // other code, so errors.Is(err, ErrProvider) is true for all of them (see
 // statusClassOf).
+//
+// The client reads one response header, Retry-After, for the retry policy
+// (see retryPolicy). Its value is kept in unexported fields and is never part
+// of the error text.
 type StatusError struct {
 	// Code is the HTTP status code.
 	Code int
+
+	// retryAfter is the wait from a valid Retry-After header, and
+	// hasRetryAfter tells whether the answer had one (see parseRetryAfter).
+	retryAfter    time.Duration
+	hasRetryAfter bool
 }
 
 // statusClass is the class of a status code that is not 2xx. The class
@@ -177,6 +186,10 @@ const (
 //     ErrProvider).
 //
 // Transport errors are not status codes: they are global too.
+//
+// The class does not tell whether the client tries again: retryableStatus
+// does (429, 502, 503, 504 and 529). When those tries fail too, the error
+// has the class of this table.
 func statusClassOf(code int) statusClass {
 	switch {
 	case code == http.StatusBadRequest,
@@ -287,7 +300,8 @@ func Reason(err error) string {
 }
 
 // api is the part of a request that depends on the provider. anthropic.go
-// and openai.go implement it. Each implementation is stateless.
+// and openai.go implement it. An implementation holds only fixed settings
+// that New sets, and nothing changes them after New.
 type api interface {
 	// path is the API path, which the client adds to the base URL. It
 	// starts with "/".
@@ -327,13 +341,18 @@ type resolver interface {
 // A Client is safe for concurrent use: Classify does not change it.
 //
 // The client sends requests only to the configured base URL. It never
-// follows a redirect, never retries, and logs nothing.
+// follows a redirect and logs nothing. It tries a request again only when the
+// provider is busy (HTTP 429, 502, 503, 504 or 529), at most 3 requests for
+// one tool in total (see retryPolicy).
 type Client struct {
 	api   api
 	url   string
 	model string
 	key   discover.Secret
 	http  *http.Client
+	// retry is the retry policy. The zero value is the production policy.
+	// Tests set small delays.
+	retry retryPolicy
 }
 
 // New returns a Client for cfg. It calls cfg.Resolve, so the errors of
@@ -363,7 +382,7 @@ func newClient(cfg Config, r resolver) (*Client, error) {
 	case ProviderAnthropic:
 		a = anthropicAPI{}
 	case ProviderOpenAI:
-		a = openAIAPI{}
+		a = newOpenAIAPI(cfg.BaseURL)
 	default:
 		// Resolve refuses an unknown provider, so this is a guard only.
 		return nil, unknownProviderError()
@@ -539,11 +558,15 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 	return proxy, nil
 }
 
-// Classify sends one request that asks the model to rate in, and returns the
+// Classify sends a request that asks the model to rate in, and returns the
 // verdict. It sends only the system prompt, the verdict schema and the tool
-// message of in (see the package doc). It does not retry.
+// message of in (see the package doc). When the provider is busy (HTTP 429,
+// 502, 503, 504 or 529), it waits and sends the same request again, at most 3
+// requests in total (see retryPolicy). When all of them fail, the error is
+// the one of the last request, the same as without retries. When the context
+// of the caller ends during a wait, Classify stops at once.
 //
-// The request has a timeout of requestTimeout. The verdict has Truncated
+// Each request has a timeout of requestTimeout. The verdict has Truncated
 // set when toolMessage cut the tool name or description. On an error, only
 // Truncated is set, and only when toolMessage succeeded: the caller can then
 // still rate a cut tool when the answer is not usable (ErrInvalidOutput).
@@ -560,7 +583,7 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if err != nil {
 		return Verdict{}, err
 	}
-	v, err := c.send(ctx, message)
+	v, err := c.sendWithRetry(ctx, message)
 	if err != nil {
 		return Verdict{Truncated: truncated}, err
 	}
@@ -569,8 +592,9 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 }
 
 // send sends one request with the tool message message and returns the
-// verdict of the model, without Truncated. Every error has fixed text (see
-// Classify).
+// verdict of the model, without Truncated. It builds a new request and body
+// on each call, so sendWithRetry can call it again. Every error has fixed
+// text (see Classify).
 func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 	body, err := encodeJSON(c.api.requestBody(c.model, message))
 	if err != nil {
@@ -602,8 +626,12 @@ func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// The body is never read: it can echo the request or hold text
-		// that must not reach the terminal.
-		return Verdict{}, &StatusError{Code: resp.StatusCode}
+		// that must not reach the terminal. Only the Retry-After header is
+		// read, for the retry policy. It is never printed.
+		status := &StatusError{Code: resp.StatusCode}
+		status.retryAfter, status.hasRetryAfter = parseRetryAfter(
+			resp.Header.Get("Retry-After"), c.retry.withDefaults().now())
+		return Verdict{}, status
 	}
 	if resp.ContentLength > MaxResponseBodyBytes {
 		return Verdict{}, errTooLarge

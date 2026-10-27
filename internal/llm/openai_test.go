@@ -96,6 +96,79 @@ func TestOpenAIRequestShape(t *testing.T) {
 	}
 }
 
+// TestNewOpenAIAPIMaxCompletionTokens checks that only the exact default
+// OpenAI base URL gets the output-token cap.
+func TestNewOpenAIAPIMaxCompletionTokens(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		baseURL string
+		want    int
+	}{
+		{baseURL: defaultOpenAIBaseURL, want: 2048},
+		{baseURL: "https://api.openai.com/v1/", want: 0}, // Resolve trims the slash first
+		{baseURL: "https://API.openai.com/v1", want: 0},
+		{baseURL: "https://api.openai.com", want: 0},
+		{baseURL: "https://api.openai.com/v2", want: 0},
+		{baseURL: "https://api.openai.com:443/v1", want: 0},
+		{baseURL: "http://api.openai.com/v1", want: 0},
+		{baseURL: "https://api.openai.com.example.com/v1", want: 0},
+		{baseURL: "https://openai.example.com/v1", want: 0},
+		{baseURL: "http://127.0.0.1:8080/v1", want: 0},
+		{baseURL: "", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.baseURL, func(t *testing.T) {
+			t.Parallel()
+			if got := newOpenAIAPI(tt.baseURL).maxCompletionTokens; got != tt.want {
+				t.Errorf("newOpenAIAPI(%q).maxCompletionTokens = %d, want %d", tt.baseURL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOpenAIRequestTokenField checks the encoded request of a client from
+// New. The default base URL cannot be reached in a unit test, so the test
+// encodes the request body of the client as send does. Only the default URL
+// has max_completion_tokens; no request ever has max_tokens.
+func TestOpenAIRequestTokenField(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		baseURL string
+		wantCap bool
+	}{
+		{name: "default", baseURL: "", wantCap: true},
+		{name: "default written out", baseURL: defaultOpenAIBaseURL, wantCap: true},
+		{name: "default with a slash", baseURL: defaultOpenAIBaseURL + "/", wantCap: true},
+		{name: "custom host", baseURL: "https://openai.example.com/v1", wantCap: false},
+		{name: "loopback", baseURL: "http://127.0.0.1:8080/v1", wantCap: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := New(Config{Provider: ProviderOpenAI, Model: llmTestModel, BaseURL: tt.baseURL, APIKey: testSecret()})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			t.Cleanup(c.CloseIdleConnections)
+			body, err := encodeJSON(c.api.requestBody(c.model, "m"))
+			if err != nil {
+				t.Fatalf("encodeJSON() error = %v", err)
+			}
+			keys := []string{"model", "messages", "response_format"}
+			if tt.wantCap {
+				keys = append(keys, "max_completion_tokens")
+			}
+			got := decodeKeys(t, "body", body, keys...)
+			if tt.wantCap {
+				if v := string(got["max_completion_tokens"]); v != "2048" {
+					t.Errorf("max_completion_tokens = %s, want 2048", v)
+				}
+			}
+		})
+	}
+}
+
 func TestOpenAIParseResponseValid(t *testing.T) {
 	t.Parallel()
 	for _, risk := range risks {

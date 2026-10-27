@@ -427,6 +427,12 @@ func TestUsageContent(t *testing.T) {
 		"  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n",
 		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
 		"  every tool, or another provider error gives exit 2; the report still prints.\n",
+		// The retries of a busy provider and the time limit of the whole
+		// LLM step (issue #188). The numbers are literal, so a change of
+		// the policy or of llmStepTimeout must change the help too.
+		"  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to 3 tries in total for each tool.\n",
+		"  When the provider asks to wait (Retry-After), scan waits at most 30 seconds before the next try.\n",
+		"  The LLM step stops after 10 minutes: the tools that are not classified yet give exit 2; the report still prints.\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)

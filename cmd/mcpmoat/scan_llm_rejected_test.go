@@ -125,9 +125,16 @@ func (a *llmRejectAPI) handle(w http.ResponseWriter, r *http.Request) {
 // writeStatus writes an error answer with code. The body is JSON with the
 // canary and a raw escape byte, the error shape of the provider, so a client
 // that printed it would fail the test.
+//
+// Every error answer has "Retry-After: 0". For a code that the client tries
+// again (429, 502, 503, 504, 529) it makes the client wait 0 s instead of its
+// backoff of 1 s and more, which cmd/mcpmoat cannot change. For a refusal
+// (400, 413, 422) and the other codes it must change nothing: the client
+// sends one request for that tool (see TestScanLLMRejected).
 func (a *llmRejectAPI) writeStatus(w http.ResponseWriter, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-Id", llmRejectBodyCanary)
+	w.Header().Set("Retry-After", "0")
 	w.WriteHeader(code)
 	msg := llmRejectBodyCanary + " \x1b[31mrefused\x1b[0m"
 	if a.provider == llm.ProviderOpenAI {
@@ -180,6 +187,30 @@ func (a *llmRejectAPI) writeVerdict(w http.ResponseWriter, v llm.Verdict) {
 			"message":       map[string]any{"role": "assistant", "content": string(content)},
 		}},
 	})
+}
+
+// requestsPerTool returns the number of requests for each tool name so far.
+func (a *llmRejectAPI) requestsPerTool() map[string]int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[string]int)
+	for _, name := range a.tools {
+		out[name]++
+	}
+	return out
+}
+
+// llmToolTries returns the largest number of requests that the client sends
+// for tl with llmRejectAPI: llmWantTries for a tool that gets a code that the
+// client tries again, else 1.
+func llmToolTries(tl inspect.Tool) int {
+	if m := llmRejectStatus.FindStringSubmatch(tl.Description); m != nil {
+		switch m[1] {
+		case "429", "502", "503", "504", "529":
+			return llmWantTries
+		}
+	}
+	return 1
 }
 
 // sentTools returns the sorted tool names of the requests so far.
@@ -371,6 +402,9 @@ func TestScanLLMRejected(t *testing.T) {
 		wantReason string
 		// wantStderr are lines that stderr must hold.
 		wantStderr []string
+		// wantTries is the exact number of requests for some tools, when it
+		// does not depend on the order of the answers.
+		wantTries map[string]int
 	}{
 		{
 			name:     "one tool 400, the others classified",
@@ -468,11 +502,15 @@ func TestScanLLMRejected(t *testing.T) {
 			wantRows: []llmRejectRow{rejectedRow002("t1"), unusableRow002("t2")},
 		},
 		{
+			// The client tries the 503 again: 3 requests for t2, and only
+			// then the step fails. The 400 is never tried again, also with
+			// "Retry-After: 0".
 			name:       "one tool 400 and one 503: the global failure wins",
 			tools:      []inspect.Tool{refused("t1", 400), refused("t2", 503)},
 			wantCode:   exitError,
 			wantRows:   []llmRejectRow{rejectedRow002("t1")},
 			wantReason: "HTTP 503",
+			wantTries:  map[string]int{"t2": llmWantTries},
 		},
 		{
 			name:       "one tool 401 stays global",
@@ -524,13 +562,30 @@ func TestScanLLMRejected(t *testing.T) {
 					}
 
 					// The requests: one for each tool, unless a global
-					// failure cancelled the rest.
+					// failure cancelled the rest. A tool with a code that
+					// the client tries again gets up to llmWantTries
+					// requests (see llmToolTries); a refused tool gets one.
 					n := int(api.requests.Load())
+					maxN := 0
+					for _, tl := range tt.tools {
+						maxN += llmToolTries(tl)
+					}
 					switch {
 					case tt.wantReason == "" && n != len(tt.tools):
 						t.Errorf("the provider got %d requests, want %d (one for each tool, nothing cancelled)", n, len(tt.tools))
-					case tt.wantReason != "" && (n < 1 || n > len(tt.tools)):
-						t.Errorf("the provider got %d requests, want 1 to %d", n, len(tt.tools))
+					case tt.wantReason != "" && (n < 1 || n > maxN):
+						t.Errorf("the provider got %d requests, want 1 to %d", n, maxN)
+					}
+					perTool := api.requestsPerTool()
+					for _, tl := range tt.tools {
+						if got, limit := perTool[tl.Name], llmToolTries(tl); got > limit {
+							t.Errorf("the provider got %d requests for %s, want at most %d", got, tl.Name, limit)
+						}
+					}
+					for name, want := range tt.wantTries {
+						if got := perTool[name]; got != want {
+							t.Errorf("the provider got %d requests for %s, want %d (all of them: %v)", got, name, want, perTool)
+						}
 					}
 					if tt.wantReason == "" {
 						var want []string
@@ -968,6 +1023,9 @@ func TestRejectedFailure(t *testing.T) {
 		// handles a global failure first.
 		{name: "failed requests do not count", answers: []llmAnswer{of(answerProviderFailed), of(answerInternalFailed), rej(e400)}, want: true, wantErr: e400},
 		{name: "only failed requests", answers: []llmAnswer{of(answerProviderFailed), of(answerInternalFailed)}},
+		// A request that the step deadline stopped is not an answer either.
+		{name: "deadline does not count", answers: []llmAnswer{of(answerDeadline), rej(e413)}, want: true, wantErr: e413},
+		{name: "only deadline", answers: []llmAnswer{of(answerDeadline), of(answerDeadline)}},
 		// A refusal without an error still fails closed. llmFailureLine then
 		// prints llmInternalText (see TestLLMFailureLine).
 		{name: "refused without error", answers: []llmAnswer{rej(nil)}, want: true},

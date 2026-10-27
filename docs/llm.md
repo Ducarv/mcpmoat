@@ -67,12 +67,32 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
   change.
 - **Limits:** at most 500 tools in one scan and 4 requests at the same time. Each request has 30
-  seconds. mcpmoat does not retry and does not follow redirects. The request and the response are
-  each capped at 64 KiB. The cost of a scan grows with the number and the size of the tool
-  descriptions. There is no cap on the total size of a scan, but the caps above bound it: at most
-  500 requests, each with at most 24 KiB of tool text. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your
-  servers, when the base URL is `https`. A base URL with `http` (a loopback host only) never uses a
-  proxy.
+  seconds, also each retry. mcpmoat does not follow redirects. The request and the response are
+  each capped at 64 KiB. The whole LLM step has 10 minutes (see **Time limit** below). The cost of
+  a scan grows with the number and the size of the tool descriptions. There is no cap on the total
+  size of a scan, but the caps above bound it: at most 3 requests for each tool (see **Retries**
+  below), so at most 1500 requests in one scan, each with at most 24 KiB of tool text. The LLM
+  requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your servers, when the
+  base URL is `https`. A base URL with `http` (a loopback host only) never uses a proxy.
+- **Retries:** when the provider answers HTTP 429, 502, 503, 504 or 529 (busy or overloaded),
+  mcpmoat sends the same request again. Each tool gets at most 3 tries in total: the first request
+  and 2 retries. Before a retry, mcpmoat waits: the wait starts at 1 second and doubles up to 8
+  seconds, and a random part makes each wait 0.5 to 1.5 times that value. When the answer has a
+  `Retry-After` header (a number of seconds or an HTTP date), mcpmoat waits that time instead. A
+  `Retry-After` longer than 30 seconds means no retry. A value that is not valid, or a date in the
+  past, gives the normal wait. mcpmoat never reads the body of an HTTP error. These cases get no
+  retry: any other HTTP error (also 400, 413, 422, 401, 403, 404 and 500), a redirect, a request
+  that used up its 30 seconds, and any other network error. When the last try fails, it is a
+  provider failure (see **Exit codes** below).
+- **Time limit:** the whole LLM step stops after 10 minutes. No flag changes this limit. The tools
+  that got an answer keep their findings. The other tools are not classified, and `scan` exits
+  with code 2 (see **Exit codes** below).
+- **Output cap:** an Anthropic request caps the model answer at 200 tokens. An OpenAI request to
+  the default base URL sets `max_completion_tokens` to 2048. The reason: a reasoning model bills
+  hidden reasoning tokens, and the 64 KiB response cap does not limit them. A request to any other
+  base URL (an OpenAI-compatible server) sets no output cap, because many of these servers know
+  only `max_tokens` and refuse `max_completion_tokens`. An answer that the cap cuts is an unusable
+  answer: a `MOAT-LLM-002` finding, not exit code 2.
 - **How the 500 tools are shared:** the servers share the cap fairly. A server with fewer tools
   than an equal part keeps all its tools, and the part that it does not use goes to the larger
   servers. When the parts cannot be equal, the servers that come first in the scan get one tool
@@ -127,9 +147,14 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   and `complete` can stay `true`. These cases give exit code 2:
   - A provider failure: a network, TLS or proxy error, a timeout, any other HTTP error (also 401,
     403 and 404) or a redirect, a response that is too large, or a response that is not a valid
-    API answer. The first failure stops the step. stderr says how many tools were not classified,
-    for example
+    API answer. For HTTP 429, 502, 503, 504 and 529, this is the failure of the last try (see
+    **Retries** above). The first failure stops the step. stderr says how many tools were not
+    classified, for example
     `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
+  - The time limit of the step (10 minutes). The running requests stop, and stderr says
+    `mcpmoat scan: the LLM step stopped after 10 minutes; 12 tools were not classified`. When a
+    provider failure came first, stderr shows that failure instead. A signal (Ctrl-C) is not this
+    case: it prints no report (see [Exit codes](exit-codes.md)).
   - The provider refused every tool that it answered: at least one tool got HTTP 400, 413 or 422,
     and no tool got a 2xx answer (a verdict, or a model answer that cannot be used). A wrong model
     name or API shape can cause this, so mcpmoat fails closed. No tool gets an LLM finding then,

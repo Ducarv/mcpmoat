@@ -13,9 +13,15 @@
 //
 // # What is sent
 //
-// One request for each tool. The request holds the fixed [SystemPrompt], the
-// fixed verdict schema ([VerdictSchema]) and one user message that
-// toolMessage builds. That message holds only:
+// One request for each tool. When the provider is busy (HTTP 429, 502, 503,
+// 504 or 529), the client sends the same request again, at most 3 requests
+// for one tool in total (see retryPolicy). Each try has its own time limit
+// (requestTimeout); the time limit of the whole LLM step is in cmd/mcpmoat.
+// The model output is capped: 200 tokens for Anthropic, and
+// max_completion_tokens for the default OpenAI base URL only (see
+// newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
+// verdict schema ([VerdictSchema]) and one user message that toolMessage
+// builds. That message holds only:
 //
 //   - the tool name, cut to [MaxToolNameBytes];
 //   - the tool description, cut to [MaxDescriptionBytes] (or less, so the
@@ -54,8 +60,9 @@
 //   - A tool that the provider refused (HTTP 400, 413 or 422) gives an error
 //     that wraps [ErrRejected]. It is per tool: the caller reports rule
 //     [RuleIDInvalid] with [RejectedText] and the scan goes on. Every other
-//     status code and every transport error is global (see statusClassOf
-//     and the errors of Classify at [ErrProvider]).
+//     status code and every transport error is global, also after the
+//     last try of a busy provider (see statusClassOf, retryPolicy and the
+//     errors of Classify at [ErrProvider]).
 //   - No free text from the model ever reaches a finding, an error or the
 //     terminal. A finding uses the fixed texts of [Category.Text] and
 //     [Remediation].
@@ -73,9 +80,11 @@
 //
 // # Imports
 //
-// The package uses the standard library and, from this module, only
-// internal/discover (for [discover.Secret], [discover.Mask] and
-// [discover.IsLoopbackHost]). It does not import internal/inspect: cmd/mcpmoat
-// copies the tool name, the description and inspect.Result.Secrets into an
-// [Input].
+// The package uses the standard library, the module
+// github.com/cenkalti/backoff/v7 (the waits between the tries of a busy
+// provider, see retryPolicy) and, from this module, only internal/discover
+// (for [discover.Secret], [discover.Mask] and [discover.IsLoopbackHost]). No
+// error text of the backoff module leaves this package. It does not import
+// internal/inspect: cmd/mcpmoat copies the tool name, the description and
+// inspect.Result.Secrets into an [Input].
 package llm

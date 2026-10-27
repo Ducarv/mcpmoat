@@ -41,6 +41,11 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   [Optional LLM classification](llm.md)). The tools of a server over its share are not
   classified, and the scan exits with 2. So a hostile server can make a `--llm` scan exit with 2 on
   purpose, but it cannot use up the share of the other servers.
+- The LLM step of a `--llm` scan stops after 10 minutes, and no flag changes this. A slow or busy
+  provider can use up this time: the tools that are not classified by then give exit code 2.
+- With `--llm-provider openai` and a base URL that is not the default OpenAI API (an
+  OpenAI-compatible server), mcpmoat sets no cap on the output tokens of the model (see
+  [Output cap](llm.md)).
 - A tool that the provider refuses (HTTP 400, 413 or 422) is not classified. It gets a `medium`
   finding, not a rating. When the provider refuses every tool that it answers, the LLM step fails
   and the scan exits with 2.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -617,9 +618,10 @@ func TestSortAnswer(t *testing.T) {
 
 // TestAnswerKindAnswered checks which kinds count as an answer: a verdict,
 // an answer that cannot be used and a refusal of the tool (answerRejected).
-// A tool with any other kind is counted as not classified. The table lists
-// every kind up to answerInternalFailed, so a new kind fails the test until
-// it gets a row.
+// A tool with any other kind is counted as not classified: also a tool whose
+// request the step deadline stopped (answerDeadline). The table lists every
+// kind up to answerDeadline, so a new kind fails the test until it gets a
+// row.
 func TestAnswerKindAnswered(t *testing.T) {
 	t.Parallel()
 
@@ -631,8 +633,9 @@ func TestAnswerKindAnswered(t *testing.T) {
 		answerStopped:        false,
 		answerProviderFailed: false,
 		answerInternalFailed: false,
+		answerDeadline:       false,
 	}
-	for k := answerNotRun; k <= answerInternalFailed; k++ {
+	for k := answerNotRun; k <= answerDeadline; k++ {
 		w, ok := want[k]
 		if !ok {
 			t.Errorf("%v has no row in the table", k)
@@ -660,8 +663,11 @@ func TestAnswerKindGot2xx(t *testing.T) {
 		answerStopped:        {false, false},
 		answerProviderFailed: {false, true},
 		answerInternalFailed: {false, true},
+		// The step deadline stops the step like a provider failure, and the
+		// stopped request got no 2xx answer.
+		answerDeadline: {false, true},
 	}
-	for k := answerNotRun; k <= answerInternalFailed; k++ {
+	for k := answerNotRun; k <= answerDeadline; k++ {
 		w, ok := tests[k]
 		if !ok {
 			t.Errorf("%v has no row in the table", k)
@@ -733,6 +739,9 @@ func TestLLMRowTruncated(t *testing.T) {
 		{name: "stopped cut", answer: llmAnswer{kind: answerStopped, verdict: cut}},
 		{name: "provider failed cut", answer: llmAnswer{kind: answerProviderFailed, verdict: cut}},
 		{name: "internal failed cut", answer: llmAnswer{kind: answerInternalFailed, verdict: cut}},
+		// A request that the step deadline stopped got no answer, so it gives
+		// no row, also for a cut tool.
+		{name: "deadline cut", answer: llmAnswer{kind: answerDeadline, verdict: cut}},
 	}
 	job := llmJob{in: llm.Input{ToolName: "t1"}}
 	for _, tt := range tests {
@@ -852,8 +861,9 @@ func TestNewLLMAnswer(t *testing.T) {
 		answerStopped:        {},
 		answerProviderFailed: {},
 		answerInternalFailed: {},
+		answerDeadline:       {},
 	}
-	for k := answerNotRun; k <= answerInternalFailed; k++ {
+	for k := answerNotRun; k <= answerDeadline; k++ {
 		w, ok := tests[k]
 		if !ok {
 			t.Errorf("%v has no row in the table", k)
@@ -872,13 +882,13 @@ func TestNewLLMAnswer(t *testing.T) {
 }
 
 // TestAnswerKindString checks that every answerKind up to the last one
-// (answerInternalFailed) has a name. A new kind without a case in String
-// gives the numeric fallback and fails this test. Add the new kind here when
-// it comes after answerInternalFailed.
+// (answerDeadline) has a name. A new kind without a case in String gives the
+// numeric fallback and fails this test. Add the new kind here when it comes
+// after answerDeadline.
 func TestAnswerKindString(t *testing.T) {
 	t.Parallel()
 
-	const last = answerInternalFailed
+	const last = answerDeadline
 	seen := make(map[string]answerKind)
 	for k := answerNotRun; k <= last; k++ {
 		got := k.String()
@@ -903,6 +913,7 @@ func TestAnswerKindString(t *testing.T) {
 		answerStopped:        "answerStopped",
 		answerProviderFailed: "answerProviderFailed",
 		answerInternalFailed: "answerInternalFailed",
+		answerDeadline:       "answerDeadline",
 	}
 	for k, want := range names {
 		if got := k.String(); got != want {
@@ -978,6 +989,17 @@ func TestLLMFailureLine(t *testing.T) {
 		{"provider bare", &llmFailure{kind: answerProviderFailed, err: llm.ErrProvider}, "the LLM provider failed (unknown error)"},
 		{"provider not known", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: network error", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
 		{"provider not known with a canary", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: reason-canary-Q8", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
+		// The step deadline (answerDeadline) names the time limit and never
+		// the provider. It needs no error, and the text of an error never
+		// shows (the field stays nil in production, see runLLMJobs).
+		{"deadline 10 minutes", &llmFailure{kind: answerDeadline, timeout: 10 * time.Minute}, "the LLM step stopped after 10 minutes"},
+		{"deadline 1 minute", &llmFailure{kind: answerDeadline, timeout: time.Minute}, "the LLM step stopped after 1 minute"},
+		{"deadline 30 seconds", &llmFailure{kind: answerDeadline, timeout: 30 * time.Second}, "the LLM step stopped after 30 seconds"},
+		{"deadline 50ms", &llmFailure{kind: answerDeadline, timeout: 50 * time.Millisecond}, "the LLM step stopped after 50ms"},
+		{"deadline with a canary error", &llmFailure{kind: answerDeadline, timeout: time.Minute, err: fmt.Errorf("%w: reason-canary-D4", llm.ErrProvider)}, "the LLM step stopped after 1 minute"},
+		// A timeout on another kind changes nothing.
+		{"provider with a timeout", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusServiceUnavailable}, timeout: time.Minute}, "the LLM provider failed (HTTP 503)"},
+		{"internal with a timeout", &llmFailure{kind: answerInternalFailed, timeout: time.Minute}, llmInternalText},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

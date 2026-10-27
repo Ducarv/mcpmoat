@@ -75,7 +75,8 @@ docs/                   PRD and other documentation
   `scan --json` (`WriteJSON`). See [JSON output](#json-output).
 - `internal/llm`: the optional `--llm` client (FR-17). It sends the name and description of one tool
   to an Anthropic or OpenAI-compatible API and accepts only a fixed verdict. It uses the standard
-  library and, from this module, only `discover` (see [Import direction](#import-direction)). See
+  library, the module `github.com/cenkalti/backoff/v7` for the waits between retries and, from this
+  module, only `discover` (see [Import direction](#import-direction)). See
   [The `--llm` classifier](#the---llm-classifier).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
@@ -106,7 +107,7 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `inspect`, `termsafe` |
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
-| `internal/llm` | `discover` |
+| `internal/llm` | `discover`, and the module `github.com/cenkalti/backoff/v7` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
@@ -115,7 +116,9 @@ This direction is allowed: `inspect` does not import `rules`, so there is no cyc
 `internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name, the
 description and the secret values of the server (`llm.Input`). `internal/llm` imports `discover`
 for the `discover.Secret` type of these values and of the API key, for `discover.Mask` and for
-`discover.IsLoopbackHost`.
+`discover.IsLoopbackHost`. It imports `github.com/cenkalti/backoff/v7` (v7.0.1, MIT licence, no
+dependencies of its own) only for the backoff of its retries. No error text of that module leaves
+`internal/llm`.
 
 You can check this table with:
 
@@ -806,9 +809,42 @@ The client has its own `http.Transport` with TLS 1.2 or later. It follows no red
 redirect would carry the key to another location. It never uses a proxy for an `http` base URL, so
 the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY` and `NO_PROXY`,
 like the server connections. Go ignores a proxy value that it cannot parse and then connects
-directly. The limits of a scan (tool count, workers, timeout, body size) are in the
-[docs/llm.md](llm.md). They live in
-`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`) and `internal/llm`.
+directly. The limits of a scan (tool count, workers, timeouts, retries, body size, output tokens)
+are in the [docs/llm.md](llm.md). They live in
+`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`, `llmStepTimeout`) and `internal/llm`.
+
+Retries: `Classify` calls `sendWithRetry` in `internal/llm/retry.go`, which calls `send` again for
+each try, so each try builds a new request with a new body. `retryPolicy` holds the numbers: 3
+tries in total for each tool, a backoff of 1 s that doubles up to 8 s with a jitter of 0.5 to 1.5
+times, and a cap of 30 s on a `Retry-After` wait. `retryableStatus` lists the codes that get a
+retry: 429, 502, 503, 504 and 529. Every other code (also 400, 413 and 422), a request timeout
+(`requestTimeout`, 30 s for each try) and every other transport error stop at once.
+`parseRetryAfter` reads the header (seconds or an HTTP date); a value that is not valid or in the
+past gives the normal backoff, and a value over the cap means no retry. `send` reads only this one
+response header of a non-2xx answer, never its body. The module `github.com/cenkalti/backoff/v7`
+runs the waits. `retryError` unwraps its errors: after the last try, the caller gets the error of
+that try as without retries, and when the context ends during a wait it gets the same error as when
+the context ends during a request. The reason: the error text of the module holds the text of the
+last error, and every error of `internal/llm` must have fixed text.
+
+Output cap: `anthropicAPI` sets `max_tokens` to 200. `newOpenAIAPI` sets `max_completion_tokens`
+to 2048 only for the default OpenAI base URL, because reasoning models bill hidden tokens that the
+response cap does not limit. Any other base URL gets no field, because many OpenAI-compatible
+servers know only `max_tokens` and refuse the field with 400, which would refuse every tool. A cut
+answer is `llm.ErrInvalidOutput`.
+
+The step deadline: `runLLMJobs` in `cmd/mcpmoat/scan_llm.go` runs all the jobs under one context
+with the time limit `llmStepTimeout` (10 minutes, no flag) and the cause `errLLMStepDeadline`
+(`context.WithTimeoutCause`). The reason: each request has a limit, but with retries and
+`Retry-After` waits one tool can take about 150 s, and 500 tools with 4 workers could take hours.
+When the cause is `errLLMStepDeadline` and the context of the caller has not ended
+(`endedByDeadline`), a request that the deadline stopped is `answerDeadline`, not
+`answerStopped`, and the failure of the step is `answerDeadline` when at least one job has no
+answer. It is a provider failure: exit 2, `complete` false, the report prints, the rows of the
+tools that got an answer stay, and stderr says `the LLM step stopped after 10 minutes`
+(`stepTimeoutText`). A signal ends the context of the caller, so its cause is not
+`errLLMStepDeadline` and the signal path wins. A failure that came first cancelled the context
+first, so it stays the failure. A test sets `cli.llmStepTimeout` to a short value.
 
 The plan: `planLLMJobs` in `cmd/mcpmoat/scan_llm.go` builds the jobs before the first request.
 `llmServerJobs` gives one job for each tool of each server with status `StatusOK`, in the order of
@@ -881,7 +917,8 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
   the JSON output.
 
 `sortAnswer` sorts every error of `Classify` into an `answerKind` and fails closed.
-`llm.ErrInvalidOutput` gives `answerUnusable`, the end of the context is a stop,
+`llm.ErrInvalidOutput` gives `answerUnusable`, the end of the context is a stop (`runLLMJobs`
+turns it into `answerDeadline` after the step deadline, see above),
 `llm.ErrRejected` gives `answerRejected`, and any other `llm.ErrProvider` is a provider failure.
 `llm.ErrRejected` wraps `llm.ErrProvider`, so its case comes first. Any other error is an internal
 error. A provider failure and an internal error stop the step. The first of them stops the running

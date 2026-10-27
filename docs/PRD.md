@@ -690,8 +690,23 @@ the machine**.
   content filter or a context limit). The tool is not classified and gets a `medium` finding:
   `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut. The
   other requests go on, and the scan can still be complete.
+- Retries: a provider answer of HTTP 429, 502, 503, 504 or 529 (busy or overloaded) is tried
+  again, with at most 3 tries in total for each tool. The wait before a retry is an exponential
+  backoff with jitter (1 s, doubling up to 8 s), or the `Retry-After` time of the answer up to 30
+  s. A longer `Retry-After` means no retry. No other status, no request timeout and no other
+  transport error is tried again. After the last try, the failure is a provider failure (below).
+- Time and cost bounds: each request has a time limit (30 s), and the whole LLM step has a fixed
+  time limit of 10 minutes, with no flag. A step that reaches it is a provider failure: the tools
+  that got an answer keep their findings, and the others are not classified. A signal is not this
+  case, and a provider failure that came first wins. The cost bound is at most 3 requests for each
+  tool, so at most 1500 requests in one scan, each with at most 24 KiB of tool text. The output of
+  the model is capped too: 200 tokens for Anthropic, and `max_completion_tokens` 2048 for the
+  default OpenAI base URL (hidden reasoning tokens are billed). Another OpenAI-compatible base URL
+  gets no output cap, because many such servers refuse that field. A cut answer is an unusable
+  answer (`MOAT-LLM-002`), not an error.
 - A provider failure stops the step and gives exit code 2 (fail closed). A provider failure is any
-  other HTTP error, a redirect, a network or TLS error, a timeout or a response that is not valid.
+  other HTTP error, a redirect, a network or TLS error, a timeout, a response that is not valid,
+  or the time limit of the step.
   The step also fails closed as a provider failure when the provider refused every tool that it
   answered, so a wrong model name or API shape that gives 400 for every tool does not look like a
   complete scan. An internal error of the LLM step, or tools over the cap, give exit code 2 too.

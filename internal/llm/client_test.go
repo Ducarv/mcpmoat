@@ -48,7 +48,7 @@ type capturedRequest struct {
 }
 
 // testServer is a loopback httptest server that counts requests and keeps
-// the last one. Its URL is an http URL, and the client never uses a proxy
+// each one. Its URL is an http URL, and the client never uses a proxy
 // for http, so the tests that use it do not depend on HTTP_PROXY of the
 // machine (the "httpnoproxy" mode of TestClassifyProxySettings checks this).
 type testServer struct {
@@ -56,6 +56,7 @@ type testServer struct {
 	hits atomic.Int32
 	mu   sync.Mutex
 	last capturedRequest
+	all  []capturedRequest
 }
 
 // startServer starts a testServer that calls h after it records the request.
@@ -78,6 +79,7 @@ func startServer(t *testing.T, h http.HandlerFunc) *testServer {
 			Header:     r.Header.Clone(),
 			Body:       body,
 		}
+		s.all = append(s.all, s.last)
 		s.mu.Unlock()
 		h(w, r)
 	}))
@@ -90,6 +92,13 @@ func (s *testServer) lastRequest() capturedRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.last
+}
+
+// requests returns every request that s saw, in order.
+func (s *testServer) requests() []capturedRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.all)
 }
 
 // reply returns a handler that answers with status and body, and puts
@@ -106,13 +115,15 @@ func reply(status int, body string) http.HandlerFunc {
 func testSecret() discover.Secret { return discover.NewSecret(llmTestKey) }
 
 // newTestClient returns a client for provider p at base, with llmTestKey and
-// llmTestModel.
+// llmTestModel. It has the retry policy testRetry, so a busy status code
+// (429, 502, 503, 504, 529) costs milliseconds, not the production seconds.
 func newTestClient(t *testing.T, p Provider, base string) *Client {
 	t.Helper()
 	c, err := New(Config{Provider: p, Model: llmTestModel, BaseURL: base, APIKey: testSecret()})
 	if err != nil {
 		t.Fatalf("New(%s) error = %v", p, err)
 	}
+	c.retry = testRetry
 	t.Cleanup(c.CloseIdleConnections)
 	return c
 }
@@ -332,21 +343,25 @@ func TestClassifyStatusErrors(t *testing.T) {
 	t.Parallel()
 	// wantRejected marks the per-tool codes (ErrRejected). The other codes
 	// are global failures and must not satisfy errors.Is(err, ErrRejected).
+	// wantTries is the number of requests: 3 for a busy code (see
+	// retryPolicy), 1 for the others. After the last try the error is the
+	// same as for one request.
 	tests := []struct {
 		code         int
 		wantAuth     bool
 		wantRejected bool
 		wantReason   string
+		wantTries    int32
 	}{
-		{code: http.StatusBadRequest, wantRejected: true, wantReason: "HTTP 400 (the provider refused this tool)"},
-		{code: http.StatusRequestEntityTooLarge, wantRejected: true, wantReason: "HTTP 413 (the provider refused this tool)"},
-		{code: http.StatusUnprocessableEntity, wantRejected: true, wantReason: "HTTP 422 (the provider refused this tool)"},
-		{code: http.StatusUnauthorized, wantAuth: true, wantReason: "HTTP 401 (the API key was refused)"},
-		{code: http.StatusForbidden, wantAuth: true, wantReason: "HTTP 403 (the API key was refused)"},
-		{code: http.StatusNotFound, wantReason: "HTTP 404"},
-		{code: http.StatusTooManyRequests, wantReason: "HTTP 429"},
-		{code: http.StatusInternalServerError, wantReason: "HTTP 500"},
-		{code: http.StatusServiceUnavailable, wantReason: "HTTP 503"},
+		{code: http.StatusBadRequest, wantRejected: true, wantReason: "HTTP 400 (the provider refused this tool)", wantTries: 1},
+		{code: http.StatusRequestEntityTooLarge, wantRejected: true, wantReason: "HTTP 413 (the provider refused this tool)", wantTries: 1},
+		{code: http.StatusUnprocessableEntity, wantRejected: true, wantReason: "HTTP 422 (the provider refused this tool)", wantTries: 1},
+		{code: http.StatusUnauthorized, wantAuth: true, wantReason: "HTTP 401 (the API key was refused)", wantTries: 1},
+		{code: http.StatusForbidden, wantAuth: true, wantReason: "HTTP 403 (the API key was refused)", wantTries: 1},
+		{code: http.StatusNotFound, wantReason: "HTTP 404", wantTries: 1},
+		{code: http.StatusTooManyRequests, wantReason: "HTTP 429", wantTries: 3},
+		{code: http.StatusInternalServerError, wantReason: "HTTP 500", wantTries: 1},
+		{code: http.StatusServiceUnavailable, wantReason: "HTTP 503", wantTries: 3},
 	}
 	for _, p := range bothProviders {
 		for _, tt := range tests {
@@ -378,6 +393,9 @@ func TestClassifyStatusErrors(t *testing.T) {
 				}
 				if v != (Verdict{}) {
 					t.Errorf("Classify() verdict = %+v, want zero", v)
+				}
+				if n := srv.hits.Load(); n != tt.wantTries {
+					t.Errorf("server requests = %d, want %d", n, tt.wantTries)
 				}
 				// The body of a non-2xx answer is never read: the exact
 				// Reason above and this check keep the canary out of both.

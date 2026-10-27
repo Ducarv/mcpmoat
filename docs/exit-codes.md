@@ -40,7 +40,8 @@ a `--rules` file that does not compile, with or without `--no-connect`), an unre
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, a provider
-refusal of every tool, an internal error of the LLM step, or tools over the 500-tool cap), an
+refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM
+step, or tools over the 500-tool cap), an
 internal error of the tool rule step, or another internal error. One tool that the provider
 refuses (HTTP 400, 413 or 422) is not an execution error: it is a `medium` finding, and the scan
 goes on (see [Optional LLM classification](llm.md)). Some of these errors still
@@ -51,7 +52,7 @@ print the report on stdout first, so you can read the findings:
 | A problem in a config file | Printed, then the problems. A `--config` file with a problem and no server prints only the problem. |
 | A `pins.json` that cannot be read or saved | Printed |
 | An internal error of the inspection (`inspect.Run`) | Printed |
-| An LLM provider failure, a provider refusal of every tool, an internal error of the LLM step, or tools over the 500-tool cap with `--llm` | Printed |
+| An LLM provider failure, a provider refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM step, or tools over the 500-tool cap with `--llm` | Printed |
 | A signal before the save of new pins | Printed |
 | A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
 | A signal during the inspection, the tool rule step or the LLM step | Not printed |
@@ -71,7 +72,8 @@ A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
   the inspection. `scan` stops the rule analysis, prints the same line, saves nothing and prints no
   report.
 - During the LLM step of a `--llm` scan. `scan` stops the requests and then does the same: it
-  prints the same line, saves nothing and prints no report.
+  prints the same line, saves nothing and prints no report. The 10-minute time limit of the LLM
+  step is not a signal: it prints the report (see the table above).
 - After the report, before the save of new pins. `scan` prints the same line and saves nothing.
   This applies only when the scan has new servers to pin.
 
