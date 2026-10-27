@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -432,7 +431,7 @@ func checkToolPerRule(a *Analyzer, t inspect.Tool) (int, error) {
 // the forms of its text, so the forms are built once for each text.
 func BenchmarkCheckToolBuiltin(b *testing.B) {
 	benchCheckTool(b, func(a *Analyzer, t inspect.Tool) (int, error) {
-		f, err := a.CheckTool(context.Background(), t)
+		f, err := a.CheckTool(b.Context(), t)
 		return len(f), err
 	})
 }

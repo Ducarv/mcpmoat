@@ -9,9 +9,8 @@ import (
 )
 
 // Cost caps for one tool schema in matchSchemaPrepared. A description is one
-// text, and
-// the regex and keyword matchers read at most MaxMatchInputBytes of it. A
-// schema is many short texts, so it gets its own caps.
+// text, and the regex and keyword matchers read at most MaxMatchInputBytes of
+// it. A schema is many short texts, so it gets its own caps.
 //
 // In the schemaBudget mode, the matchers read one schema in three passes:
 //
@@ -71,9 +70,8 @@ const (
 // jsonSpace holds the four white-space characters of JSON.
 const jsonSpace = " \t\r\n"
 
-// schemaMode tells matchSchemaPrepared how to read the strings of a schema. The
-// zero
-// value is schemaBudget, the mode of the regex and keyword kinds.
+// schemaMode tells matchSchemaPrepared how to read the strings of a schema.
+// The zero value is schemaBudget, the mode of the regex and keyword kinds.
 type schemaMode int
 
 const (
@@ -401,18 +399,22 @@ func keepSchemaHits(l *hitList, label string, hits []Hit) {
 // defeats any join in document order. So a report here would be a false
 // positive on large benign schemas, with no gain in security.
 //
-// It checks ctx before each seam. When ctx is done or match fails, it returns
-// no hit and an error (see matchSchemaPrepared).
+// It checks ctx before it matches each seam, after the byte cap. When ctx is
+// done or match fails, it returns no hit and an error (see
+// matchSchemaPrepared).
 func matchSeams(ctx context.Context, ps *preparedSchema, match schemaMatchFunc) (string, []Hit, error) {
 	total := 0
 	for i := 1; i < ps.fit; i++ {
-		if err := ctx.Err(); err != nil {
-			return "", nil, fmt.Errorf("match schema seams: %w", err)
-		}
+		// The byte cap comes before the ctx check: when no work is left, a
+		// deadline that passes now must not make the tool count as not fully
+		// checked.
 		seam := ps.seam(i)
 		total += len(seam.raw)
 		if total > maxSeamBytes {
 			return "", nil, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", nil, fmt.Errorf("match schema seams: %w", err)
 		}
 		// strs[i-1] is string i and strs[i] is string i+1, 1-based.
 		hits, err := match(ctx, seam)

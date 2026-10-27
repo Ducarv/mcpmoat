@@ -108,9 +108,8 @@ func ansiKeepText(s string) string {
 
 // ansiKeepCSIText is ansiKeepText, but an OSC becomes two U+0020, without
 // its text. The cut flag of baseFormsCut reads the fifth and the seventh form
-// with it, so
-// every byte of these forms counts for the window except the text of an
-// OSC: the two U+0020 of an OSC with no text count too.
+// with it, so every byte of these forms counts for the window except the text
+// of an OSC: the two U+0020 of an OSC with no text count too.
 func ansiKeepCSIText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, func(seq string) string {
 		if _, ok := oscText(seq); ok {

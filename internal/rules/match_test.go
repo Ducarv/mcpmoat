@@ -1007,7 +1007,7 @@ func TestMatchCtxBackgroundEqualsMatch(t *testing.T) {
 				name string
 				p    *preparedText
 			}{{name: "fresh", p: prepareText(text)}, {name: "shared", p: shared}} {
-				got, err := nm.m.matchCtx(context.Background(), p.p)
+				got, err := nm.m.matchCtx(t.Context(), p.p)
 				if err != nil {
 					t.Errorf("%s: matchCtx(%s %.60q) error = %v, want nil", nm.name, p.name, text, err)
 				}

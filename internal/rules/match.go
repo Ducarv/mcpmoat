@@ -63,7 +63,8 @@ import (
 // preparedText and Matcher.matchCtx). It also stops the analysis of a server
 // at a deadline: matchCtx checks the context before each regex reads each
 // form, so the overshoot past the deadline is at most about one regex on one
-// form plus one build of the forms of one text.
+// form, plus one build of the forms of one text, plus one decode of a schema
+// or one heuristic call on the raw text.
 //
 // Building the forms has a cost too. The slowest known input is a run of
 // U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
@@ -324,8 +325,8 @@ func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 // builds the forms, before each regex or keyword reads each form, and before
 // the heuristic. For a schema, matchSchemaPrepared also checks it before
 // each string, seam and raw text. So when ctx ends, the extra work is at
-// most one build of the forms of one text plus one regex on one form, or one
-// heuristic call. matchCtx then returns the hits that it found so far, and
+// most one schema decode, one build of the forms of one text plus one regex
+// on one form, or one heuristic call. matchCtx then returns the hits that it found so far, and
 // an error that wraps ctx.Err(). The error names the kind and the list
 // index, never input text. With a context that is never done, the error is
 // nil, and the hits are the hits of Match.

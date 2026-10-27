@@ -80,9 +80,8 @@ func isInvisibleFormat(r rune) bool {
 //
 // The base forms are the forms that the regex and keyword matchers read
 // before the fold (see preparedText). A matcher reports a match when one form
-// matches. Each form is at most MaxMatchInputBytes
-// long, and equal forms are kept only once (see appendNew), so there are at
-// most maxBaseForms forms. The conditions below look only at the part of s
+// matches. Each form is at most MaxMatchInputBytes long, and equal forms are
+// kept only once (see appendNew), so there are at most maxBaseForms forms. The conditions below look only at the part of s
 // that normalizeForMatch reads (the first maxRawScanBytes).
 //
 // The forms 1 to 3 read the escape sequences with ansiSeq, which takes no C0

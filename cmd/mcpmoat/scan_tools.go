@@ -21,6 +21,7 @@ import (
 // the tools of one server. A real server needs far less: its tool texts are
 // short. But a hostile server can send tool texts that make one regex take
 // seconds. The budget stops such a server from holding up the whole scan.
+// Each server has its own budget, so the bound is per server.
 // The analyzer checks the context before each regex on each form of the text
 // (see rules.Analyzer.CheckTool), so it stops soon after the budget is used
 // up. A server that uses up the budget gets a rules.RuleAnalysisBudget
@@ -186,8 +187,8 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			// so it counts as not fully checked.
 			notChecked := len(tools) - i
 			r.add(o.Index, "", budgetRow(ref, r.budgetSeverity, notChecked, len(tools)))
-			r.c.scanWarnf("server %s: the rule analysis stopped after %s; %d of %d %s not fully checked",
-				cutName(o.Server.Name), r.budget, notChecked, len(tools), plural(len(tools), "tool", "tools"))
+			r.c.scanWarnf("server %s: the rule analysis stopped after %s; %s",
+				cutName(o.Server.Name), r.budget, notCheckedText(notChecked, len(tools)))
 			return nil
 		default:
 			// A guard: CheckTool fails only when its context ends. The text
@@ -280,8 +281,9 @@ func budgetSeverity(a *rules.Analyzer) rules.Severity {
 // (see budgetSeverity). notChecked is the number of tools that were not fully
 // checked, out of total. The row is about the whole server, so its Key is
 // empty. All its texts are fixed (see budgetTitle), apart from the two
-// numbers in Related. They do not come from the rule set: a rule from --rules
-// could use the same ID.
+// numbers in Related. They do not come from the rule set: the rule has no YAML
+// file (NewSet refuses the ID, see rules.ReservedRuleID), and fixed texts stay
+// right even if a reserved-ID check is ever bypassed.
 func budgetRow(ref report.ServerRef, severity rules.Severity, notChecked, total int) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   ref,
@@ -291,7 +293,12 @@ func budgetRow(ref report.ServerRef, severity rules.Severity, notChecked, total 
 		Risk:        budgetRisk,
 		Remediation: budgetRemediation,
 		Field:       rules.FieldTool,
-		Related: fmt.Sprintf("rule analysis time budget used up; %d of %d %s not fully checked",
-			notChecked, total, plural(total, "tool", "tools")),
+		Related:     "rule analysis time budget used up; " + notCheckedText(notChecked, total),
 	}
+}
+
+// notCheckedText returns "N of M tools not fully checked". The stderr warning
+// and the Related text of the budget row both use it, so they say the same.
+func notCheckedText(notChecked, total int) string {
+	return fmt.Sprintf("%d of %d %s not fully checked", notChecked, total, plural(total, "tool", "tools"))
 }
