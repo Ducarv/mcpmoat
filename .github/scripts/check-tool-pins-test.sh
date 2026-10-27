@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests check-tool-pins.sh on changed copies of the files that it reads. The
-# tool-pins job in ci.yml runs it. You can also run it on your machine,
-# from any directory: see CONTRIBUTING.md, Checks. It needs bash, awk, sed, cmp,
-# mktemp and find, because check-tool-pins.sh needs them.
+# ci-scripts job in ci.yml runs it. You can also run it on your machine,
+# from any directory: see CONTRIBUTING.md, Checks. It needs bash and the
+# standard tools awk, sed, grep, find, paste, sort, cmp, mktemp and ln.
 # shellcheck disable=SC2016 # the sed expressions and the call hold a literal $
 set -euo pipefail
 
@@ -216,13 +216,21 @@ wf_pin_other_key() {
   printf 'name: extra\njobs:\n  x:\n    outputs:\n      GORELEASER_VERSION: %s\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$gr_ver" >"$wf/$1"
 }
 
-# anchor_poc turns the GoReleaser check step of ci.yml into an anchor and adds a
-# job that uses the alias. The alias line names nothing, and the new job has no
-# pin of its own.
+# anchor_poc turns the GoReleaser check step of ci.yml into an anchor with the
+# name $1 (default gr) and adds a job that uses the alias. The alias line names
+# nothing, and the new job has no pin of its own.
 anchor_poc() {
-  awk '/- name: Check the GoReleaser config/ { print "      - &gr"; sub(/- name:/, "  name:") } { print }' "$wf/ci.yml" >"$wf/ci.yml.new" &&
+  awk -v n="${1:-gr}" '/- name: Check the GoReleaser config/ { print "      - &" n; sub(/- name:/, "  name:") } { print }' "$wf/ci.yml" >"$wf/ci.yml.new" &&
     mv "$wf/ci.yml.new" "$wf/ci.yml" &&
-    printf '  alias-job:\n    runs-on: ubuntu-latest\n    steps:\n      - *gr\n' >>"$wf/ci.yml"
+    printf '  alias-job:\n    runs-on: ubuntu-latest\n    steps:\n      - *%s\n' "${1:-gr}" >>"$wf/ci.yml"
+}
+
+# symlinked_action puts a composite action that names goreleaser-action outside
+# .github/actions and links to it from inside.
+symlinked_action() {
+  mkdir -p elsewhere .github/actions &&
+    printf '    - uses: goreleaser/goreleaser-action@x\n' >elsewhere/action.yml &&
+    ln -s ../../elsewhere .github/actions/y
 }
 
 # The real files must pass.
@@ -277,7 +285,7 @@ check_case "GoReleaser: different pin in release.yml" 1 "The GoReleaser pins dif
 check_case "GoReleaser: different pin in CONTRIBUTING.md" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md 's|(goreleaser/v[0-9]+)@v[0-9.]+|\1@v0.0.1|g'
 check_case "GoReleaser: different pin in one command only" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+)@v[0-9.]+|\1@v0.0.1|'
 check_case "GoReleaser: pin value latest in release.yml" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: latest'
-check_case "GoReleaser: short pin value in ci.yml" 1 "not a full version" append "$wf/ci.yml" '      GORELEASER_VERSION: v2.19'
+check_case "GoReleaser: short pin value in ci.yml" 1 "not a full version" append "$wf/ci.yml" "      GORELEASER_VERSION: ${gr_ver%.*}"
 check_case "GoReleaser: @latest in one CONTRIBUTING.md command" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+)@v[0-9.]+|\1@latest|'
 check_case "GoReleaser: short version in one CONTRIBUTING.md command" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+@v[0-9]+\.[0-9]+)\.[0-9]+|\1|'
 check_case "GoReleaser: two pins in ci.yml" 1 "ci.yml must pin one version of GoReleaser" append "$wf/ci.yml" '      GORELEASER_VERSION: v0.0.1'
@@ -327,7 +335,7 @@ $w_with"
 # (c) Flow style, and (g) other styles that the check cannot read.
 check_case "goreleaser-action: flow style" 1 "a line names goreleaser-action in a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: latest}}"
 check_case "goreleaser-action: flow style, good version" 1 "a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: \${{ env.GORELEASER_VERSION }}}}"
-check_case "goreleaser-action: anchor before the action" 1 "line uses a YAML anchor, alias or merge key" step_workflow extra.yml "      - uses: &a goreleaser/goreleaser-action@x
+check_case "goreleaser-action: anchor before the action" 1 "line uses a YAML form this check cannot read" step_workflow extra.yml "      - uses: &a goreleaser/goreleaser-action@x
 $w_with"
 check_case "goreleaser-action: uses value on the next line" 1 "a style this check cannot read" step_workflow extra.yml "      - uses:
           goreleaser/goreleaser-action@x
@@ -440,6 +448,7 @@ check_case "actions: composite action with goreleaser-action" 1 "action.yml name
     - uses: goreleaser/goreleaser-action@x"
 check_case "actions: other case" 1 "names goreleaser/goreleaser-action" actions_file "    - uses: GoReleaser/GoReleaser-Action@x"
 check_case "actions: other action" 0 "" actions_file "    - uses: actions/checkout@x"
+check_case "actions: symlinked directory" 1 "names goreleaser/goreleaser-action" symlinked_action
 
 # A # starts a comment only after a space.
 check_case "comment: no space after the version input" 1 "has a version input that is not" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
@@ -448,15 +457,15 @@ check_case "comment: no space after the version input" 1 "has a version input th
 check_case "comment: no space after the quoted version input" 1 "has a version input that is not" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           version: \"\${{ env.GORELEASER_VERSION }}\"#x"
-check_case "comment: no space after the pin" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: v2.19.0#x'
-check_case "comment: no space after the quoted pin" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: "v2.19.0"#x'
+check_case "comment: no space after the pin" 1 "not a full version" append "$wf/release.yml" "      GORELEASER_VERSION: $gr_ver#x"
+check_case "comment: no space after the quoted pin" 1 "not a full version" append "$wf/release.yml" "      GORELEASER_VERSION: \"$gr_ver\"#x"
 check_case "comment: key quoted in the version input" 0 "" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           \"version\": \"\${{ env.GORELEASER_VERSION }}\"  # pinned"
 
 # YAML anchors, aliases and merge keys are not allowed. An alias line names
 # nothing, so the checks above could not see the step that it repeats.
-refs="line uses a YAML anchor, alias or merge key"
+refs="line uses a YAML form this check cannot read"
 check_case "yaml: anchor on the pinned step and an alias in a second job" 1 "ci.yml: $refs: \"- &gr\"" anchor_poc
 check_case "yaml: anchor on a key" 1 "extra.yml: $refs: \"name: &a v\"" step_workflow extra.yml "      - run: echo hi
         name: &a v"
@@ -475,6 +484,24 @@ check_case "yaml: merge key with a map" 1 "$refs" step_workflow extra.yml "     
 check_case "yaml: alias after a block scalar" 1 "$refs" step_workflow extra.yml "      - run: |
           echo hi
       - *gr"
+check_case "yaml: dotted anchor name and an alias in a second job" 1 "ci.yml: $refs: \"- &gr.step\"" anchor_poc gr.step
+check_case "yaml: anchor on its own line" 1 "$refs: \"&l\"" step_workflow extra.yml "      &l
+      - run: echo hi"
+check_case "yaml: alias on its own line" 1 "$refs: \"*l\"" step_workflow extra.yml "      - run: echo hi
+      *l"
+check_case "yaml: key alias with a space before the colon" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        *k : v"
+check_case "yaml: merge key with a space before the colon" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        << : *x"
+check_case "yaml: uses value with a hex escape" 1 "$refs" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-actio\\x6e@x\"
+        with:
+          version: latest"
+check_case "yaml: uses value with an escaped line break" 1 "$refs" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-\\
+          action@y\"
+        with:
+          version: latest"
+check_case "yaml: quoted uses key with an escape" 1 "$refs" step_workflow extra.yml "      - \"us\\x65s\": goreleaser/goreleaser-action@x"
+check_case "yaml: double-quoted uses value, no escape" 0 "" step_workflow extra.yml "      - uses: \"actions/checkout@x\" # note"
 check_case "yaml: alias in govulncheck.yml" 1 "govulncheck.yml: $refs" append "$wf/govulncheck.yml" '      - *gr'
 check_case "yaml: alias in a .yaml workflow" 1 "extra.yaml: $refs" step_workflow extra.yaml "      - *gr"
 check_case "yaml: the line shows in the message" 1 "\"env: &e {a: b}\"" step_workflow extra.yml "      - run: echo hi
@@ -513,6 +540,8 @@ check_case "needs: govulncheck once more" 0 "" append "$wf/govulncheck.yml" '   
 check_case "needs: list form" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '    needs: [govulncheck]'
 check_case "needs: other indent" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      needs: govulncheck'
 check_case "needs: in ci.yml" 1 "ci.yml has a govulncheck line that is not the pin" append "$wf/ci.yml" '    needs: govulncheck'
+check_case "if: line of the failure job, other result" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" "    if: failure() || needs.govulncheck.result == 'success'"
+check_case "if: line of the failure job in ci.yml" 1 "ci.yml has a govulncheck line that is not the pin" append "$wf/ci.yml" "    if: failure() || needs.govulncheck.result == 'cancelled'"
 check_case "step that runs govulncheck" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      - run: govulncheck ./...'
 
 # A pin with the form of a pre-release or with quotes is still a full version.

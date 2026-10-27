@@ -15,11 +15,15 @@
 # - A file under .github/actions that names goreleaser-action fails. Extend
 #   this check before you add such a file.
 # - A workflow line with a YAML anchor, alias or merge key fails, because an
-#   alias line can repeat a step without naming it.
+#   alias line can repeat a step without naming it. A uses: value in double
+#   quotes with a backslash or without a closing quote on the line fails too,
+#   and so does a quoted key with a backslash, because an escape can spell
+#   goreleaser-action without the plain text that the checks look for.
 # Not covered: other ways to install GoReleaser or govulncheck, such as
 # docker://goreleaser/goreleaser, a remote reusable workflow, brew install, go
-# install, a composite action outside .github/actions, or a $GITHUB_ENV write
-# that builds the name from pieces. Review is the control for these. A later
+# install, a composite action outside .github/actions, a $GITHUB_ENV write
+# that builds the name from pieces, or an escape in a value that is not a
+# uses: value. Review is the control for these. A later
 # issue can widen the check.
 # The tool-pins job in ci.yml runs it. You can also run it on your machine,
 # from any directory: see CONTRIBUTING.md, Checks. check-tool-pins-test.sh
@@ -87,19 +91,26 @@ for file in "$wf"/*.yml "$wf"/*.yaml; do
   if [ -e "$file" ]; then wf_files+=("$file"); fi
 done
 
-# yaml_refs prints the lines of a file that use a YAML anchor (&name), an alias
-# (*name) or a merge key (<<:). An alias can hide a goreleaser-action step in a
-# line that names nothing. The rule is narrow, to avoid false alarms in shell
-# text. A line matches when, outside quotes and comments, a token &name or
-# *name stands after "- ", after ": ", or after [ { or a comma, and ends at a
-# space, a comma, a bracket or the end of the line. The line "<<:" matches too.
-# The body of a block scalar (a key with | or >, such as run: |) is skipped.
+# yaml_refs prints the lines of a file that use a YAML form that the checks
+# below cannot read: an anchor (&name), an alias (*name), a merge key (<<:), a
+# double-quoted uses: value with an escape or without a closing quote, or a
+# quoted key with an escape. These forms can hide a goreleaser-action step.
+# The rule is narrow, to avoid false alarms in shell text. A name is any text
+# up to a space or a flow indicator (, [ ] { }), as YAML allows. A line matches
+# when, outside quotes and comments, a token &name or *name stands at the start
+# of the line, after "- ", after ": ", or after [ { or a comma. The line
+# "<<:" matches too, with spaces before the colon. The body of a block scalar
+# (a key with | or >, such as run: |) is skipped.
 # Known limit: an unquoted apostrophe in a plain value can hide text after it.
 yaml_refs() {
   code_of "$1" | awk '
     BEGIN {
       q = "\047"
-      ref_re = "(^(- +)+|: +|[[{,] *)[&*][A-Za-z0-9_-]+([],} ]|$)"
+      ref_re = "(^(- +)*|: +|[[{,] *)[&*][^],[{} ]+"
+      # A uses: key, plain or quoted, with a double-quoted value.
+      uses_dq_re = "^[\"" q "]?uses[\"" q "]? *: *\""
+      uses_closed_re = "^[^:]*: *\"[^\"]*\"( |$)"
+      qkey_esc_re = "^\"[^\"]*\\\\[^\"]*\" *:"
       block_re = "^[|>][-+0-9]* *$"
     }
     /^[[:space:]]*$/ { next }
@@ -112,12 +123,15 @@ yaml_refs() {
       }
       line = $0; sub(/^ */, "", line)
       shown = line
+      raw = line
+      while (raw ~ /^- +/) sub(/^- +/, "", raw)
+      hidden = (raw ~ uses_dq_re && (raw ~ /\\/ || raw !~ uses_closed_re)) || raw ~ qkey_esc_re
       gsub(/"[^"]*"/, "\"\"", line)
       gsub(q "[^" q "]*" q, "\"\"", line)
       sub(/ +#.*$/, "", line)
       rest = line; dashes = 0
       while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; sub(/^- +/, "", rest) }
-      if (rest ~ /^<<:/ || line ~ ref_re) print shown
+      if (rest ~ /^<< *:/ || line ~ ref_re || hidden) print shown
       # A block scalar starts when the line ends with : | or - | and so on.
       # Its body is indented deeper than the key (or the dash, for - |).
       val = rest; sub(/^.*: +/, "", val)
@@ -129,11 +143,11 @@ yaml_refs() {
   '
 }
 
-# An anchor, an alias or a merge key can hide a step from the checks below.
+# These forms can hide a step from the checks below.
 for file in "${wf_files[@]}"; do
   refs=$(yaml_refs "$file")
   [ -z "$refs" ] ||
-    fail "$(basename "$file"): line uses a YAML anchor, alias or merge key: \"${refs%%$'\n'*}\". Write the workflows without them."
+    fail "$(basename "$file"): line uses a YAML form this check cannot read: \"${refs%%$'\n'*}\". Write the workflows without anchors, aliases, merge keys and escapes in a uses: value."
 done
 
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
@@ -141,7 +155,9 @@ done
 goreleaser_want=$(pins GORELEASER_VERSION "$wf/ci.yml")
 need_one_in_ci GoReleaser "$goreleaser_want"
 # A GORELEASER_VERSION line that is not a full version could override the pin.
-# Any workflow file can hold one, so check them all.
+# Any workflow file can hold one, so check them all. goreleaser_steps below
+# rejects such a line too. This check is first on purpose, for a clearer
+# message.
 for file in "${wf_files[@]}"; do
   other=$(code_of "$file" | grep -E '^ *GORELEASER_VERSION:' | grep -vE "$(pin_re GORELEASER_VERSION)" || true)
   [ -z "$other" ] || fail "$(basename "$file") has a GORELEASER_VERSION line that is not a full version: $(one_line <<<"$other")"
@@ -157,29 +173,20 @@ fi
 # A composite action can hold a goreleaser-action step, and this check does not
 # read it. So a file under .github/actions that names the action fails. find
 # lists the matching files. The ; form makes find succeed when none matches.
+# find -L follows a symlink to a directory, as GitHub does.
 if [ -d .github/actions ]; then
-  action_files=$(find -H .github/actions ! -type d -exec grep -liF 'goreleaser/goreleaser-action' {} \; | one_line)
+  action_files=$(find -L .github/actions -type f -exec grep -liF 'goreleaser/goreleaser-action' {} \; | one_line)
   [ -z "$action_files" ] ||
     fail "$action_files names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file."
 fi
 
-# Each goreleaser/goreleaser-action step must have a version input with the
-# value ${{ env.GORELEASER_VERSION }} inside its with: block. Without it, with
-# another value such as latest, or with the key in another place such as env:,
-# the action installs another GoReleaser than the pinned one. A step starts at
-# a "- " line and ends at the next line that has the same indent or less. So a
-# version input of another step does not count.
-# The same function also checks every line that names GORELEASER_VERSION, in
-# any case. Such a line must be the version input or the pin line: exact case,
-# no space before the colon, at indent 6 in the env: of a job. Any other line
-# could change the version at run time. Examples are a second definition, a
-# flow style env, or a run: step that writes to $GITHUB_ENV. A job with a
-# goreleaser-action step must have the pin line in its own env:.
-# This is a best-effort text check, not a YAML parser. It reads block style
-# only. It counts the lines that name goreleaser/goreleaser-action and the
+# goreleaser_steps applies the GoReleaser rules of the header, to one file.
+# A step starts at a "- " line and ends at the next line that has the same
+# indent or less. So a version input of another step does not count. The pin
+# line must be exact: case, no space before the colon, at indent 6 in the env:
+# of a job. It counts the lines that name goreleaser/goreleaser-action and the
 # steps that it could read. When a line names the action in a style that it
-# cannot read (flow style, an anchor, a split line), it fails. So write each
-# step in block style. The govulncheck check below is a text check too.
+# cannot read (flow style, a split line), it fails.
 #
 # The awk program reads the file one line at a time and keeps this state in
 # variables. A variable that was never set is 0 or empty.
@@ -277,6 +284,8 @@ for file in "${wf_files[@]}"; do
   base=$(basename "$file")
   # A file with another GORELEASER_VERSION than ci.yml has would break the pin.
   # A file with a step but no definition would use the default of the action.
+  # The END rule of goreleaser_steps finds the second case per job. This check
+  # is per file, and it is first on purpose, for a clearer message.
   got=$(pins GORELEASER_VERSION "$file")
   [ -z "$got" ] || [ "$got" = "$goreleaser_want" ] ||
     fail "$base has GORELEASER_VERSION $(one_line <<<"$got"), expected $goreleaser_want (the pin in ci.yml)."
@@ -328,10 +337,12 @@ for f in "${workflows[@]}"; do
   code=$(code_of "$file")
   grep -qE "$run_re" <<<"$code" || fail "$f.yml has no call line that uses \$GOVULNCHECK_VERSION."
   # The call line and the pin lines are the only lines that may mention
-  # govulncheck. In govulncheck.yml the workflow name, the job ID and
-  # the line "    needs: govulncheck" may too.
+  # govulncheck. In govulncheck.yml the workflow name, the job ID, the line
+  # "    needs: govulncheck" and the if: line of the failure job may too.
   names='^$' # matches no line that mentions govulncheck
-  if [ "$f" = govulncheck ]; then names='^name: govulncheck$|^  govulncheck:$|^    needs: govulncheck$'; fi
+  if [ "$f" = govulncheck ]; then
+    names="^name: govulncheck\$|^  govulncheck:\$|^    needs: govulncheck\$|^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled'\$"
+  fi
   other=$(grep -iE 'govulncheck' <<<"$code" |
     grep -vE "$run_re" |
     grep -vE "$(pin_re GOVULNCHECK_VERSION)" |
