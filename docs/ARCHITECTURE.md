@@ -43,9 +43,9 @@ docs/                   PRD and other documentation
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
   apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step
   that both commands use (`serverIdentity`, `readPins`, `readPinsLocked`, `printNewPinsFile`,
-  `pinnable`, `appendDiff`). `scan_pins.go`
-  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
-  `scan_rules.go` loads the rules and builds the `rules.Analyzer` (`loadRules`), and
+  `pinnable`, `appendDiff`). `scan_pins.go` holds the pin step of `scan` (`pinner`), and
+  `accept_hint.go` the "To accept" line. `scan_rules.go` loads the rules and builds the
+  `rules.Analyzer` (`loadRules`), and
   `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds the `--llm`
   step: it maps each `inspect.Tool` to an `llm.Input` and calls a
   `toolClassifier`, a small interface that `*llm.Client` implements. The `cli.newClassifier`
@@ -218,10 +218,9 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     file larger (`pins.ErrStoreFull`). The report comes before the save, so `pinOutcomes` adds each
     first-run server to a copy of the store (`pinner.budget`, made with `Store.Clone`) in the order
     of the save. A server that does not fit is not pinned and gets the same high MOAT-T2-004
-    finding with the reason `the pins file is full (32 MiB), so this server is not pinned`
-    (`reasonStoreFull`) and the fix `Remove servers you no longer use from pins.json, or remove
-    this server from the client config, then run mcpmoat scan again.` (`fixStoreFull`). The
-    reason stays at 80 runes or less, so the terminal report does not cut it. The risk
+    finding with the fixed reason `reasonStoreFull` and the fix `fixStoreFull` (the texts are in
+    [Pins and rug pulls](pins.md)). The reason stays at 80 runes or less, so the terminal report
+    does not cut it. The risk
     (`riskServerUnverified`) tells that the tools of the server are not checked against pins. The
     servers that fit are still pinned.
     `scan` prints `mcpmoat scan: pinned N tools for <server>` on stderr only after the save worked.
@@ -339,14 +338,18 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
   (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again with the lock on
   the pins directory (`readPinsLocked`, see [The `pins.json` store](#the-pinsjson-store)), sets
   only the first-run servers that the file does not hold yet (another run may have pinned them
-  meanwhile), saves, and then releases the lock. The `pinned N tools` lines come after the save,
-  only for the servers it set. When the save created a new pins file (`Store.Existed` is false),
-  `printNewPinsFile` prints one line before them. When the file holds a server that this scan
-  wanted to pin, with other tools, `scan` prints a warning: this scan did not compare its tools
-  with the pins of the other run. Another run can make the file larger after the report, so a
-  server that fitted in 5b can get `pins.ErrStoreFull` here. That server is not pinned and gets the
-  warning `server <name> not pinned: the pins file is full (32 MiB)`, the other servers are still
-  saved, and `scan` exits with 2.
+  meanwhile), saves, and then releases the lock. It releases the lock right after the save, before
+  it prints any line, so a blocked stdout or stderr never holds the lock. The `pinned N tools`
+  lines come after the save, only for the servers it set. When the save created a new pins file
+  (`Store.Existed` is false), `printNewPinsFile` prints one line before them. When the first read
+  found `pins.json` but the locked read does not, the file was removed while `scan` ran: a save
+  would drop every older pin, so `savePinned` saves nothing, prints `pinsRemovedText` and `scan`
+  exits with 2 (`pinsRemovedWhileRunning`). When the file holds a server that this scan wanted to
+  pin, with other tools, `scan` prints a warning: this scan did not compare its tools with the pins
+  of the other run. Another run can make the file larger after the report, so a server that fitted
+  in 5b can get `pins.ErrStoreFull` here. That server is not pinned and gets a warning on stderr,
+  the other servers are still saved, and `scan` exits with 2. The message texts are in [Pins and
+  rug pulls](pins.md).
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
@@ -374,8 +377,9 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
 3. It inspects that one server with `--timeout`, with the same inspector as `scan`. A server that
    fails, times out or is refused exits with 2, and nothing is written. The inspection warnings go
    to stderr, like in `scan`.
-4. It makes the pins of the tools (`pins.Snapshot`) and counts the differences with `pins.Compare`.
-   It prints the diff of each changed tool and of each new tool on stdout (`report.WriteDiffs`).
+4. It makes the pins of the tools (`pins.Snapshot`) and compares them with the pins of the read
+   without the lock (`pins.Compare`). It prints the diff of each changed tool and of each new tool
+   on stdout (`report.WriteDiffs`).
    A server that is not pinned yet has no pins, so `pin` shows every tool as a new tool, with only
    added lines. A diff that was cut at the size limit gives the same stderr warning as in `scan`.
 5. With `--expect`, it computes `pins.Digest` of the snapshot and compares it with the flag value
@@ -388,14 +392,17 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
    before it reads any file or starts any server.
 6. It reads `pins.json` again with the lock on the pins directory (`readPinsLocked`), sets the
    pins of this server only (`Store.Set`) on that store, saves the file, and then releases the
-   lock. The diffs of step 4 come from the read without the lock, so a slow reader of stdout (a
-   pager) never holds the lock. When the entry of this server changed between the two reads, `pin`
-   warns that the diff is against the older pins. The counts of step 7 come from the locked store.
-   Other servers keep their pins, and so do entries that another run wrote. A `pins.json` problem
-   exits with 2. When `Set` refuses the server with `pins.ErrStoreFull`, `pin` prints
-   `mcpmoat pin: cannot pin <server>: the pins file is full (32 MiB limit); remove servers you no
-   longer use from pins.json`, saves nothing and exits with 2. When the save created a new pins
-   file, `printNewPinsFile` prints one line on stderr before step 7.
+   lock. It releases the lock right after the save, before it prints any line, so a blocked stdout
+   or stderr never holds the lock. The diffs of step 4 come from the read without the lock, so a
+   slow reader of stdout (a pager) never holds the lock. When the file existed at the read for the
+   diffs but not at the locked read, it was removed while `pin` ran: `pin` saves nothing, prints
+   `pinsRemovedText` and exits with 2 (`pinsRemovedWhileRunning`). When the entry of this server
+   changed between the two reads, `pin` warns that the diff is against the older pins. The counts
+   of step 7 come from the locked store. Other servers keep their pins, and so do entries that
+   another run wrote. A `pins.json` problem exits with 2. When `Set` refuses the server with
+   `pins.ErrStoreFull`, `pin` prints a message that the pins file is full (see [Pins and rug
+   pulls](pins.md)), saves nothing and exits with 2. When the save created a new pins file,
+   `printNewPinsFile` prints one line on stderr before step 7.
 7. It prints `accepted <server>: N new, N changed, N removed` on stdout, with `, N not verified`
    added only when N is above 0. Without `--expect`, it also prints a note on stderr that it trusts
    the tools that the server returns now. The note comes before the save (step 6).
@@ -643,9 +650,11 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   directory. A `pins.json` symlink with a missing target is an error too.
 - New pins file notice: a deleted `pins.json` looks like a first run to `Load`. So after a save that
   created a new file (`Store.Existed` is false), `scan` and `pin --accept` print one line on stderr
-  (`printNewPinsFile`): `mcpmoat <cmd>: no pins file was found, so a new one was created at <path>;
-  if this is not your first run, the old file was removed or moved`. On a first run the line is
+  (`printNewPinsFile`, the text is in [Pins and rug pulls](pins.md)). On a first run the line is
   expected. On a later run it tells the user that every server was pinned again with no alert.
+  When the first read of the run found the file but the locked read does not, the file was removed
+  while the run went on. Then the run saves nothing and exits with 2 (`pinsRemovedWhileRunning`),
+  because a save would drop every older pin. A real first run is not changed by this.
 - Lock: `scan` and `pin --accept` read `pins.json` again just before they save with `LoadLocked`
   (`readPinsLocked` in `cmd/mcpmoat/pins_shared.go`), and hold the lock through `Set` and `Save`.
   So two parallel runs keep each other's changes. The lock is an exclusive advisory `flock(2)` on
@@ -655,13 +664,12 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   first read, before any server starts, and the read for the diffs of `pin --accept` take no lock,
   so a slow server or a slow reader of stdout never holds it. While another run holds the lock, the
   run tries again for up to 10 seconds (`defaultPinsLockWait` in `cmd/mcpmoat/cli.go`). Then it
-  prints the read error and `mcpmoat <cmd>: another mcpmoat run is updating the pins file; run the
-  command again in a moment`, and exits with 2. A signal during the wait gives the interrupted line.
-  When the system or the file system cannot lock the directory (for example some network mounts),
-  `LoadLocked` goes on without the lock (`Store.Unlocked`), and the run prints one warning:
-  `mcpmoat <cmd>: warning: the file system of the pins directory <dir> does not support file locks,
-  so a parallel run can overwrite these pins`. The code is in `internal/pins` (`lock.go`,
-  `lock_unix.go`, `lock_other.go`).
+  prints the read error (which wraps `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal
+  during the wait gives the interrupted line. When the system or the file system cannot lock the
+  directory (for example some network mounts), `LoadLocked` goes on without the lock
+  (`Store.Unlocked`), and the run prints one warning. The texts of both lines are in [Pins and rug
+  pulls](pins.md). `scan` and `pin --accept` release the lock right after the save, before they
+  print. The code is in `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`).
 
 Known limits:
 
@@ -676,12 +684,17 @@ Known limits:
   For example, a `~/.config` made with umask 002 (mode `0775`) is refused until
   `chmod go-w ~/.config`.
 - ACLs on the parent directories are not checked, also on macOS. Only the pins directory and
-  `pins.json` get the ACL check.
+  `pins.json` get the ACL check. So an allow ACL entry for another user on `~/.config` or `~` (for
+  example `delete_child`) is not detected, and that user could remove or replace the `mcpmoat`
+  directory.
 - The ACL check cannot map the principal of an entry to a user or a group without cgo. So it
   refuses an allow entry with a write right also when the entry is for your own account (fail
   closed). `chmod -N` removes it.
 - The lock is advisory, so it stops only runs that lock too. mcpmoat v0.1.0 takes no lock, so a
   v0.1.0 run in parallel with a newer run can still lose an update (the last writer wins).
+- Any local process that can open the pins directory can hold the lock, also a process of another
+  user when the directory has mode `0755` (that mode passes the check). Such a process blocks
+  pinning: `scan` and `pin --accept` wait 10 seconds and exit with 2 (fail closed).
 - A file system that cannot lock (some network mounts) runs without the lock after one warning, and
   a parallel run can still lose an update. On systems that are not Unix, such as Windows, there is
   no lock at all: the run prints the same warning. Windows is a non-goal (PRD section 2.2).
@@ -703,6 +716,12 @@ Known limits:
   servers at full size fill the 32 MiB file. Then the servers that are already in the file stay,
   and each new server that does not fit is not pinned (a high MOAT-T2-004 finding) until the user
   removes old entries. mcpmoat never removes a server from the file itself.
+- The 32 MiB budget is first come, first served, and nothing prunes old entries. So the servers of
+  a hostile project config can fill the file, and later servers are then not pinned. Each refused
+  server is reported, never skipped silently. The user removes servers from `pins.json` by hand.
+- At report time, the budget check (`pinner.budget`) covers only servers that are pinned for the
+  first time. A pinned server whose tools grew still gets the "To accept" line, and
+  `pin --accept` can then refuse it with exit 2 because the file is full.
 - `Save` writes indented JSON, and the 32 MiB cap applies to that form. A compact file near the cap,
   for example from a hand edit, loads but cannot be saved.
 

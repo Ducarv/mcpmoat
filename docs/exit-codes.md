@@ -90,15 +90,17 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
   sticky bit (as `/tmp`) passes. The error names the path and gives a fix (see [Pins and rug
   pulls](pins.md)).
 - No part of the pins path exists, or a part of it is a file.
-- Another run still holds the lock on the pins directory after 10 seconds. The command prints two
-  lines on stderr: the read error, then `mcpmoat <cmd>: another mcpmoat run is updating the pins
-  file; run the command again in a moment`.
+- Another process still holds the lock on the pins directory after 10 seconds. The command prints
+  two lines on stderr: the read error, then a line that tells you to run the command again (see
+  [Pins and rug pulls](pins.md)).
+- `pins.json` existed at the first read, but it was removed while the command ran. The command
+  saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A real first
+  run is not affected.
 - At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
-  the file larger after the report. `scan` prints `mcpmoat scan: warning: server <server> not
-  pinned: the pins file is full (32 MiB)` and still saves the other servers.
+  the file larger after the report. `scan` prints a warning for that server and still saves the
+  other servers (see [Pins and rug pulls](pins.md)).
 - `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
-  32 MiB. It prints `mcpmoat pin: cannot pin <server>: the pins file is full (32 MiB limit); remove
-  servers you no longer use from pins.json` and saves nothing.
+  32 MiB. It prints a message that the pins file is full and saves nothing.
 
 A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
 not an execution error.

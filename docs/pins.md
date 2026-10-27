@@ -12,7 +12,10 @@
   stderr after the save: `mcpmoat <cmd>: no pins file was found, so a new one was created at
   <path>; if this is not your first run, the old file was removed or moved`. On your first run
   this is expected. On a later run it means that the old file is gone, so every server was pinned
-  again with no alert. Find out who removed the file before you trust the new pins.
+  again with no alert. Find out who removed the file before you trust the new pins. If the file
+  existed when the run started but is gone when it saves, the run saves nothing, prints
+  `mcpmoat <cmd>: the pins file was removed while this command ran, so no pins were saved; run the
+  command again` and exits with code 2. A real first run does not get this line.
 - **Owner and mode:** mcpmoat refuses a pins directory or a `pins.json` that another user owns or
   that group or others can write to. `scan` and `pin --accept` then exit with code 2. The error
   names the path and the mode, and gives a hint. For a mode problem, run `chmod go-w -- '<path>'`.
@@ -33,7 +36,9 @@
   refuses a pins directory or a `pins.json` whose ACL has an allow entry that gives a write right,
   for any user or group, also for your own account. The hint is `chmod -N -- '<path>'`. It removes
   the whole ACL of that path, also its deny entries. On Linux, ACL entries show in the group bits of
-  the mode, so the mode check catches them.
+  the mode, so the mode check catches them. mcpmoat does not read the ACL of a parent directory.
+  An allow entry for another user on `~/.config` or `~` (for example `delete_child`) is not
+  detected, so check those ACLs yourself with `ls -led`.
 - **Symlinks:** mcpmoat refuses a `pins.json` that is a symlink, also when it points to a file in
   the same directory. The hint is to replace the symlink with the file. A pins directory that is a
   symlink, for example `~/.config` on another disk, is fine: mcpmoat checks its target.
@@ -46,14 +51,7 @@
   or empty tool name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because
   mcpmoat can never check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned,
   because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is
-  medium. The whole `pins.json` has a limit of 32 MiB. A first-run server that would make the file
-  larger is not pinned, and the other servers still are. It gets a high `MOAT-T2-004` with the
-  reason `the pins file is full (32 MiB), so this server is not pinned` and the fix `Remove servers
-  you no longer use from pins.json, or remove this server from the client config, then run mcpmoat
-  scan again.` A later change to the tools of that server is not detected. If another run made the
-  file larger after the report, `scan` prints
-  `mcpmoat scan: warning: server <server> not pinned: the pins file is full (32 MiB)` instead and
-  exits with code 2. For each changed tool, `scan` prints a unified diff of the pinned and the
+  medium. For each changed tool, `scan` prints a unified diff of the pinned and the
   current text after the findings. For each new tool, it prints the full text of the tool as added
   lines, under the header `New tool <tool> on server <server>:`, so you can review it before you
   accept it.
@@ -74,9 +72,7 @@
   for it only. It prints the diff of each changed, new and not verified tool, then
   `accepted <server>: N new, N changed, N removed`. If the server is not pinned yet, every tool is
   new, so `pin --accept` shows every tool. It prints the same warning when it cuts a diff. If the
-  new pins would make `pins.json` larger than 32 MiB, it prints `mcpmoat pin: cannot pin <server>:
-  the pins file is full (32 MiB limit); remove servers you no longer use from pins.json`, saves
-  nothing and exits with code 2.
+  new pins do not fit, see **Full pins file** below.
   `pin --accept` records the new text as the baseline. It does not clear tool poisoning findings:
   the T1 and T3 rules still apply to the accepted text, so the next `scan` can still exit with
   code 1.
@@ -126,15 +122,32 @@
   two runs at the same time keep each other's changes. `pin --accept` shows the diff before it
   takes the lock, and reads the file again under the lock. If another run changed the pins of the
   server in that time, it prints a warning that the diff is against the older pins. A run waits up
-  to 10 seconds for another run that holds the lock. Then it prints the read error and
-  `mcpmoat <cmd>: another mcpmoat run is updating the pins file; run the command again in a
-  moment`, and exits with code 2. A run that takes the lock creates a missing pins directory (mode
-  `0700`), so an empty directory can stay when the run saves nothing. Some file systems, for
-  example some network mounts, cannot lock. Then the run goes on without the lock and prints one
-  warning: `mcpmoat <cmd>: warning: the file system of the pins directory <dir> does not support
-  file locks, so a parallel run can overwrite these pins`. Windows has no lock, and the run prints
-  the same warning. mcpmoat v0.1.0 does not lock, so do not run it at the same time as a newer
-  version.
+  to 10 seconds for another process that holds the lock. Then it prints the read error and
+  `mcpmoat <cmd>: another process is using the pins file; run the command again in a moment`, and
+  exits with code 2. The holder is normally another mcpmoat run, but any local process that can
+  open the pins directory can hold the advisory lock. With a pins directory of mode `0755`, that
+  includes another user, who can then block pinning. Use mode `0700` to stop that. The run releases
+  the lock right after the save, before it prints. A run that takes the lock creates a missing pins
+  directory (mode `0700`), so an empty directory can stay when the run saves nothing. Some file
+  systems, for example some network mounts, cannot lock. Then the run goes on without the lock and
+  prints one warning: `mcpmoat <cmd>: warning: the file system of the pins directory <dir> does
+  not support file locks, so a parallel run can overwrite these pins`. Windows has no lock, and the
+  run prints the same warning. mcpmoat v0.1.0 does not lock, so do not run it at the same time as a
+  newer version.
+- **Full pins file:** the whole `pins.json` has a limit of 32 MiB. A first-run server that would
+  make the file larger is not pinned, and the other servers still are. It gets a high
+  `MOAT-T2-004` with the reason `the pins file is full (32 MiB), so this server is not pinned` and
+  the fix `Remove servers you no longer use from pins.json, or remove this server from the client
+  config, then run mcpmoat scan again.` A later change to the tools of that server is not
+  detected. If another run made the file larger after the report, `scan` prints
+  `mcpmoat scan: warning: server <server> not pinned: the pins file is full (32 MiB)` instead and
+  exits with code 2. If the new pins of `pin --accept` do not fit, it prints `mcpmoat pin: cannot
+  pin <server>: the pins file is full (32 MiB limit); remove servers you no longer use from
+  pins.json`, saves nothing and exits with code 2. `scan` checks the limit only for servers that
+  it pins for the first time. A pinned server whose tools grew still gets a `To accept` line, and
+  `pin --accept` can then refuse it. The limit is first come, first served, and mcpmoat never
+  removes old entries, so the servers of a hostile project config can fill the file. A refused
+  server is always reported. To make room, remove servers from `pins.json` by hand.
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
   it started. A signal during the inspection, or after it but before new pins are saved (for
   `scan`, only when there are new pins), makes `scan` and `pin --accept` print `interrupted; no

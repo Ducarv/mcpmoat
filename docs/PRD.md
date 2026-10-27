@@ -485,7 +485,9 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   Each parent directory of the pins directory must belong to the user or to root, and must not be
   writable by group or others unless the sticky bit is set. A pins path where no part exists is an
   error, not a first run. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are
-  in [docs/pins.md](pins.md).
+  in [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so
+  on macOS an allow entry for another user on `~/.config` or `~` is not detected (see
+  [docs/limits.md](limits.md)).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).

@@ -42,9 +42,15 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   mounts) and Windows run without the lock, after one warning.
 - The owner and mode check covers the pins directory, `pins.json` and each parent directory of the
   pins directory. On macOS it also checks the ACL of the pins directory and `pins.json`, but not the
-  ACL of a parent. On Windows the owner, mode and parent checks are skipped.
-- `pins.json` has a limit of 32 MiB. A server that would make the file larger is reported and not
-  pinned, so a later change to its tools is not detected. The other servers are still pinned.
+  ACL of a parent, so an allow entry for another user on `~/.config` or `~` (for example
+  `delete_child`) is not detected. On Windows the owner, mode and parent checks are skipped.
+- Another local user can hold the advisory lock on a pins directory with mode `0755`. Then `scan`
+  and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
+- `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
+  A server that would make the file larger is reported and not pinned, so a later change to its
+  tools is not detected. The other servers are still pinned. A hostile project config can fill the
+  file. The "To accept" line does not check the limit, so `pin --accept` can still refuse a full
+  file.
 - For the detail, see [Pins and rug pulls](pins.md) and [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 
