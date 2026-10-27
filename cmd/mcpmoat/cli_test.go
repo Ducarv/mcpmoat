@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/llm"
 )
@@ -40,13 +41,20 @@ func fakeGetenv(env map[string]string) func(string) string {
 // homeDir and getwd return an error by default. A test that needs them must
 // set them to a fixture path. This way a test that forgets cannot read the
 // real home directory or the real working directory.
+//
+// toolBudget is one hour. The default budget is 5 s of wall-clock time, so a
+// test that reads a big tool text could reach it on a busy machine (for
+// example with -race and the whole suite in parallel) and get an extra
+// MOAT-T1-023 row. A test of the budget sets c.toolBudget itself (see
+// scanWithBudget).
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
-		stdout: &stdout,
-		stderr: &stderr,
-		getenv: getenv,
-		build:  build,
+		stdout:     &stdout,
+		stderr:     &stderr,
+		getenv:     getenv,
+		build:      build,
+		toolBudget: time.Hour,
 		homeDir: func() (string, error) {
 			return "", errors.New("test: home not set")
 		},

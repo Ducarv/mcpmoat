@@ -566,15 +566,16 @@ func TestScanToolsHostileServerBudget(t *testing.T) {
 // checked after srv-a used up its budget. It has its own deadline, so its
 // poisoned tool is checked in full and it gets no budget row.
 //
-// The budget (500 ms) is far more than a short tool needs (well under 10 ms,
-// also with -race) and far less than the hostile tool needs (see
+// The budget (2 s) is far more than a short tool needs (well under 10 ms,
+// also with -race, and the budget is wall-clock, so it leaves room for a busy
+// CI runner) and far less than the hostile tool needs (about 48 s, see
 // hostileRulesDir), so the result does not depend on the speed of the
 // machine. The hostile rules run first on each text and never match, so the
 // hostile tool gives no row before the cut.
 func TestScanToolsBudgetPerServer(t *testing.T) {
 	t.Parallel()
 
-	const budget = 500 * time.Millisecond
+	const budget = 2 * time.Second
 	e := newPinEnv(t, twoServers())
 	insp := fakeServers(map[string][]inspect.Tool{
 		"srv-a": {poisonedTool("read_file"), mkTool("big_tool", hostileDescription())},
