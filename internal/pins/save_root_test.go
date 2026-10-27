@@ -76,14 +76,16 @@ func saveRootHas(t *testing.T, path, name string) bool {
 }
 
 // wantDirChanged fails the test unless err wraps ErrPinsDirChanged and has the
-// "save <path>: " prefix.
+// exact text of verifyPinsDir, with the "save <path>: " prefix.
 func wantDirChanged(t *testing.T, err error, path string) {
 	t.Helper()
 	if !errors.Is(err, ErrPinsDirChanged) {
 		t.Fatalf("Save() error = %v, want it to wrap ErrPinsDirChanged", err)
 	}
-	if prefix := "save " + path + ": "; !strings.HasPrefix(err.Error(), prefix) {
-		t.Errorf("Save() error = %q, want the prefix %q", err, prefix)
+	want := "save " + path + ": the pins directory " + filepath.Dir(path) +
+		" was moved, removed or replaced while this command ran, and nothing was saved: " + ErrPinsDirChanged.Error()
+	if err.Error() != want {
+		t.Errorf("Save() error = %q, want %q", err, want)
 	}
 }
 
@@ -95,9 +97,6 @@ func wantEntries(t *testing.T, dir string, want ...string) {
 		t.Errorf("entries of %s = %v, want %v", dir, got, want)
 	}
 }
-
-// lockName is the name of the pins lock file next to pins.json.
-const lockName = "pins.json" + lockSuffix
 
 // TestSaveLockedDirReplaced covers a pins directory that is moved away after
 // LoadLocked, while something else takes its path. Save must not write to the

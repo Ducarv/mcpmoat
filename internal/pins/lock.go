@@ -83,7 +83,9 @@ func openLockFile(root *os.Root, path string) (*os.File, error) {
 	lockPath := path + lockSuffix
 	name := filepath.Base(lockPath)
 
-	f, created, err := openOrCreate(root, name)
+	// root.OpenFile is a method value: a function that calls OpenFile on this
+	// root.
+	f, created, err := openOrCreate(root.OpenFile, lockPath, name)
 	if err != nil {
 		// A lock file that the user may not open, for example one that another
 		// user owns, gives only "permission denied". Check the entry itself
@@ -94,11 +96,7 @@ func openLockFile(root *os.Root, path string) (*os.File, error) {
 				return nil, checkErr
 			}
 		}
-		verb := "open"
-		if created {
-			verb = "create"
-		}
-		return nil, fmt.Errorf("%s the pins lock file %s: %w", verb, lockPath, pathErrCause(err))
+		return nil, err
 	}
 
 	if err := checkOpenLockFile(root, lockPath, name, f, created); err != nil {
@@ -108,37 +106,77 @@ func openLockFile(root *os.Root, path string) (*os.File, error) {
 	return f, nil
 }
 
-// openOrCreate opens the lock file name in root, and creates it when it is
-// missing. created is true when this call created the file.
+// openFileFunc opens the file name with flag and perm, as os.Root.OpenFile
+// does. openOrCreate takes one, so a test can run code between its steps.
+type openFileFunc func(name string, flag int, perm fs.FileMode) (*os.File, error)
+
+// maxLockCreates is the largest number of times that openOrCreate tries to
+// create the lock file.
+const maxLockCreates = 3
+
+// openOrCreate opens the lock file name with open (root.OpenFile of the pins
+// directory), and creates it when it is missing. lockPath is the path of the
+// lock file, for the error texts. created is true when this call created the
+// file; it is false when it opened a file that already existed, and on an
+// error.
 //
 // It opens an existing file first, with no O_CREATE. So a read-only pins
 // directory with an existing lock file works, and the common case is one
 // open. Only when the file is missing does it create it, with O_EXCL, so the
 // create never follows a symlink and created is true only for a file that
-// this call made. When another run creates the file between the two calls,
-// the create fails with "file exists", and openOrCreate opens that file.
+// this call made. When another run creates the file between the open and the
+// create, the create fails with "file exists", and openOrCreate opens that
+// file. When the file is gone again before that open (another run removed
+// it), openOrCreate creates it again, at most maxLockCreates times in all.
 //
-// On an error, f is nil. created is then true when the create itself failed
-// (for example EACCES or EROFS in a read-only pins directory), so the caller
-// can say "create" in the error text.
-func openOrCreate(root *os.Root, name string) (f *os.File, created bool, err error) {
-	f, err = root.OpenFile(name, lockOpenFlags, 0)
-	if !errors.Is(err, fs.ErrNotExist) {
-		// Opened, or failed for another reason than a missing file.
-		return f, false, err
-	}
-	f, err = root.OpenFile(name, lockOpenFlags|os.O_CREATE|os.O_EXCL, fileMode)
+// On an error, f is nil, and the error names lockPath and the step that
+// failed: "create the pins lock file <lockPath>: <cause>" when the create
+// failed (for example EACCES or EROFS in a read-only pins directory), and
+// "open the pins lock file <lockPath>: <cause>" otherwise. The cause has no
+// *fs.PathError around it (see pathErrCause).
+func openOrCreate(open openFileFunc, lockPath, name string) (f *os.File, created bool, err error) {
+	f, err = open(name, lockOpenFlags, 0)
 	switch {
 	case err == nil:
-		return f, true, nil
-	case !errors.Is(err, fs.ErrExist):
-		return nil, true, err
+		return f, false, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, false, lockOpenError("open", lockPath, err)
 	}
-	// The name exists now: another run created the file, or the name is a
-	// symlink with a missing target (O_EXCL does not follow it). Open it
-	// again; the caller refuses a symlink.
-	f, err = root.OpenFile(name, lockOpenFlags, 0)
-	return f, false, err
+	for try := 1; ; try++ {
+		f, err = open(name, lockOpenFlags|os.O_CREATE|os.O_EXCL, fileMode)
+		switch {
+		case err == nil:
+			return f, true, nil
+		case !errors.Is(err, fs.ErrExist):
+			return nil, false, lockOpenError("create", lockPath, err)
+		}
+		// The name exists now: another run created the file, or the name is a
+		// symlink with a missing target (O_EXCL does not follow it). Open it
+		// again; the caller refuses a symlink.
+		//
+		// This open can fail with "permission denied" for a moment: another
+		// run created the file with a very narrow umask (for example 0o777
+		// gives mode 0000) and has not set mode 0o600 yet. Then this run
+		// fails with exit code 2, and a second run works. That is rare, so
+		// there is no wait and no retry for it.
+		f, err = open(name, lockOpenFlags, 0)
+		switch {
+		case err == nil:
+			return f, false, nil
+		case !errors.Is(err, fs.ErrNotExist) || try == maxLockCreates:
+			// A symlink with a missing target gets "not exist" on each try
+			// and ends here at the last try; the caller then refuses it.
+			return nil, false, lockOpenError("open", lockPath, err)
+		}
+		// The file was removed between the create and this open: create it
+		// again.
+	}
+}
+
+// lockOpenError is an error of openOrCreate: err, the error of the step
+// ("open" or "create"), for the lock file lockPath.
+func lockOpenError(step, lockPath string, err error) error {
+	return fmt.Errorf("%s the pins lock file %s: %w", step, lockPath, pathErrCause(err))
 }
 
 // checkOpenLockFile checks f, the open lock file name in root (see
@@ -158,16 +196,15 @@ func checkOpenLockFile(root *os.Root, lockPath, name string, f *os.File, created
 		return fmt.Errorf("check the pins lock file %s: %w", lockPath, pathErrCause(err))
 	}
 	// os.Root follows a symlink that stays in the directory, so f can be the
-	// target of a symlink. Lstat describes the entry itself, so os.SameFile
-	// is false for a symlink and for an entry that another file replaced
-	// after the open. An entry that is gone was swapped too. This is the
-	// same check as for pins.json (readChecked).
-	entry, err := root.Lstat(name)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	// target of a symlink. This is the same check as for pins.json
+	// (readChecked): a symlink, an entry that another file replaced after the
+	// open, and an entry that is gone are all refused (see sameEntry).
+	entry, same, err := sameEntry(root.Lstat, name, info)
+	if err != nil {
 		return fmt.Errorf("check the pins lock file %s: %w", lockPath, pathErrCause(err))
 	}
-	if err != nil || !os.SameFile(info, entry) {
-		return lockSwappedError(lockPath)
+	if !same {
+		return lockSwappedError(lockPath, entry)
 	}
 
 	if err := checkLockFile(lockPath, info, os.Geteuid()); err != nil {

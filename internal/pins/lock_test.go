@@ -667,7 +667,12 @@ func TestLoadLockedRefusesUnsafeLockFile(t *testing.T) {
 				t.Errorf("LoadLocked() error = %v, must not wrap ErrLocked", r.err)
 			}
 			msg := r.err.Error()
-			for _, want := range []string{"pins lock file " + lockPath + " is not safe", "rm -- '" + lockPath + "'"} {
+			// rm without -r refuses a directory, so the hint says rmdir there.
+			rm := "rm"
+			if before.IsDir() {
+				rm = "rmdir"
+			}
+			for _, want := range []string{"pins lock file " + lockPath + " is not safe", "(fix: " + rm + " -- '" + lockPath + "'"} {
 				if !strings.Contains(msg, want) {
 					t.Errorf("LoadLocked() error = %q, want it to contain %q", msg, want)
 				}

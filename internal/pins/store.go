@@ -123,7 +123,9 @@ var ErrProjectShareFull = errors.New("the project servers would use more than th
 // then wrote nothing (the temp file is removed), so no pin is lost to a
 // directory that the next run does not read, and two runs that hold the locks
 // of two different lock files (one in the old directory, one in the new) cannot
-// both write. The error text names the directory. Test for it with errors.Is.
+// both write. The error text names the directory and says that it "was moved,
+// removed or replaced while this command ran, and nothing was saved". Test for
+// it with errors.Is.
 var ErrPinsDirChanged = errors.New("the pins directory changed")
 
 // Identity names one MCP server in the pins store.
@@ -337,8 +339,9 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // The directory is opened once, as an os.Root, and the file is opened through
 // it, so the checked directory and file are the ones that Load reads. A pins
 // directory or a pins.json that the user may not open gets the owner check by
-// path (checkDirPerm through dirOpenError, or checkFilePermByPath), so that
-// another owner shows as ErrInsecurePermissions and not as "permission denied".
+// path (checkDirPermByPath through dirOpenError, or checkFilePermByPath), so
+// that another owner shows as ErrInsecurePermissions and not as "permission
+// denied".
 //
 // Any other problem is an error, also a missing or null key or a server that
 // ValidateServer refuses (the per-server rules of Set). Load does not apply
@@ -715,14 +718,14 @@ func newStore(path string) *Store {
 //
 // A pins directory that another user owns, with mode 0700, cannot be opened,
 // and err is only "permission denied". The owner problem has a fix hint, so
-// for a permission error dirOpenError runs checkDirPerm, by path, only to get
-// a better error text. checkFilePermByPath does the same for pins.json. When
-// checkDirPerm finds no refusal, also when its own Stat fails, the original
-// error is returned with the "<op> <path>" prefix, where op is "read" or
-// "save".
+// for a permission error dirOpenError runs checkDirPermByPath, by path, only
+// to get a better error text. checkFilePermByPath does the same for pins.json.
+// When checkDirPermByPath finds no refusal, also when its own Stat fails, the
+// original error is returned with the "<op> <path>" prefix, where op is "read"
+// or "save".
 func dirOpenError(op, path, dir string, err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		if permErr := checkDirPerm(dir); errors.Is(permErr, ErrInsecurePermissions) {
+		if permErr := checkDirPermByPath(dir, os.Geteuid()); permErr != nil {
 			// A refusal names its own path, so it gets no "<op> <path>" prefix.
 			return permErr
 		}
@@ -850,21 +853,12 @@ func readChecked(path string, root *os.Root, name string, file *os.File) ([]byte
 	}
 
 	// os.Root follows a symlink that stays in the directory, so file can be
-	// the target of a pins.json symlink. Lstat does not follow a symlink at
-	// the end of the name: it describes the directory entry itself.
-	// os.SameFile compares the identity of the files (the device and inode
-	// numbers on Unix), not their names. So the two differ when the entry is
-	// a symlink (the link and its target are two files), or when another
-	// file replaced the entry after the open. An entry that is gone was
-	// swapped too.
-	entry, err := root.Lstat(name)
-	if safefile.IsMissing(err) {
-		return nil, swappedError(path)
-	}
+	// the target of a pins.json symlink (see sameEntry).
+	_, same, err := sameEntry(root.Lstat, name, info)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if !os.SameFile(info, entry) {
+	if !same {
 		return nil, swappedError(path)
 	}
 
@@ -876,6 +870,38 @@ func readChecked(path string, root *os.Root, name string, file *os.File) ([]byte
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, nil
+}
+
+// sameEntry reports whether the open file whose Stat result is info is the
+// directory entry name itself. lstat is root.Lstat of the os.Root that the
+// file was opened through. readChecked (pins.json) and checkOpenLockFile (the
+// lock file) share it, so the two refuse a swapped entry with one rule.
+//
+// os.Root follows a symlink that stays in the directory, so the open file can
+// be the target of a symlink. Lstat does not follow a symlink at the end of
+// the name: it describes the directory entry itself. os.SameFile compares the
+// identity of the files (the device and inode numbers on Unix), not their
+// names. So the two differ when the entry is a symlink (the link and its
+// target are two files), or when another file replaced the entry after the
+// open.
+//
+// The results are:
+//   - (entry, true, nil): the entry is the open file.
+//   - (entry, false, nil): the entry is a symlink or another file. entry is
+//     its Lstat result, for the fix hint of the caller.
+//   - (nil, false, nil): the entry is gone (safefile.IsMissing: "not exist",
+//     or ENOTDIR). An entry that is gone was swapped too.
+//   - (nil, false, err): Lstat failed for another reason. The caller adds the
+//     context.
+func sameEntry(lstat func(string) (fs.FileInfo, error), name string, info fs.FileInfo) (entry fs.FileInfo, same bool, err error) {
+	entry, err = lstat(name)
+	if safefile.IsMissing(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return entry, os.SameFile(info, entry), nil
 }
 
 // swappedError is the error of readChecked when the open pins file path is not
@@ -1026,18 +1052,13 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 // itself impossible to pin. The caller must report a refused server (for
 // example as a finding), never skip it silently: a server that is never
 // pinned looks new on each run, and its changes are never reported.
+//
+// CheckSet runs the same checks and changes nothing.
 func (s *Store) Set(id Identity, p ServerPins) error {
 	// Check the copy that is stored, so a caller that changes p later cannot
 	// change what was checked.
 	c := cloneOrEmpty(p)
-	// The entry is encoded twice, on purpose: ValidateServer measures compact
-	// JSON for the per-server limit (maxServerSize), and entrySize measures
-	// the indented form that Save writes, for the file limit (MaxFileSize).
-	// One encode for both is a possible later optimisation.
-	if err := ValidateServer(id, c); err != nil {
-		return err
-	}
-	size, err := entrySize(id, c)
+	size, err := measureServer(id, c)
 	if err != nil {
 		return err
 	}
@@ -1045,9 +1066,86 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The mutex stays locked from the check to the change, so no other Set can
+	// change the sizes in between.
+	plan, err := s.planSet(id, size)
+	if err != nil {
+		return err
+	}
+
+	// A zero-value Store has nil maps, and writing to a nil map panics.
+	if s.servers == nil {
+		s.servers = make(map[Identity]ServerPins)
+	}
+	if s.sizes == nil {
+		s.sizes = make(map[Identity]int)
+	}
+	s.servers[id] = c
+	s.sizes[id] = size
+	s.entryBytes = plan.entryBytes
+	s.projectBytes = plan.projectBytes
+	return nil
+}
+
+// CheckSet reports whether Set(id, p) would accept the server now, and changes
+// nothing. It runs the same checks as Set, in the same order (the per-server
+// rules of ValidateServer, then the file limit, then the project share), and
+// returns the same error as Set: test it with errors.Is for ErrStoreFull and
+// ErrProjectShareFull. A nil error means that Set with the same arguments
+// would succeed on the store as it is now.
+//
+// The scan uses CheckSet to tell, before it prints the report, whether a
+// changed server still fits in the pins file. CheckSet shares the code of Set
+// (measureServer and planSet), so the two cannot disagree. It does not copy
+// the store, unlike Set on a Clone.
+//
+// The answer is valid only until the next Set: another server can take the
+// free bytes in between.
+func (s *Store) CheckSet(id Identity, p ServerPins) error {
+	// The same copy as in Set: cloneOrEmpty turns a nil p into an empty map,
+	// so both measure the same entry.
+	size, err := measureServer(id, cloneOrEmpty(p))
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err = s.planSet(id, size)
+	return err
+}
+
+// measureServer checks the server id with the pins c (ValidateServer) and
+// returns the size of its entry in the file that Save writes (entrySize). Set
+// and CheckSet share it. It needs no lock: it reads only id and c.
+//
+// The entry is encoded twice, on purpose: ValidateServer measures compact JSON
+// for the per-server limit (maxServerSize), and entrySize measures the
+// indented form that Save writes, for the file limit (MaxFileSize). One encode
+// for both is a possible later optimisation.
+func measureServer(id Identity, c ServerPins) (int, error) {
+	if err := ValidateServer(id, c); err != nil {
+		return 0, err
+	}
+	return entrySize(id, c)
+}
+
+// setPlan holds the size totals of a Store after a Set that planSet accepted.
+type setPlan struct {
+	entryBytes   int // the new value of Store.entryBytes
+	projectBytes int // the new value of Store.projectBytes
+}
+
+// planSet computes the size totals of s after the entry of the server id is
+// replaced by, or added as, an entry of size bytes (see entrySize). It returns
+// an error when the new entry breaks the file limit (ErrStoreFull) or the
+// project share (ErrProjectShareFull). It changes nothing: Set applies the
+// result, and CheckSet drops it. The caller must hold s.mu.
+func (s *Store) planSet(id Identity, size int) (setPlan, error) {
 	// Compute the size of the file with the new entry before the store
 	// changes. A replaced server gives back the bytes of its old entry. A
-	// missing key in sizes gives 0.
+	// missing key in sizes (also in a nil map) gives 0.
 	_, replaced := s.servers[id]
 	count := len(s.servers)
 	if !replaced {
@@ -1060,7 +1158,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// limit can already be over it, and a change that makes it smaller must
 	// still be possible.
 	if after > MaxFileSize && after > before {
-		return fmt.Errorf("%w: %d bytes with this server, more than the %d MiB limit",
+		return setPlan{}, fmt.Errorf("%w: %d bytes with this server, more than the %d MiB limit",
 			ErrStoreFull, after, MaxFileSizeMiB)
 	}
 
@@ -1075,37 +1173,24 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 		// Two %w: the error wraps both sentinels, so errors.Is finds
 		// ErrProjectShareFull and ErrStoreFull. Sizes only, no names or
 		// paths: the caller adds the server context.
-		return fmt.Errorf("%w: %w: %d bytes of project servers with this server, more than the %d MiB share",
+		return setPlan{}, fmt.Errorf("%w: %w: %d bytes of project servers with this server, more than the %d MiB share",
 			ErrProjectShareFull, ErrStoreFull, projects, ProjectShareMiB)
 	}
-
-	// A zero-value Store has nil maps, and writing to a nil map panics.
-	if s.servers == nil {
-		s.servers = make(map[Identity]ServerPins)
-	}
-	if s.sizes == nil {
-		s.sizes = make(map[Identity]int)
-	}
-	s.servers[id] = c
-	s.sizes[id] = size
-	s.entryBytes = entries
-	s.projectBytes = projects
-	return nil
+	return setPlan{entryBytes: entries, projectBytes: projects}, nil
 }
 
 // Clone returns a copy of s. Set on the copy never changes s. The scan uses it
-// to test, before it prints the report, whether a server still fits in the
-// file (Set returns ErrStoreFull when not, and also ErrProjectShareFull when
-// the project share is full), without a change to the real store.
+// to try several Sets one after the other, before it prints the report,
+// without a change to the real store. To test one server only, CheckSet is
+// cheaper: it does not copy the store.
 //
 // Clone copies the servers map and the sizes map, because Set writes to
 // them: with shared maps, a Set on the copy would change s too. It copies the
 // size totals too (all entries, and the entries of the project servers), so
 // the copy applies the file limit and the project share from the same state
-// as s. The pins map
-// of each server is shared, not copied. That is safe, because the Store never
-// changes such a map in place: Set stores a new copy, Get returns a copy, and
-// Save only reads it.
+// as s. The pins map of each server is shared, not copied. That is safe,
+// because the Store never changes such a map in place: Set stores a new copy,
+// Get returns a copy, and Save only reads it.
 //
 // The copy has the same path, Existed and RanWithoutLock as s, and a mutex of
 // its own. It does not hold a lock of LoadLocked: that lock belongs to the
@@ -1391,7 +1476,7 @@ func verifyPinsDir(dir string, want fs.FileInfo) func() error {
 	return func() error {
 		got, err := os.Stat(dir)
 		if safefile.IsMissing(err) || (err == nil && !os.SameFile(got, want)) {
-			return fmt.Errorf("the pins directory %s was moved or removed while this command ran, and nothing was saved: %w",
+			return fmt.Errorf("the pins directory %s was moved, removed or replaced while this command ran, and nothing was saved: %w",
 				dir, ErrPinsDirChanged)
 		}
 		if err != nil {
@@ -1428,9 +1513,9 @@ func compareIdentity(a, b Identity) int {
 // of one server (maxServerSize). It returns the error that Set would return for
 // the same pins, so a caller can learn whether a server can be pinned without a
 // store. It does not check the size of the whole file (ErrStoreFull) or the
-// project share (ErrProjectShareFull): they need the store, so use Set on a
-// Clone of the store for them. The errors do not
-// hold tool names, because a server that we do not trust chose them.
+// project share (ErrProjectShareFull): they need the store, so use
+// Store.CheckSet for them. The errors do not hold tool names, because a server
+// that we do not trust chose them.
 func ValidateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
 		return errors.New("the server name is empty")

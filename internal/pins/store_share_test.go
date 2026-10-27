@@ -3,6 +3,7 @@ package pins_test
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
@@ -323,4 +324,136 @@ func TestLoadOverProjectShare(t *testing.T) {
 	// A user server does not count.
 	storeTestMustSet(t, s, shareUserID(0), sharePins(10, "h"))
 	wantProjectBytes(t, s, over-1)
+}
+
+// storeState is what a test can see of a Store from outside: the tracked
+// sizes and the pins of one server.
+type storeState struct {
+	tracked  int
+	projects int
+	pins     pins.ServerPins
+	found    bool
+}
+
+// stateOf returns the storeState of s for the server id.
+func stateOf(s *pins.Store, id pins.Identity) storeState {
+	p, ok := s.Get(id)
+	return storeState{tracked: s.TrackedFileSize(), projects: s.ProjectBytes(), pins: p, found: ok}
+}
+
+// equal reports whether a and b are the same state. maps.Equal compares the
+// pins: a Pin holds only strings, so it is comparable.
+func (a storeState) equal(b storeState) bool {
+	return a.tracked == b.tracked && a.projects == b.projects && a.found == b.found && maps.Equal(a.pins, b.pins)
+}
+
+// TestCheckSetAgreesWithSet checks that CheckSet returns the error that Set
+// returns on the same store, for accepted servers and for each kind of
+// refusal, and that CheckSet changes nothing. Each case runs on a Clone of a
+// fixture: first CheckSet, then Set on the same Clone.
+func TestCheckSetAgreesWithSet(t *testing.T) {
+	t.Parallel()
+	empty := storeTestMustLoad(t, storeTestPath(t))
+	share, shareLens := newFullShare(t)
+	// file is share with user servers up to the file limit, so the project
+	// share and the whole file are both full.
+	file := share.Clone()
+	fileLens := fillEntries(t, file, shareUserID, pins.MaxFileSize-file.TrackedFileSize())
+	if got := file.TrackedFileSize(); got != pins.MaxFileSize {
+		t.Fatalf("setup: TrackedFileSize() = %d, want %d", got, pins.MaxFileSize)
+	}
+
+	// The kinds of result. otherErr is a refusal that is not a store limit,
+	// for example a per-server rule of ValidateServer.
+	const (
+		accept = iota
+		fileFull
+		shareFull
+		otherErr
+	)
+	id0, user0 := shareProjectID(0), shareUserID(0)
+	newProject, newUser := shareProjectID(shareServers), shareUserID(shareServers)
+	tests := []struct {
+		name  string
+		store *pins.Store
+		id    pins.Identity
+		p     pins.ServerPins
+		want  int
+	}{
+		{"empty: new user server", empty, user0, sharePins(10, "h"), accept},
+		{"empty: new project server, nil pins", empty, id0, nil, accept},
+		{"empty: empty server name", empty, pins.Identity{}, nil, otherErr},
+		{"empty: server over the per-server limit", empty, user0, sharePins(pins.MaxServerSize, "h"), otherErr},
+		{"share full: new project server", share, newProject, sharePins(1, "h"), shareFull},
+		{"share full: project replacement, same size", share, id0, sharePins(shareLens[0], "g"), accept},
+		{"share full: project replacement, one byte larger", share, id0, sharePins(shareLens[0]+1, "h"), shareFull},
+		{"share full: project replacement, smaller", share, id0, sharePins(shareLens[0]-1, "h"), accept},
+		{"share full: new user server", share, user0, sharePins(10, "h"), accept},
+		{"file full: new user server", file, newUser, nil, fileFull},
+		// The file limit is checked before the share, so a project server
+		// gets ErrStoreFull only.
+		{"file full: new project server", file, newProject, nil, fileFull},
+		{"file full: user replacement, same size", file, user0, sharePins(fileLens[0], "g"), accept},
+		{"file full: user replacement, one byte larger", file, user0, sharePins(fileLens[0]+1, "h"), fileFull},
+		{"file full: project replacement, smaller", file, id0, sharePins(shareLens[0]-1, "h"), accept},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := tt.store.Clone()
+			before := stateOf(s, tt.id)
+
+			checkErr := s.CheckSet(tt.id, tt.p)
+			if after := stateOf(s, tt.id); !after.equal(before) {
+				// Sizes only: the pins can be 2 MiB of text.
+				t.Errorf("CheckSet() changed the store: before (file %d, projects %d, found %t), after (file %d, projects %d, found %t, same pins %t)",
+					before.tracked, before.projects, before.found, after.tracked, after.projects, after.found, maps.Equal(before.pins, after.pins))
+			}
+
+			setErr := s.Set(tt.id, tt.p)
+			if (checkErr == nil) != (setErr == nil) ||
+				(checkErr != nil && checkErr.Error() != setErr.Error()) {
+				t.Fatalf("CheckSet() error = %v, Set() error = %v, want the same", checkErr, setErr)
+			}
+
+			err := checkErr
+			isFull, isShare := errors.Is(err, pins.ErrStoreFull), errors.Is(err, pins.ErrProjectShareFull)
+			switch tt.want {
+			case accept:
+				if err != nil {
+					t.Errorf("CheckSet() error = %v, want nil", err)
+				}
+			case fileFull:
+				if !isFull || isShare {
+					t.Errorf("CheckSet() error = %v, want ErrStoreFull and not ErrProjectShareFull", err)
+				}
+			case shareFull:
+				if !isFull || !isShare {
+					t.Errorf("CheckSet() error = %v, want ErrProjectShareFull and ErrStoreFull", err)
+				}
+			case otherErr:
+				if err == nil || isFull {
+					t.Errorf("CheckSet() error = %v, want a per-server error that is not ErrStoreFull", err)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), leakToken) {
+				t.Errorf("CheckSet() error = %q, want no names or paths", err)
+			}
+		})
+	}
+}
+
+// TestCheckSetZeroStore checks CheckSet on a zero-value Store, whose maps are
+// nil: it must not panic, and the Store must stay empty.
+func TestCheckSetZeroStore(t *testing.T) {
+	t.Parallel()
+	var s pins.Store
+	id := shareUserID(0)
+	before := stateOf(&s, id)
+	if err := s.CheckSet(id, storeTestPins("t", "h")); err != nil {
+		t.Fatalf("CheckSet() error = %v, want nil", err)
+	}
+	if got := stateOf(&s, id); !got.equal(before) {
+		t.Errorf("CheckSet() changed the zero-value Store: file %d, projects %d, found %t", got.tracked, got.projects, got.found)
+	}
 }

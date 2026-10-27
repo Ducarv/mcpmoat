@@ -39,60 +39,47 @@ import (
 // and get the prefix (see Load).
 var ErrInsecurePermissions = errors.New("insecure permissions")
 
-// The kind of path in a permission error: the text says "pins directory" or
-// "pins file".
+// The kind of path in a permission error: the text says "pins directory",
+// "pins file", "pins parent directory" or "pins lock file".
 const (
-	kindDir  = "directory"
-	kindFile = "file"
+	kindDir    = "directory"
+	kindFile   = "file"
+	kindParent = "parent directory"
+	kindLock   = "lock file"
 )
 
-// checkDirPerm returns an error that wraps ErrInsecurePermissions when the
-// pins directory at path is owned by another user or is writable by its group
-// or by others. Its only caller is dirOpenError: when Load, LoadLocked or Save
-// cannot open the directory, it checks it by path, only to give a better error
-// text than "permission denied". Load, LoadLocked and Save check the directory
-// on its open handle instead (checkDirHandle, also after Save or LoadLocked
-// created a missing directory), and Load checks pins.json on the open file
-// (checkFileHandle, and checkFilePermByPath when it cannot open the file).
+// checkDirPermByPath is for a pins directory that Load, LoadLocked or Save
+// could not open because the current user may not open it (dirOpenError). It
+// returns an error that wraps ErrInsecurePermissions when another user (not
+// uid) owns the directory at path, or when its group or others can write it.
+// Then the user gets the fix hint and not only "permission denied". It returns
+// nil when it cannot tell: a Stat error, or a path that is not a directory.
+// The caller then reports the open error. It does not read the ACL, because
+// it has no open handle. checkFilePermByPath does the same for pins.json.
 //
-// It follows symlinks (os.Stat), so it checks the target. A missing path is
-// not an error: it is the first run, and Save creates the directory with mode
-// 0o700. A path below a regular file (ENOTDIR) counts as missing too. A path
-// that is not a directory also passes: the later read reports "not a
-// directory" with its own text, and the mode of a regular file is not the mode
-// of a directory. Any other Stat error is an error. The error text never holds
-// file content.
-//
-// It does not read the ACL, because it has no open handle. The path can
-// change between this check and the later read or write. Only a process that
-// can write the directory or one of its parents can do that, and it could
-// change pins.json directly, so the race is accepted.
-func checkDirPerm(path string) error {
+// It follows symlinks (os.Stat), as the open of the directory does, so it
+// checks the target. The checks that decide whether the directory is safe run
+// on the open handle (checkDirHandle); this function only gives a better text
+// when there is no handle.
+func checkDirPermByPath(path string, uid int) error {
 	info, err := os.Stat(path)
-	if safefile.IsMissing(err) {
+	if err != nil || !info.IsDir() {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("check the permissions of the pins directory %s: %w", path, err)
-	}
-	if !info.IsDir() {
-		return nil
-	}
-	return checkOwnerAndMode(path, kindDir, info, os.Geteuid())
+	return checkOwnerAndMode(path, kindDir, info, uid)
 }
 
-// checkDirHandle is checkDirPerm for the open pins directory d, for example
-// the handle that root.Open(".") gives for the os.Root of the pins directory.
-// path is the path of the directory, for the error text only. It returns an
-// error that wraps ErrInsecurePermissions when another user owns the directory,
-// when its group or others can write it, or when its ACL lets a user or group
-// write it (checkACL, macOS only).
+// checkDirHandle checks the open pins directory d, for example the handle
+// that root.Open(".") gives for the os.Root of the pins directory. path is the
+// path of the directory, for the error text only. It returns an error that
+// wraps ErrInsecurePermissions when another user owns the directory, when its
+// group or others can write it, or when its ACL lets a user or group write it
+// (checkACL, macOS only).
 //
 // It reads the owner and the mode from d (d.Stat), not from path. So the
 // checked directory is the directory that Load reads from, and a swap of the
-// path after the open has no effect. A Stat error is an error, with the same
-// text as in checkDirPerm. A handle that is not a directory is an error too:
-// unlike checkDirPerm, there is no later read that reports it.
+// path after the open has no effect. A Stat error is an error, and so is a
+// handle that is not a directory.
 func checkDirHandle(path string, d *os.File) error {
 	info, err := d.Stat()
 	if err != nil {
@@ -180,10 +167,11 @@ func checkParents(dir string) error {
 // closed. The limit also ends a loop such as a -> b -> a.
 const maxSymlinks = 40
 
-// Labels of a path in the errors of checkParentsAs.
+// Labels of a path in the errors of checkParentsAs: "pins directory" and
+// "pins parent directory".
 const (
-	labelDir    = "pins directory"
-	labelParent = "pins parent directory"
+	labelDir    = "pins " + kindDir
+	labelParent = "pins " + kindParent
 )
 
 // checkParentsAs is checkParents for the user uid. uid is a parameter, so a
@@ -212,8 +200,8 @@ const (
 //     each directory in the target of a symlink. Each directory is checked
 //     once, by its real path with no symlink in it.
 //   - The pins directory itself, after all symlinks: nothing.
-//     checkDirHandle and checkDirPerm check its owner and mode, and
-//     checkDirHandle checks its ACL on the open handle.
+//     checkDirHandle checks its owner, its mode and its ACL on the open
+//     handle.
 //
 // The label of a symlink in the error is "pins directory" when it is the last
 // component of the path that is left, so the pins directory itself is the
@@ -237,8 +225,8 @@ const (
 // safefile.IsMissing): that is a first run, and the directories above it,
 // where Save creates the pins directory, are already checked. It also stops
 // at a component that is not a directory or a symlink: then the pins
-// directory cannot exist, and checkFirstRun (Load) or MkdirAll (Save) reports
-// the problem. On macOS /var and /tmp are symlinks that root owns, with
+// directory cannot exist, and checkFirstRun reports the problem (in Load,
+// and in ensurePinsDir for LoadLocked and Save). On macOS /var and /tmp are symlinks that root owns, with
 // targets in /private, so they pass.
 //
 // The error names the path where the entry really is, after the symlinks

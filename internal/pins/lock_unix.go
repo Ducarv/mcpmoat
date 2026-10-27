@@ -5,6 +5,7 @@ package pins
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -20,12 +21,13 @@ const lockOpenFlags = os.O_RDWR | syscall.O_NONBLOCK
 
 // lockSwappedError is the error of openLockFile when the open lock file at
 // lockPath is not the directory entry itself: a symlink, or a file that was
-// swapped after the open. It wraps ErrInsecurePermissions. The fix hint is
-// the same as in checkLockFile: remove the entry, and the next run makes a
-// new lock file.
-func lockSwappedError(lockPath string) error {
-	return fmt.Errorf("pins lock file %s is not safe: it is a symlink or was swapped while it was opened (fix: rm -- %s, then mcpmoat makes a new one with mode 0600): %w",
-		lockPath, shellQuote(lockPath), ErrInsecurePermissions)
+// swapped after the open. It wraps ErrInsecurePermissions. entry is the Lstat
+// result of the directory entry, or nil when the entry is gone. The fix hint
+// is the one of checkLockFile (lockFileFix): remove the entry, and the next
+// run makes a new lock file.
+func lockSwappedError(lockPath string, entry fs.FileInfo) error {
+	return fmt.Errorf("pins %s %s is not safe: it is a symlink or was swapped while it was opened (fix: %s): %w",
+		kindLock, lockPath, lockFileFix(lockPath, entry), ErrInsecurePermissions)
 }
 
 // tryLock tries to take an exclusive advisory lock on the open file f

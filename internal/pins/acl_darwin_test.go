@@ -199,7 +199,10 @@ func aclEntries(aces ...aclACE) []byte {
 	return aclFilesec(kauthFilesecMagic, uint32(len(aces)), aces, 0) //nolint:gosec // G115: tests use a few entries.
 }
 
-func TestACLAllowsWrite(t *testing.T) {
+// TestFirstWriteACEFound checks whether firstWriteACE finds a write entry
+// (the rule of checkACL and checkParentACL). TestFirstPermitACE checks the
+// index.
+func TestFirstWriteACEFound(t *testing.T) {
 	t.Parallel()
 	// Values from <sys/kauth.h> that acl_darwin.go does not name.
 	const (
@@ -259,9 +262,9 @@ func TestACLAllowsWrite(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := aclAllowsWrite(tt.in)
+			_, got, err := firstWriteACE(tt.in)
 			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Errorf("aclAllowsWrite() = %v, %v, want %v, error %v", got, err, tt.want, tt.wantErr)
+				t.Errorf("firstWriteACE() found = %v, error %v, want %v, error %v", got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
@@ -343,14 +346,14 @@ func TestReadFilesecReal(t *testing.T) {
 		return sec
 	}
 	if sec := read(); len(sec) != 0 {
-		if w, err := aclAllowsWrite(sec); err != nil || w {
-			t.Errorf("no ACL: aclAllowsWrite() = %v, %v, want false, nil", w, err)
+		if _, w, err := firstWriteACE(sec); err != nil || w {
+			t.Errorf("no ACL: firstWriteACE() found = %v, %v, want false, nil", w, err)
 		}
 	}
 	aclAdd(t, path, "everyone allow write")
 	sec := read()
-	if w, err := aclAllowsWrite(sec); err != nil || !w {
-		t.Errorf("allow write: aclAllowsWrite() = %v, %v, want true, nil", w, err)
+	if _, w, err := firstWriteACE(sec); err != nil || !w {
+		t.Errorf("allow write: firstWriteACE() found = %v, %v, want true, nil", w, err)
 	}
 }
 
@@ -590,7 +593,7 @@ func TestCheckLockFileACL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(newPinsDir(t, 0o700), "pins.json"+lockSuffix)
+			path := filepath.Join(newPinsDir(t, 0o700), lockName)
 			if err := os.WriteFile(path, nil, 0o600); err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
@@ -624,7 +627,7 @@ func TestCheckLockFileACL(t *testing.T) {
 
 	t.Run("no usable file fails closed", func(t *testing.T) {
 		t.Parallel()
-		path := filepath.Join(newPinsDir(t, 0o700), "pins.json"+lockSuffix)
+		path := filepath.Join(newPinsDir(t, 0o700), lockName)
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
 		}
@@ -642,11 +645,16 @@ func TestCheckLockFileACL(t *testing.T) {
 }
 
 // aclWantLockRefused fails the test unless err is the ACL refusal of the lock
-// file path, with the rm hint and never chmod.
+// file path, with the rm hint (lockFileFix) and never chmod.
 func aclWantLockRefused(t *testing.T, err error, path string) {
 	t.Helper()
-	wantInsecure(t, err, path, "pins lock file {path} is not safe: its ACL entry 0 lets a user or group open it",
-		"(fix: rm -- "+shellQuote(path)+";")
+	wantInsecure(t, err, path)
+	want := "pins lock file " + path + " is not safe: its ACL entry 0 lets a user or group open it (fix: rm -- " +
+		shellQuote(path) + ", then mcpmoat makes a new one with mode 0600; " +
+		"if the entry comes back, it is inherited from the pins directory): insecure permissions"
+	if err.Error() != want {
+		t.Errorf("error = %q\nwant    %q", err, want)
+	}
 	if strings.Contains(err.Error(), "chmod") {
 		t.Errorf("error = %q, the fix must be rm, never chmod", err)
 	}

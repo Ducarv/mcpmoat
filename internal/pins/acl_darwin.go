@@ -135,17 +135,24 @@ type attrList struct {
 // ATTR_CMN_EXTENDED_SECURITY, through f.SyscallConn, so the descriptor stays
 // open during the call. Reading the com.apple.system.Security extended
 // attribute fails with EPERM, and golang.org/x/sys/unix has no getattrlist
-// wrapper. On darwin, syscall.Syscall6 is a direct kernel trap (svc or
-// syscall instruction) and does not go through libc. Apple does not promise a
-// stable system call interface. syscall.SYS_FGETATTRLIST (228) is the value
-// in <sys/syscall.h> of the macOS SDK. If a later macOS changes it, the call
+// wrapper.
+//
+// On darwin, the exported syscall.Syscall6 is a direct kernel trap: the
+// assembly in src/syscall/asm_darwin_arm64.s (svc #0x80) and
+// asm_darwin_amd64.s (syscall) of the Go toolchain in go.mod. It does not go
+// through libc. Since Go 1.12, only the internal, lowercase wrappers that the
+// standard library itself uses call libc. Apple does not promise a stable
+// system call interface. syscall.SYS_FGETATTRLIST (228) is the value in
+// <sys/syscall.h> of the macOS SDK. If a later macOS changes it, the call
 // fails or returns a reply that does not parse, and checkACL fails closed.
 func checkACL(path, kind string, f *os.File) error {
 	filesec, err := readFilesec(f)
 	if err != nil {
 		return aclReadError(path, kind, err)
 	}
-	writable, err := aclAllowsWrite(filesec)
+	// The same rule as checkParentACL (firstWriteACE). The index is not
+	// used: the hint chmod -N removes the whole ACL.
+	_, writable, err := firstWriteACE(filesec)
 	if err != nil {
 		return aclReadError(path, kind, err)
 	}
@@ -156,8 +163,9 @@ func checkACL(path, kind string, f *os.File) error {
 		kind, path, shellQuote(path), ErrInsecurePermissions)
 }
 
-// aclReadError is the fail-closed error of checkACL when it cannot read or
-// parse the ACL. It wraps ErrInsecurePermissions.
+// aclReadError is the fail-closed error of checkACL, checkParentACL and
+// checkLockFileACL when they cannot read or parse the ACL. kind is the kind of
+// path in the text, for example kindDir. It wraps ErrInsecurePermissions.
 func aclReadError(path, kind string, err error) error {
 	return fmt.Errorf("cannot read the ACL of the pins %s %s: %w: %w", kind, path, err, ErrInsecurePermissions)
 }
@@ -177,9 +185,10 @@ func aclReadError(path, kind string, err error) error {
 // whole ACL with chmod -N: on a home directory that would also remove the deny
 // entry. ls -led shows the index of each entry.
 //
-// info is the os.Lstat result of path and must not be nil. uid is the current
-// user. Both choose the words of the hint only: only the owner of path or root
-// can change its ACL.
+// info is the os.Lstat result of path, and uid is the current user. Both
+// choose the words of the hint only (askOwnerPrefix): only the owner of path
+// or root can change its ACL. A nil info, or one with no Unix owner, gives the
+// "ask the owner or root to run" wording.
 //
 // It reads the ACL by path (readFilesecPath), because the walk of
 // checkParentsAs is by path too. It fails closed: when it cannot read or parse
@@ -188,11 +197,11 @@ func aclReadError(path, kind string, err error) error {
 func checkParentACL(path string, info fs.FileInfo, uid int) error {
 	filesec, err := readFilesecPath(path)
 	if err != nil {
-		return aclReadError(path, "parent directory", err)
+		return aclReadError(path, kindParent, err)
 	}
 	index, found, err := firstWriteACE(filesec)
 	if err != nil {
-		return aclReadError(path, "parent directory", err)
+		return aclReadError(path, kindParent, err)
 	}
 	if !found {
 		return nil
@@ -202,22 +211,9 @@ func checkParentACL(path string, info fs.FileInfo, uid int) error {
 	// index, so in "chmod -a# 1 -- path" it takes "--" for a file name. path
 	// is absolute (checkParentsAs walks an absolute path), so it cannot start
 	// with "-".
-	cmd := fmt.Sprintf("chmod -a# %d %s", index, shellQuote(path))
-	var fix string
-	owner, ok := -1, false
-	if info != nil {
-		owner, ok = ownerUID(info)
-	}
-	switch {
-	case ok && owner == uid:
-		fix = cmd
-	case ok && owner == 0:
-		fix = "ask root to run " + cmd
-	default:
-		fix = "ask the owner or root to run " + cmd
-	}
-	return fmt.Errorf("pins parent directory %s is not safe: its ACL entry %d lets a user or group change it (fix: %s, %s; ls -led %s shows the entries): %w",
-		path, index, fix, privateConfigHint, shellQuote(path), ErrInsecurePermissions)
+	fix := askOwnerPrefix(info, uid) + fmt.Sprintf("chmod -a# %d %s", index, shellQuote(path))
+	return fmt.Errorf("%s %s is not safe: its ACL entry %d lets a user or group change it (fix: %s, %s; ls -led %s shows the entries): %w",
+		labelParent, path, index, fix, privateConfigHint, shellQuote(path), ErrInsecurePermissions)
 }
 
 // checkLockFileACL returns an error that wraps ErrInsecurePermissions when
@@ -230,24 +226,26 @@ func checkParentACL(path string, info fs.FileInfo, uid int) error {
 // a write right, or a generic read, execute, write or all right. Deny ACEs
 // pass. It fails closed, as checkACL does, and a file with no ACL passes.
 //
-// The fix hint is rm, not chmod: mcpmoat makes a new lock file with mode
-// 0o600, and a chmod does not close a descriptor that another user already
-// has open. When the new file gets the entry again, the entry is inherited
-// from the pins directory.
+// The fix hint is rm, not chmod (see lockFileFix): mcpmoat makes a new lock
+// file with mode 0o600, and a chmod does not close a descriptor that another
+// user already has open. When the new file gets the entry again, the entry is
+// inherited from the pins directory.
 func checkLockFileACL(path string, f *os.File) error {
 	filesec, err := readFilesec(f)
 	if err != nil {
-		return aclReadError(path, "lock file", err)
+		return aclReadError(path, kindLock, err)
 	}
 	index, found, err := firstPermitACE(filesec, lockOpenRights)
 	if err != nil {
-		return aclReadError(path, "lock file", err)
+		return aclReadError(path, kindLock, err)
 	}
 	if !found {
 		return nil
 	}
-	return fmt.Errorf("pins lock file %s is not safe: its ACL entry %d lets a user or group open it (fix: rm -- %s; if the entry comes back, it is inherited from the pins directory): %w",
-		path, index, shellQuote(path), ErrInsecurePermissions)
+	// The lock file is a regular file here (checkLockFile ran first), so the
+	// hint is rm (lockFileFix with no file info).
+	return fmt.Errorf("pins %s %s is not safe: its ACL entry %d lets a user or group open it (fix: %s; if the entry comes back, it is inherited from the pins directory): %w",
+		kindLock, path, index, lockFileFix(path, nil), ErrInsecurePermissions)
 }
 
 // readFilesec returns the struct kauth_filesec of the open file f, as
@@ -347,9 +345,10 @@ func fgetattrlist(f *os.File, al *attrList, buf []byte) error {
 // empty. It retries on EINTR.
 //
 // syscall.SYS_GETATTRLIST (220) is the value in <sys/syscall.h> of the macOS
-// SDK, on amd64 and arm64. As for fgetattrlist, syscall.Syscall6 is a direct
-// kernel trap, and a changed number makes the call fail or the reply not
-// parse, so the check fails closed.
+// SDK, on amd64 and arm64. As for fgetattrlist, the exported syscall.Syscall6
+// is a direct kernel trap, not a libc call (see checkACL), and a changed
+// number makes the call fail or the reply not parse, so the check fails
+// closed.
 func getattrlist(path *byte, al *attrList, buf []byte) error {
 	for {
 		// The pointer conversions must stay in the call expression, so the
@@ -403,14 +402,6 @@ func parseAttrReply(buf []byte) ([]byte, error) {
 		return nil, fmt.Errorf("the ACL data (offset %d, length %d) is outside the reply of %d bytes", off, length, len(buf))
 	}
 	return buf[start:end], nil
-}
-
-// aclAllowsWrite reports whether the struct kauth_filesec in filesec has a
-// KAUTH_ACE_PERMIT entry with a right in aclWriteRights, for any principal.
-// It is firstWriteACE without the index.
-func aclAllowsWrite(filesec []byte) (bool, error) {
-	_, found, err := firstWriteACE(filesec)
-	return found, err
 }
 
 // firstWriteACE returns the index of the first KAUTH_ACE_PERMIT entry in the

@@ -109,10 +109,9 @@ const privateConfigHint = "or use a private XDG_CONFIG_HOME"
 func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 	owner, ok := ownerUID(info)
 	if !ok {
-		return fmt.Errorf("pins parent directory %s is not safe: its owner is unknown: %w", path, ErrInsecurePermissions)
+		return fmt.Errorf("%s %s is not safe: its owner is unknown: %w", labelParent, path, ErrInsecurePermissions)
 	}
 
-	ownedByRootNotUs := owner == 0 && uid != 0
 	foreignOwner := owner != uid && owner != 0
 	mode := info.Mode()
 	sticky := mode&fs.ModeSticky != 0
@@ -125,27 +124,52 @@ func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
 	}
 
 	// Only the owner or root can chown or chmod a path. So the hint asks them
-	// when the current user is not the owner.
+	// when the current user is not the owner (askOwnerPrefix).
+	ask := askOwnerPrefix(info, uid)
 	chmod := "chmod go-w -- " + shellQuote(path)
 	var problem, fix string
 	switch {
 	case foreignOwner && writable:
 		problem = problemForeignOwnerWritable
-		fix = "ask the owner or root to run chown, then " + chmod + ", " + privateConfigHint
+		fix = ask + "chown, then " + chmod + ", " + privateConfigHint
 	case foreignOwner:
 		problem = problemForeignOwner
-		fix = "ask the owner or root to run chown, " + privateConfigHint
-	case writable && ownedByRootNotUs:
-		problem = problemWritable
-		fix = "ask root to run " + chmod + ", " + privateConfigHint
+		fix = ask + "chown, " + privateConfigHint
 	case writable:
 		problem = problemWritable
-		fix = chmod + ", " + privateConfigHint
+		fix = ask + chmod + ", " + privateConfigHint
 	default:
 		return nil
 	}
-	return fmt.Errorf("pins parent directory %s is not safe: mode %04o, %s (fix: %s): %w",
-		path, shown, problem, fix, ErrInsecurePermissions)
+	return fmt.Errorf("%s %s is not safe: mode %04o, %s (fix: %s): %w",
+		labelParent, path, shown, problem, fix, ErrInsecurePermissions)
+}
+
+// askOwnerPrefix returns the start of a fix hint for a command that only the
+// owner of a parent directory or root can run, for the current user uid. info
+// is the Lstat or Stat result of the directory. The result is:
+//   - "" when uid owns the directory: the user runs the command.
+//   - "ask root to run " when root owns it.
+//   - "ask the owner or root to run " for any other owner, and also when the
+//     owner is not known (a nil info, or no Unix owner, see ownerUID). That
+//     fails closed: the hint never tells the user to run a command that only
+//     another user can run.
+//
+// checkParentOwnerAndMode and checkParentACL (macOS only) share it, so their
+// hints use the same words.
+func askOwnerPrefix(info fs.FileInfo, uid int) string {
+	if info == nil {
+		return "ask the owner or root to run "
+	}
+	owner, ok := ownerUID(info)
+	switch {
+	case ok && owner == uid:
+		return ""
+	case ok && owner == 0:
+		return "ask root to run "
+	default:
+		return "ask the owner or root to run "
+	}
 }
 
 // problemForeignSymlink is the problem text of a symlink on the path to the
@@ -190,9 +214,9 @@ const groupOrOtherAny fs.FileMode = 0o077
 
 // The problem texts of a refused pins lock file (checkLockFile).
 const (
-	problemLockNotRegular     = "not a regular file"
-	problemLockOpen           = "accessible by group or others"
-	problemLockForeignOwnOpen = problemForeignOwner + ", " + problemLockOpen
+	problemLockNotRegular       = "not a regular file"
+	problemLockOpen             = "accessible by group or others"
+	problemLockForeignOwnerOpen = problemForeignOwner + ", " + problemLockOpen
 )
 
 // checkLockFile returns an error that wraps ErrInsecurePermissions when the
@@ -211,23 +235,19 @@ const (
 // descriptor. Any user who can open the file for reading can hold the lock
 // for as long as they want and block every scan and pin --accept.
 //
-// The fix hint is to remove the file, never to chmod it. A descriptor that
-// another user opened while the mode was open stays valid after a chmod, so
-// that user could still hold the lock. After rm, mcpmoat makes a new file with
-// mode 0600. The pins directory is checked to belong to the user, so the user
-// can remove the file even when another user owns it.
+// The fix hint is to remove the file, never to chmod it (see lockFileFix).
 func checkLockFile(path string, info fs.FileInfo, uid int) error {
-	fix := "rm -- " + shellQuote(path) + ", then mcpmoat makes a new one with mode 0600"
+	fix := lockFileFix(path, info)
 
 	mode := info.Mode()
 	if !mode.IsRegular() {
-		return fmt.Errorf("pins lock file %s is not safe: %s (fix: %s): %w",
-			path, problemLockNotRegular, fix, ErrInsecurePermissions)
+		return fmt.Errorf("pins %s %s is not safe: %s (fix: %s): %w",
+			kindLock, path, problemLockNotRegular, fix, ErrInsecurePermissions)
 	}
 
 	owner, ok := ownerUID(info)
 	if !ok {
-		return fmt.Errorf("pins lock file %s is not safe: its owner is unknown: %w", path, ErrInsecurePermissions)
+		return fmt.Errorf("pins %s %s is not safe: its owner is unknown: %w", kindLock, path, ErrInsecurePermissions)
 	}
 
 	foreignOwner := owner != uid
@@ -237,7 +257,7 @@ func checkLockFile(path string, info fs.FileInfo, uid int) error {
 	var problem string
 	switch {
 	case foreignOwner && open:
-		problem = problemLockForeignOwnOpen
+		problem = problemLockForeignOwnerOpen
 	case foreignOwner:
 		problem = problemForeignOwner
 	case open:
@@ -245,8 +265,33 @@ func checkLockFile(path string, info fs.FileInfo, uid int) error {
 	default:
 		return nil
 	}
-	return fmt.Errorf("pins lock file %s is not safe: mode %04o, %s (fix: %s): %w",
-		path, perm, problem, fix, ErrInsecurePermissions)
+	return fmt.Errorf("pins %s %s is not safe: mode %04o, %s (fix: %s): %w",
+		kindLock, path, perm, problem, fix, ErrInsecurePermissions)
+}
+
+// lockFileFix returns the fix hint of a refused pins lock file at path, with
+// no "fix: " prefix: remove the entry, and the next run makes a new lock file.
+// For example:
+//
+//	rm -- '/home/u/.config/mcpmoat/pins.json.lock', then mcpmoat makes a new one with mode 0600
+//
+// info is the Lstat or Stat result of the entry, or nil when it is not known.
+// When info is a directory, the hint says rmdir instead of rm: rm without -r
+// refuses a directory. The hint never says rm -r, which would also remove
+// what the directory holds; rmdir fails on a directory that is not empty, and
+// the user then looks at it first.
+//
+// The hint is to remove the file, never to chmod it. A descriptor that another
+// user opened while the mode was open stays valid after a chmod, so that user
+// could still hold the lock. After the remove, mcpmoat makes a new file with
+// mode 0600. The pins directory is checked to belong to the user, so the user
+// can remove the entry even when another user owns it.
+func lockFileFix(path string, info fs.FileInfo) string {
+	rm := "rm"
+	if info != nil && info.IsDir() {
+		rm = "rmdir"
+	}
+	return rm + " -- " + shellQuote(path) + ", then mcpmoat makes a new one with mode 0600"
 }
 
 // shellQuote returns s as one word for a POSIX shell: it wraps s in single
