@@ -119,7 +119,11 @@ func TestPinAcceptNewToolsOfUnpinnedServer(t *testing.T) {
 		noStdout: []string{"Changed tool"},
 		stderr:   []string{noExpectNote},
 	})
-	assertNoExpectNote(t, got.stderr)
+	// The first accept creates pins.json, so the new pins file notice follows
+	// the note.
+	if want := noExpectNote + newPinsFileNotice("pin", e.pinsPath()); got.stderr != want {
+		t.Errorf("stderr = %q, want exactly %q", got.stderr, want)
+	}
 	diffs, accepted := splitAcceptedLine(got.stdout)
 	if want := "accepted srv: 2 new, 0 changed, 0 removed\n"; accepted != want {
 		t.Errorf("accepted line = %q, want %q", accepted, want)

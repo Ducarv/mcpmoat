@@ -816,3 +816,276 @@ func TestErrorsHoldNoContent(t *testing.T) {
 		}
 	})
 }
+
+// openRootT opens dir as an os.Root and closes it when the test ends.
+func openRootT(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// openFileInRootT calls OpenFileInRoot and closes a returned file when the
+// test ends.
+func openFileInRootT(t *testing.T, root *os.Root, name string) (*os.File, bool, error) {
+	t.Helper()
+	f, found, err := OpenFileInRoot(root, name)
+	if f != nil {
+		t.Cleanup(func() { _ = f.Close() })
+	}
+	return f, found, err
+}
+
+func TestOpenFileInRoot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// setup fills dir, the root, and returns the name to open.
+		setup     func(t *testing.T, dir string) string
+		wantFound bool
+		wantErr   error // nil means no error
+		// check, when set, checks the file that was found.
+		check func(t *testing.T, f *os.File)
+	}{
+		{
+			name: "regular file",
+			setup: func(t *testing.T, dir string) string {
+				writeFile(t, dir, "pins.json", []byte(`{"a":1}`))
+				return "pins.json"
+			},
+			wantFound: true,
+			check: func(t *testing.T, f *os.File) {
+				fi, err := f.Stat()
+				if err != nil {
+					t.Fatalf("Stat() error = %v", err)
+				}
+				if !fi.Mode().IsRegular() || fi.Size() != int64(len(`{"a":1}`)) {
+					t.Errorf("Stat() mode = %v, size = %d, want a regular file of 7 bytes", fi.Mode(), fi.Size())
+				}
+				data, err := io.ReadAll(f)
+				if err != nil {
+					t.Fatalf("ReadAll() error = %v", err)
+				}
+				if string(data) != `{"a":1}` {
+					t.Errorf("data = %q, want %q", data, `{"a":1}`)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, dir string) string {
+				if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				return "d"
+			},
+			wantFound: true,
+			check: func(t *testing.T, f *os.File) {
+				fi, err := f.Stat()
+				if err != nil {
+					t.Fatalf("Stat() error = %v", err)
+				}
+				if !fi.IsDir() {
+					t.Errorf("Stat().IsDir() = false, mode %v, want a directory", fi.Mode())
+				}
+			},
+		},
+		{
+			name:  "missing file",
+			setup: func(*testing.T, string) string { return "pins.json" },
+		},
+		{
+			name:  "missing directory component",
+			setup: func(*testing.T, string) string { return filepath.Join("sub", "pins.json") },
+		},
+		{
+			// ENOTDIR: no file can exist below a regular file.
+			name: "parent is a regular file",
+			setup: func(t *testing.T, dir string) string {
+				skipOnWindows(t)
+				writeFile(t, dir, "file", []byte(canary))
+				return filepath.Join("file", "pins.json")
+			},
+		},
+		{
+			name: "absolute symlink that leaves the root",
+			setup: func(t *testing.T, dir string) string {
+				target := writeFile(t, t.TempDir(), "secret.json", []byte(canary))
+				symlinkTo(t, target, dir, "pins.json")
+				return "pins.json"
+			},
+			wantErr: ErrOutsideRoot,
+		},
+		{
+			name: "dot-dot symlink that leaves the root",
+			setup: func(t *testing.T, dir string) string {
+				writeFile(t, filepath.Dir(dir), "secret.json", []byte(canary))
+				symlinkTo(t, filepath.Join("..", "secret.json"), dir, "pins.json")
+				return "pins.json"
+			},
+			wantErr: ErrOutsideRoot,
+		},
+		{
+			name: "dot-dot name",
+			setup: func(t *testing.T, dir string) string {
+				writeFile(t, filepath.Dir(dir), "secret.json", []byte(canary))
+				return filepath.Join("..", "secret.json")
+			},
+			wantErr: ErrOutsideRoot,
+		},
+		{
+			// An OS error with an errno comes back as it is, not as
+			// ErrOutsideRoot and not as missing.
+			name: "permission denied",
+			setup: func(t *testing.T, dir string) string {
+				skipOnWindows(t)
+				if os.Geteuid() == 0 {
+					t.Skip("root can read files with mode 0")
+				}
+				path := writeFile(t, dir, "pins.json", []byte(canary))
+				if err := os.Chmod(path, 0o000); err != nil {
+					t.Fatalf("chmod: %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+				return "pins.json"
+			},
+			wantErr: fs.ErrPermission,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// dir is one level below a private parent, so a ".." target stays
+			// inside this test's temp space.
+			dir := filepath.Join(t.TempDir(), "root")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			name := tt.setup(t, dir)
+			root := openRootT(t, dir)
+
+			f, found, err := openFileInRootT(t, root, name)
+
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("error = %v, want nil", err)
+				}
+			} else {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("error = %v, want errors.Is %v", err, tt.wantErr)
+				}
+				if !errors.Is(tt.wantErr, ErrOutsideRoot) && errors.Is(err, ErrOutsideRoot) {
+					t.Errorf("error = %v, want no ErrOutsideRoot", err)
+				}
+				if IsMissing(err) {
+					t.Errorf("IsMissing(%v) = true, want false", err)
+				}
+				if strings.Contains(err.Error(), canary) {
+					t.Errorf("error %q holds file content", err)
+				}
+			}
+			if found != tt.wantFound {
+				t.Errorf("found = %v, want %v", found, tt.wantFound)
+			}
+			if found != (f != nil) {
+				t.Errorf("found = %v, file = %v, want a file exactly when found", found, f)
+			}
+			if tt.check != nil && f != nil {
+				tt.check(t, f)
+			}
+		})
+	}
+}
+
+// TestOpenFileInRootFollowsSymlinkInsideRoot records that OpenFileInRoot
+// follows a symlink that stays inside the root. A caller that must refuse a
+// symlink has to check it itself, for example with root.Lstat and os.SameFile.
+func TestOpenFileInRootFollowsSymlinkInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "real.json", []byte("{}"))
+	symlinkTo(t, "real.json", dir, "pins.json")
+	root := openRootT(t, dir)
+
+	f, found, err := openFileInRootT(t, root, "pins.json")
+	if err != nil || !found {
+		t.Fatalf("OpenFileInRoot() = (found %v, error %v), want (true, nil)", found, err)
+	}
+
+	opened, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if !opened.Mode().IsRegular() {
+		t.Errorf("opened mode = %v, want a regular file", opened.Mode())
+	}
+	target, err := root.Stat("real.json")
+	if err != nil {
+		t.Fatalf("root.Stat() error = %v", err)
+	}
+	if !os.SameFile(opened, target) {
+		t.Error("os.SameFile(opened, real.json) = false, want true: the symlink is followed")
+	}
+	link, err := root.Lstat("pins.json")
+	if err != nil {
+		t.Fatalf("root.Lstat() error = %v", err)
+	}
+	if link.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("Lstat mode = %v, want a symlink", link.Mode())
+	}
+	// This difference is what a caller uses to refuse the symlink.
+	if os.SameFile(opened, link) {
+		t.Error("os.SameFile(opened, Lstat of the link) = true, want false")
+	}
+}
+
+// TestOpenFileInRootFIFO checks that a FIFO with no writer opens at once
+// (O_NONBLOCK) and that the handle shows it is not a regular file. The caller
+// must refuse it after Stat.
+func TestOpenFileInRootFIFO(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	makeFIFO(t, filepath.Join(dir, "pins.json"))
+	root := openRootT(t, dir)
+
+	type result struct {
+		f     *os.File
+		found bool
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		f, found, err := OpenFileInRoot(root, "pins.json")
+		done <- result{f, found, err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OpenFileInRoot blocked on a FIFO")
+	}
+	if got.f != nil {
+		t.Cleanup(func() { _ = got.f.Close() })
+	}
+	if got.err != nil || !got.found || got.f == nil {
+		t.Fatalf("OpenFileInRoot() = (%v, %v, %v), want an open file, true, nil", got.f, got.found, got.err)
+	}
+	fi, err := got.f.Stat()
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if fi.Mode().IsRegular() {
+		t.Errorf("Stat() mode = %v, want not regular", fi.Mode())
+	}
+	if fi.Mode()&fs.ModeNamedPipe == 0 {
+		t.Errorf("Stat() mode = %v, want a named pipe", fi.Mode())
+	}
+}

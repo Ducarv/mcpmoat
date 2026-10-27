@@ -18,6 +18,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
@@ -663,5 +664,101 @@ func assertNoExpectNote(t *testing.T, stderr string) {
 	t.Helper()
 	if stderr != noExpectNote {
 		t.Errorf("stderr = %q, want exactly the no --expect note %q", stderr, noExpectNote)
+	}
+}
+
+// newPinsFileNotice returns the exact stderr line, with its newline, that
+// printNewPinsFile prints for the command cmd ("scan" or "pin") and the pins
+// file path. It escapes and cuts path as the production code does. Tests pass
+// e.pinsPath() as path.
+func newPinsFileNotice(cmd, path string) string {
+	return "mcpmoat " + cmd + ": no pins file was found, so a new one was created at " +
+		termsafe.QuoteCut(path, maxWarnPathRunes) +
+		"; if this is not your first run, the old file was removed or moved\n"
+}
+
+// withoutPinsFileNotice returns stderr without the line of newPinsFileNotice(cmd,
+// path). It fails the test unless stderr holds that line exactly once, so a test
+// that ignores the notice still proves that the run printed it.
+func withoutPinsFileNotice(t *testing.T, stderr, cmd, path string) string {
+	t.Helper()
+	notice := newPinsFileNotice(cmd, path)
+	lines := strings.SplitAfter(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	found := 0
+	for _, line := range lines {
+		if line == notice {
+			found++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if found != 1 {
+		t.Fatalf("stderr has the new pins file notice %d times, want 1\nnotice: %q\nstderr:\n%s", found, notice, stderr)
+	}
+	return strings.Join(kept, "")
+}
+
+// holdPinsLock takes the lock on the pins directory of the pins file path, as
+// another mcpmoat run would, and returns the function that releases it. It
+// also registers the release with t.Cleanup; a second call does nothing. It
+// fails the test when pins.LoadLocked fails, and skips the test when the
+// system cannot lock the directory (pins.Store.Unlocked), because then no run
+// can be "locked by another run".
+func holdPinsLock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	store, release, err := pins.LoadLocked(t.Context(), path, 0)
+	t.Cleanup(release)
+	if err != nil {
+		t.Fatalf("pins.LoadLocked(%q) error = %v, want nil", path, err)
+	}
+	if store.Unlocked() {
+		release()
+		t.Skip("the system cannot lock the pins directory here")
+	}
+	return release
+}
+
+// TestNewPinsFileNotice checks that newPinsFileNotice gives the exact line of
+// printNewPinsFile, also for a path with a control byte that must be escaped.
+func TestNewPinsFileNotice(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{"scan", "pin"} {
+		for _, path := range []string{"/tmp/x/mcpmoat/pins.json", "a\x1bb"} {
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			c.printNewPinsFile(cmd, path)
+			want := newPinsFileNotice(cmd, path)
+			if got := stderr.String(); got != want {
+				t.Errorf("printNewPinsFile(%q, %q) stderr = %q, want %q", cmd, path, got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("printNewPinsFile(%q, %q) stdout = %q, want empty", cmd, path, stdout.String())
+			}
+			if strings.Contains(want, "\x1b") {
+				t.Errorf("newPinsFileNotice(%q, %q) = %q holds a raw escape byte", cmd, path, want)
+			}
+			if rest := withoutPinsFileNotice(t, "x\n"+want+"y\n", cmd, path); rest != "x\ny\n" {
+				t.Errorf("withoutPinsFileNotice() = %q, want %q", rest, "x\ny\n")
+			}
+		}
+	}
+}
+
+// TestHoldPinsLock checks that holdPinsLock makes a second LoadLocked fail
+// with pins.ErrLocked, and that its release frees the lock.
+func TestHoldPinsLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mcpmoat", "pins.json")
+	release := holdPinsLock(t, path)
+	_, again, err := pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if !errors.Is(err, pins.ErrLocked) {
+		t.Fatalf("LoadLocked() while held: error = %v, want pins.ErrLocked", err)
+	}
+	release()
+	_, again, err = pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if err != nil {
+		t.Fatalf("LoadLocked() after release: error = %v, want nil", err)
 	}
 }

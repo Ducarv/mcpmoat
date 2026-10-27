@@ -239,7 +239,10 @@ func TestPinServerLookup(t *testing.T) {
 		got := e.raw(fake, "pin", "--accept", "dup", "--config", claude)
 
 		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted dup: 1 new, 0 changed, 0 removed\n"}, stderr: []string{noExpectNote}})
-		assertNoExpectNote(t, got.stderr)
+		// No pins.json existed, so the save created it and says so.
+		if want := noExpectNote + newPinsFileNotice("pin", e.pinsPath()); got.stderr != want {
+			t.Errorf("stderr = %q, want exactly %q", got.stderr, want)
+		}
 		if got := fake.Calls(); !slices.Equal(got, []string{"dup"}) {
 			t.Errorf("inspector calls = %v, want [dup]", got)
 		}
@@ -571,7 +574,15 @@ func TestPinAccept(t *testing.T) {
 			got := e.pin(fake, "--accept", "srv")
 
 			assertPinRun(t, got, scanWant{code: exitOK, stderr: []string{noExpectNote}})
-			assertNoExpectNote(t, got.stderr)
+			// An unpinned server here means no pins.json yet: the save creates
+			// it and prints the notice after the note.
+			wantStderr := noExpectNote
+			if tt.pinned == nil {
+				wantStderr += newPinsFileNotice("pin", e.pinsPath())
+			}
+			if got.stderr != wantStderr {
+				t.Errorf("stderr = %q, want exactly %q", got.stderr, wantStderr)
+			}
 			// pin prints the diff of each changed tool, then the "accepted" line.
 			diffs, accepted := splitAcceptedLine(got.stdout)
 			if accepted != tt.wantStdout {
@@ -725,10 +736,18 @@ func TestPinNoSecretLeak(t *testing.T) {
 	e := newPinEnv(t, servers)
 	tools := map[string][]inspect.Tool{"stdio-srv": {mkTool("a", "Add.")}, "http-srv": {mkTool("h", "Http.")}}
 
-	for _, name := range []string{"stdio-srv", "http-srv"} {
+	for i, name := range []string{"stdio-srv", "http-srv"} {
 		got := e.pin(fakeServers(tools), "--accept", name)
 		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted " + name + ": "}, stderr: []string{noExpectNote}})
-		assertNoExpectNote(t, got.stderr)
+		// Only the first accept creates pins.json, so only it prints the
+		// new pins file notice.
+		wantStderr := noExpectNote
+		if i == 0 {
+			wantStderr += newPinsFileNotice("pin", e.pinsPath())
+		}
+		if got.stderr != wantStderr {
+			t.Errorf("accept %s: stderr = %q, want exactly %q", name, got.stderr, wantStderr)
+		}
 		assertContainsNone(t, "stdout", got.stdout, []string{envValue, headerValue})
 		assertContainsNone(t, "stderr", got.stderr, []string{envValue, headerValue})
 	}

@@ -802,6 +802,15 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 		if n := strings.Count(out, noExpectNote); n != 1 {
 			t.Errorf("output has the note %d times, want 1", n)
 		}
+		// The save created pins.json: its notice comes after the note and
+		// before the "accepted" line, once.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		if i := strings.Index(out, notice); i < 0 || i <= note || i >= accepted {
+			t.Errorf("want the note (%d), then the new pins file notice (%d), then accepted (%d)\noutput:\n%s", note, i, accepted, out)
+		}
+		if n := strings.Count(out, notice); n != 1 {
+			t.Errorf("output has the new pins file notice %d times, want 1", n)
+		}
 	})
 
 	t.Run("the note shows when the save fails", func(t *testing.T) {
@@ -850,9 +859,12 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 
 		got := e.pin(fakeServers(tools), "--accept", "srv", "--expect", digestOf(t, tools["srv"]...))
 
-		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}})
-		if got.stderr != "" {
-			t.Errorf("stderr = %q, want empty", got.stderr)
+		// The save creates pins.json, so stderr holds the new pins file notice
+		// and nothing else: no note.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}, stderr: []string{notice}})
+		if rest := withoutPinsFileNotice(t, got.stderr, "pin", e.pinsPath()); rest != "" {
+			t.Errorf("stderr without the notice = %q, want empty", rest)
 		}
 	})
 

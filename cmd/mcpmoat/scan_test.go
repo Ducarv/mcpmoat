@@ -489,7 +489,8 @@ func (i slowInspector) Inspect(ctx context.Context, s discover.Server) (inspect.
 // with one server of each outcome: "ok" with its tools and a cleartext-secrets
 // warning (the header key only), "timeout" and "failed". The status and the
 // warnings are part of the SUMMARY on stdout. They are no warning lines on
-// stderr any more: stderr holds only the "pinned" notice of the first run.
+// stderr any more: stderr holds only the new pins file notice and the
+// "pinned" notice of the first run.
 func TestScanConnectStatusGolden(t *testing.T) {
 	t.Parallel()
 
@@ -525,8 +526,13 @@ func TestScanConnectStatusGolden(t *testing.T) {
 	if code != exitFindings {
 		t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, out, errOut)
 	}
-	assertStderrLines(t, errOut, []lineWant{exactLine("mcpmoat scan: pinned 2 tools for web")})
-	assertContainsNone(t, "stderr", errOut, []string{"warning", "timeout", "refused", "cleartext"})
+	pinsPath := filepath.Join(xdg, "mcpmoat", "pins.json")
+	assertStderrLines(t, errOut, []lineWant{
+		exactLine(strings.TrimSuffix(newPinsFileNotice("scan", pinsPath), "\n")),
+		exactLine("mcpmoat scan: pinned 2 tools for web"),
+	})
+	// Check the words without the notice line: it holds a temp path.
+	assertContainsNone(t, "stderr", withoutPinsFileNotice(t, errOut, "scan", pinsPath), []string{"warning", "timeout", "refused", "cleartext"})
 	assertContainsNone(t, "stdout", out, []string{fakeHeader})
 	assertNoLeakBoth(t, out, errOut)
 	assertNoEscape(t, out, errOut)
