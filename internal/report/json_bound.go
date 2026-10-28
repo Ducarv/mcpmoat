@@ -11,11 +11,12 @@ import (
 // cuts the untrusted text fields to the lengths below, so the output stays
 // small. The cut text ends with termsafe.CutMarker.
 
-// jsonMaxNameRunes is the most runes that boundReport keeps from a name-like
+// MaxJSONNameRunes is the most runes that boundReport keeps from a name-like
 // field: a server name, a tool name, a finding key or a related name. A cut
 // value has this many runes and then termsafe.CutMarker (3 runes), so the
-// longest output is 515 runes. The JSON schema uses 515 as maxLength.
-const jsonMaxNameRunes = 512
+// longest output is 515 runes. The JSON schema uses 515 as maxLength. The scan
+// tests in cmd/mcpmoat use it too, so they check a cut name against this cap.
+const MaxJSONNameRunes = 512
 
 // jsonMaxPathRunes is the most runes that boundReport keeps from a path-like
 // field: a source file, a project path or a path in a config problem. A cut
@@ -27,7 +28,7 @@ const jsonMaxPathRunes = 4096
 // and tells whether it cut anything. A field with no more runes than its cap is
 // not changed, and has no marker.
 //
-// Cut to jsonMaxNameRunes (and then the marker):
+// Cut to MaxJSONNameRunes (and then the marker):
 //   - JSONServer.Name
 //   - JSONFinding.Server, JSONFinding.Key and JSONFinding.Related
 //   - JSONDiff.Server and JSONDiff.Tool
@@ -60,7 +61,7 @@ func boundReport(r ScanReport) (ScanReport, bool) {
 		// &r.Servers[i] is a pointer to the element in the new array, so the
 		// helper can write the cut text back to it.
 		s := &r.Servers[i]
-		cut = cutField(&s.Name, jsonMaxNameRunes) || cut
+		cut = cutField(&s.Name, MaxJSONNameRunes) || cut
 		cut = cutField(&s.ProjectPath, jsonMaxPathRunes) || cut
 		cut = cutField(&s.Source, jsonMaxPathRunes) || cut
 	}
@@ -68,16 +69,16 @@ func boundReport(r ScanReport) (ScanReport, bool) {
 	r.Findings = slices.Clone(r.Findings)
 	for i := range r.Findings {
 		f := &r.Findings[i]
-		cut = cutField(&f.Server, jsonMaxNameRunes) || cut
-		cut = cutField(&f.Key, jsonMaxNameRunes) || cut
-		cut = cutField(&f.Related, jsonMaxNameRunes) || cut
+		cut = cutField(&f.Server, MaxJSONNameRunes) || cut
+		cut = cutField(&f.Key, MaxJSONNameRunes) || cut
+		cut = cutField(&f.Related, MaxJSONNameRunes) || cut
 	}
 
 	r.Diffs = slices.Clone(r.Diffs)
 	for i := range r.Diffs {
 		d := &r.Diffs[i]
-		cut = cutField(&d.Server, jsonMaxNameRunes) || cut
-		cut = cutField(&d.Tool, jsonMaxNameRunes) || cut
+		cut = cutField(&d.Server, MaxJSONNameRunes) || cut
+		cut = cutField(&d.Tool, MaxJSONNameRunes) || cut
 	}
 
 	r.Errors = slices.Clone(r.Errors)
@@ -85,7 +86,7 @@ func boundReport(r ScanReport) (ScanReport, bool) {
 		e := &r.Errors[i]
 		cut = cutField(&e.Path, jsonMaxPathRunes) || cut
 		cut = cutField(&e.ProjectPath, jsonMaxPathRunes) || cut
-		cut = cutField(&e.Server, jsonMaxNameRunes) || cut
+		cut = cutField(&e.Server, MaxJSONNameRunes) || cut
 	}
 
 	return r, cut

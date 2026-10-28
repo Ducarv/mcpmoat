@@ -33,6 +33,7 @@ internal/
   report/               terminal and JSON output
     reporttest/         test helpers for report: schema loader, unsafe-byte check
   llm/                  optional --llm classifier (Anthropic or OpenAI-compatible API)
+  pincheck/             CI-only check of the tool version pins (package main, not in the binary)
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
@@ -100,6 +101,12 @@ docs/                   PRD and other documentation
   library, the module `github.com/cenkalti/backoff/v7` for the waits between retries and, from this
   module, only `discover` (see [Import direction](#import-direction)). See
   [The `--llm` classifier](#the---llm-classifier).
+- `internal/pincheck`: the CI-only check of the tool version pins in the workflows and in
+  `CONTRIBUTING.md`. It is package `main`, and `.github/scripts/check-tool-pins.sh` runs it. It is
+  not part of the mcpmoat binary: GoReleaser builds only `./cmd/mcpmoat`. It is under `internal/`,
+  not `cmd/pincheck`, because `cmd/` holds only the programs that ship. `internal/` keeps the tool out
+  of the release build, and `./...` still covers it with build, vet and lint. The rules are in
+  [CONTRIBUTING.md](../CONTRIBUTING.md#checks).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -131,6 +138,10 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
 | `internal/llm` | `discover`, and the module `github.com/cenkalti/backoff/v7` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
+
+`internal/pincheck` is not a product package, so it is not in the table. It imports only
+`termsafe` and the module `go.yaml.in/yaml/v3`, and no package imports it (a `main` package cannot
+be imported). The depguard rules below apply to it as to any other package.
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
 `internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.
@@ -341,7 +352,7 @@ step 5 and step 6:
   saves one server at a time) and the budget holds only what the save of `scan` writes. When
   `CheckSet` refuses with `pins.ErrProjectShareFull`, it sets `storeFull` and `shareFull`. When it
   refuses with `pins.ErrStoreFull` only, it sets `storeFull`.
-  - The JSON `accept` object (`scan --json`, schema version 3) comes from the same hint and the same
+  - The JSON `accept` object (`scan --json`, since schema version 3) comes from the same hint and the same
     decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
     of the line and `isCommand`, which is true only when the text is the `pin --accept` command
     (`acceptCommand`) and false when it is the prose steps (`acceptSteps`). The terminal prints
@@ -1045,14 +1056,15 @@ one.
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
-[docs/schema/scan-output.v3.json](schema/scan-output.v3.json). The schema files of the older
-versions, [version 1](schema/scan-output.v1.json) and [version 2](schema/scan-output.v2.json), stay
-unchanged. The Go types are in `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from
-the same data as the terminal report, in the same order. The one difference: `findings` keeps the
-order of the rows, and the terminal report groups them by severity. The report types hold plain
-strings, bools and ints, never a `discover` type, so a secret cannot reach the output by accident.
+[docs/schema/scan-output.v4.json](schema/scan-output.v4.json). The schema files of the older
+versions, [version 1](schema/scan-output.v1.json), [version 2](schema/scan-output.v2.json) and
+[version 3](schema/scan-output.v3.json), stay unchanged. The Go types are in
+`internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
+terminal report, in the same order. The one difference: `findings` keeps the order of the rows, and
+the terminal report groups them by severity. The report types hold plain strings, bools and ints,
+never a `discover` type, so a secret cannot reach the output by accident.
 
-Shape (`schema_version` 3):
+Shape (`schema_version` 4):
 
 - Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
   `complete`, `fields_truncated`, `servers`, `findings`, `diffs`, `errors` and `ignored`. An empty
@@ -1096,18 +1108,22 @@ Shape (`schema_version` 3):
   gives a `MOAT-T2-004` finding when both copies were inspected, or when the identity is pinned
   and a copy failed. An identity that is not pinned, with one copy `ok` and one that failed, gives
   only the warning on stderr.
-- A finding has `rule_id`, `severity`, `server`, `field`, `key`, `related` and `source`. `related`
-  is a second name (a key or a server), a fixed reason text or, for `MOAT-LLM-001`, the category
-  of the verdict. It is never a value. `source` is required: `rule` for a rule finding and `llm` for
-  an advisory finding of `--llm`. It is the only finding field that is never empty.
-- A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
-  `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff` is a fixed note of
-  mcpmoat, not a unified diff: the diff could not be made, or the change does not show in the
-  rendered text.
+- A finding has `rule_id`, `severity`, `server`, `server_index`, `field`, `key`, `related` and
+  `source`. `server_index` is an integer (0 or more): the position of the server of the finding in
+  `servers`. A consumer finds the server object by this index, not by the `server` text, because
+  two cut names can be equal (see [Size bound](#size-bound)). `related` is a second name (a key or
+  a server), a fixed reason text or, for `MOAT-LLM-001`, the category of the verdict. It is never a
+  value. `source` is required: `rule` for a rule finding and `llm` for an advisory finding of
+  `--llm`. It is the only finding field that is never empty.
+- A diff has `server`, `server_index` (as in a finding), `tool`, `kind` (`changed`, `new` or
+  `unverified`), `diff`, `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff`
+  is a fixed note of mcpmoat, not a unified diff: the diff could not be made, or the change does not
+  show in the rendered text.
 - Every enum in the schema lists all the values that mcpmoat writes. The Go `String` methods have
   an `unknown` fallback for an invalid value. That value is a bug, and the schema rejects it.
 - A file problem in `errors` has `path`, `project_path`, `server`, `line`, `col`, `reason` and
-  `untrusted`. `reason` is fixed text.
+  `untrusted`. `reason` is fixed text. It has no `server_index`, because a file problem has no
+  server object.
 
 What stays on stderr: the warnings, the notices and the errors. They are byte-identical to a run
 without `--json`, with one addition: there is no summary, so `scan` writes on stderr the lines that
@@ -1156,10 +1172,15 @@ other fields keep their names and types. Version 3 adds the top-level `ignored` 
 counts of the findings that the ignore list dropped, so a CI job can read them: #175), the optional
 server field `accept` (the digest and the command of the "To accept" hint, so a CI job can read
 them: #169) and the top-level `fields_truncated` flag with the length caps of the text fields
-(#170, see [Size bound](#size-bound)). The other fields keep their names and types. The schema
-files of version 1 and version 2 stay as they were released.
+(#170, see [Size bound](#size-bound)). The other fields keep their names and types.
 
-Not in version 3: a summary, `pin --json` and `--fail-on` (#65).
+Version 4 adds the required integer field `server_index` to each finding and each diff (#223). The
+server names are cut (see [Size bound](#size-bound)), so two servers can have the same `server`
+text. The index tells them apart. It is an added field, so it needs a bump: every object in the
+schema sets `additionalProperties: false`. The other fields keep their names and types. The schema
+files of version 1, version 2 and version 3 stay as they were released.
+
+Not in version 4: a summary, `pin --json` and `--fail-on` (#65).
 
 ### Size bound
 
@@ -1172,7 +1193,7 @@ other limits bound them (see part 2).
 1. Per-field caps (`boundReport` in `internal/report/json_bound.go`). `WriteJSON` cuts each
    untrusted text field to a number of characters (runes) and adds `...` (`termsafe.CutMarker`)
    after a cut value. It never changes the report of the caller (it works on a copy).
-   - Names, keys, related texts and server fields: 512 characters (`jsonMaxNameRunes`). That is the
+   - Names, keys, related texts and server fields: 512 characters (`MaxJSONNameRunes`). That is the
      server `name`, the finding fields `server`, `key` and `related`, the diff fields `server` and
      `tool`, and the config problem field `server`. A cut value has at most 515 characters.
    - Paths: 4096 characters (`jsonMaxPathRunes`). That is the server fields `source` and
@@ -1184,9 +1205,10 @@ other limits bound them (see part 2).
    - `fields_truncated` is `true` when `WriteJSON` cut any field. A caller can also set it to
      `true`, and `WriteJSON` never sets it back to `false`. Each cut field has a `maxLength`
      (515 or 4099) in the schema.
-   - Limit: two names that differ only after the cut look equal in the output (issue #223 tracks a
-     fix). The cut happens only when `WriteJSON` writes. The ignore list and the pins use the real
-     names.
+   - Two names that differ only after the cut look equal in the output. `server_index` tells such
+     servers apart: a consumer matches a finding or a diff to its server by the index, not by the
+     cut text. The cut happens only when `WriteJSON` writes. The ignore list and the pins use the
+     real names.
 2. Per-server row cap (see 5d). A server keeps at most 1000 tool rule rows, then one `MOAT-T1-024`
    row. The cap counts the rows after the ignore list. The `MOAT-T1-023` row and the cap row do not
    count. The cap bounds the part that grows with the number of tools times the number of rules. It
@@ -1500,10 +1522,13 @@ can send any text. Raw control characters in such text can rewrite your terminal
 - `QuoteIf(s, force)` also quotes a safe `s` when `force` is true.
 - `QuoteCut(s, n)` cuts to `n` runes, quotes the result, and adds `CutMarker` when it cut.
 - `Cut(s, n)` cuts to `n` runes at a rune boundary, adds no marker, and reports whether it cut.
+- `Escape(s)` replaces each unsafe rune with a visible escape (`\xNN`, `\uXXXX`), adds no quotes
+  and does not cut. The CI tool `internal/pincheck` uses it for one-line log messages.
 - `IsInvisible(r)` tells if a rune shows as nothing.
 
 The layers that import it are `cmd/mcpmoat`, `internal/discover`, `internal/report` and
-`internal/rules`. `internal/pins` does not import it. It returns raw server text, and the report
+`internal/rules`. The CI tool `internal/pincheck` imports it too. It is not a product layer.
+`internal/pins` does not import it. It returns raw server text, and the report
 layer escapes that text. To list the files, run:
 
 ```sh

@@ -22,7 +22,10 @@ import (
 //
 // Version 3 adds ScanReport.Ignored, ScanReport.FieldsTruncated and
 // JSONServer.Accept.
-const SchemaVersion = 3
+//
+// Version 4 adds JSONFinding.ServerIndex and JSONDiff.ServerIndex
+// (server_index).
+const SchemaVersion = 4
 
 // Mode tells if a scan connected to the servers. It is the type of
 // ScanReport.Mode.
@@ -150,9 +153,13 @@ type JSONFinding struct {
 	RuleID   string `json:"rule_id"`
 	Severity string `json:"severity"`
 	Server   string `json:"server"`
-	Field    string `json:"field"`
-	Key      string `json:"key"`
-	Related  string `json:"related"`
+	// ServerIndex is the position of the server in ScanReport.Servers. A long
+	// Server name is cut, so two names can be the same after the cut. The
+	// index still tells the servers apart.
+	ServerIndex int    `json:"server_index"`
+	Field       string `json:"field"`
+	Key         string `json:"key"`
+	Related     string `json:"related"`
 	// Source is "rule" for a finding from a rule, and "llm" for an advisory
 	// finding from the LLM classification (see SourceRule and SourceLLM).
 	Source Source `json:"source"`
@@ -161,9 +168,12 @@ type JSONFinding struct {
 // JSONDiff is the diff of one tool in the JSON report.
 type JSONDiff struct {
 	Server string `json:"server"`
-	Tool   string `json:"tool"`
-	Kind   string `json:"kind"`
-	Diff   string `json:"diff"`
+	// ServerIndex is the position of the server in ScanReport.Servers (see
+	// JSONFinding.ServerIndex).
+	ServerIndex int    `json:"server_index"`
+	Tool        string `json:"tool"`
+	Kind        string `json:"kind"`
+	Diff        string `json:"diff"`
 	// Truncated is true when the stored diff was cut, so Diff is not the
 	// whole diff.
 	Truncated bool `json:"diff_truncated"`
@@ -213,30 +223,33 @@ func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 
 // NewJSONFinding converts a finding row to its JSON form. Any r.Source other
 // than "llm" (an empty or an unknown value) becomes "rule", as in the terminal
-// report. The JSON form has only the server name: the client, the scope, the
-// title and the rule texts of the terminal report are not in it (a new field
-// bumps the version).
+// report. The JSON form has the server name and the server index
+// (r.Index): the client, the scope, the title and the rule texts of the
+// terminal report are not in it (a new field bumps the version).
 func NewJSONFinding(r FindingRow) JSONFinding {
 	return JSONFinding{
-		RuleID:   r.RuleID,
-		Severity: r.Severity,
-		Server:   r.Name,
-		Field:    r.Field,
-		Key:      r.Key,
-		Related:  r.Related,
-		Source:   r.Source.normalize(),
+		RuleID:      r.RuleID,
+		Severity:    r.Severity,
+		Server:      r.Name,
+		ServerIndex: r.Index,
+		Field:       r.Field,
+		Key:         r.Key,
+		Related:     r.Related,
+		Source:      r.Source.normalize(),
 	}
 }
 
-// NewJSONDiff converts a tool diff to its JSON form.
+// NewJSONDiff converts a tool diff to its JSON form. It copies d.ServerIndex
+// to server_index.
 func NewJSONDiff(d ToolDiff) JSONDiff {
 	return JSONDiff{
-		Server:    d.Server,
-		Tool:      d.Tool,
-		Kind:      d.Kind.String(),
-		Diff:      d.Diff,
-		Truncated: d.Truncated,
-		IsNote:    d.IsNote,
+		Server:      d.Server,
+		ServerIndex: d.ServerIndex,
+		Tool:        d.Tool,
+		Kind:        d.Kind.String(),
+		Diff:        d.Diff,
+		Truncated:   d.Truncated,
+		IsNote:      d.IsNote,
 	}
 }
 

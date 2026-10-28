@@ -94,8 +94,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   global JSON file such as `~/.claude.json`, which holds chat history.
 - In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
-  when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
-  planned as issue #223). Diffs, commands, URLs and argv are never cut.
+  when any field was cut. Two server names that differ only after the cut are equal in the JSON,
+  but the `server_index` of each finding and each diff tells such servers apart (see
+  [Scan output](scan-output.md#json-output)). Diffs, commands, URLs and argv are never cut.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

@@ -128,11 +128,13 @@ jobs:
         run: .github/scripts/run-offline.sh
 
   # Guards the tool version pins, checks the shell scripts in
-  # .github/scripts/, tests the failure issue job of the weekly vulnerability
-  # check, tests the guard step of the release job and tests the publish
-  # script. The header of each test script lists the tools that it needs, and
-  # this runner has all of them. It is a separate small job, with no Go setup
-  # and no GoReleaser, so that it can be a required check on every branch.
+  # .github/scripts/, tests the shared test harness, tests the failure issue
+  # job of the weekly vulnerability check, tests the guard step of the release
+  # job and tests the publish script. The header of each test script lists
+  # the tools that it needs, and this runner has all of them. The pin check is
+  # a Go program (internal/pincheck), so the job sets up Go. It is a separate
+  # small job, with no GoReleaser, so that it can be a required check on every
+  # branch.
   ci-scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -147,6 +149,17 @@ jobs:
       # shellcheck is preinstalled on ubuntu-latest.
       - name: Lint the scripts
         run: shellcheck .github/scripts/*.sh
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No cache here, so this short job cannot save a small cache for the other jobs.
+          cache: false
+
+      # The other test scripts source the harness, so a broken harness fails here first.
+      - name: Test the test harness
+        run: .github/scripts/test-harness-test.sh
 
       - name: Test the pin check
         run: .github/scripts/check-tool-pins-test.sh

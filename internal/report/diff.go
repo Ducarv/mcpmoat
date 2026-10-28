@@ -33,6 +33,11 @@ const noDiffNote = "  (no diff text available)"
 type ToolDiff struct {
 	// Server is the name of the server that offers the tool.
 	Server string
+	// ServerIndex is the position of the server in the scanned list (see
+	// ServerRef.Index). Only scan --json reads it, as server_index. WriteDiffs
+	// does not use it. It holds the same value as ServerRef.Index, but ToolDiff
+	// has no ServerRef, so the field name says which index it is.
+	ServerIndex int
 	// Tool is the name of the tool.
 	Tool string
 	// Diff is the unified diff text. Each line starts with "---", "+++",

@@ -224,7 +224,9 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 
 		kept, omitted := cutConfigHits(hits, caps.perServer)
 		sh := configServerHits{
-			ref:     report.NewServerRef(s),
+			// servers is res.Servers, the same slice that the --json "servers"
+			// array lists in order, so i is the server_index of every row here.
+			ref:     report.NewServerRef(s, i),
 			kept:    make([]rules.Finding, 0, len(kept)),
 			start:   len(all),
 			omitted: len(omitted),

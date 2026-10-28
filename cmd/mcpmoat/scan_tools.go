@@ -334,7 +334,7 @@ func (r *toolRulesRun) checkServer(ctx, stepCtx context.Context, o inspect.Outco
 	defer cancel()
 
 	r.pending, r.omitted = r.pending[:0], 0
-	ref := report.NewServerRef(o.Server)
+	ref := report.NewServerRef(o.Server, o.Index)
 	// One redactor for the whole server: the secret values are the same for
 	// each tool, so they are read once.
 	redactor := discover.NewTextRedactor(o.Result.Secrets)
@@ -393,7 +393,7 @@ func (r *toolRulesRun) checkServer(ctx, stepCtx context.Context, o inspect.Outco
 // no warning: toolRulesStep prints one for all such servers.
 func (r *toolRulesRun) addLateServer(o inspect.Outcome) {
 	total := len(o.Result.Tools)
-	ref := report.NewServerRef(o.Server)
+	ref := report.NewServerRef(o.Server, o.Index)
 	r.add(o.Index, "", budgetRow(ref, r.failClosedSeverity, total, total))
 }
 

@@ -302,29 +302,35 @@ func (r pinReport) inspectionOf(s discover.Server) report.InspectionStatus {
 //   - a server whose config path is not absolute (the working directory is not
 //     known) is a high MOAT-T2-004 finding. Its identity would not match the
 //     one in the store, so it would be pinned again with no comparison.
+//
+// Every row and diff of o gets ref, the ServerRef of o.Server with o.Index, the
+// position of o.Server in the scanned list (server_index in scan --json). For a
+// second server with the same identity, o is that second copy, so its row gets
+// the index of the copy, not the index of the first one.
 func (p *pinner) checkOutcome(o inspect.Outcome) {
 	s := o.Server
+	ref := report.NewServerRef(s, o.Index)
 	id := serverIdentity(s)
 	if o.Status != inspect.StatusOK {
-		p.notInspected(s, id, o.Err)
+		p.notInspected(ref, id, o.Err)
 		return
 	}
 	if p.handled[id] {
-		p.addUnverified(s, reasonListedTwice, riskServerUnverified, fixListedTwice, p.unverifiedSeverity(id))
+		p.addUnverified(ref, reasonListedTwice, riskServerUnverified, fixListedTwice, p.unverifiedSeverity(id))
 		return
 	}
 	p.handled[id] = true
 	if !filepath.IsAbs(s.Source) {
-		p.addUnverified(s, reasonRelativeSource, riskServerUnverified, fixRelativeSource, pins.UnverifiedSeverity(true))
+		p.addUnverified(ref, reasonRelativeSource, riskServerUnverified, fixRelativeSource, pins.UnverifiedSeverity(true))
 		return
 	}
 
 	tools := o.Result.Tools
 	if stored, found := p.store.Get(id); found {
-		p.compare(s, id, tools, stored, discover.NewTextRedactor(o.Result.Secrets))
+		p.compare(ref, id, tools, stored, discover.NewTextRedactor(o.Result.Secrets))
 		return
 	}
-	p.firstPin(s, id, tools)
+	p.firstPin(ref, id, tools)
 }
 
 // add keeps a row, or counts it when the ignore list drops it. It returns false
@@ -357,8 +363,9 @@ func (p *pinner) add(toolName string, row report.FindingRow) bool {
 // solve them (see the fix constants). risk replaces the risk of
 // pins.KindUnverified too: the row is about the whole server, which may have
 // no pin at all, not about the pin of one tool (see the risk constants).
-func (p *pinner) addUnverified(s discover.Server, reason, risk, fix, severity string) {
-	row := pinRow(pins.KindUnverified, s, "", severity)
+// ref is the server of the row (see pinRow).
+func (p *pinner) addUnverified(ref report.ServerRef, reason, risk, fix, severity string) {
+	row := pinRow(pins.KindUnverified, ref, "", severity)
 	row.Related = reason
 	row.Risk = risk
 	row.Remediation = fix
@@ -387,12 +394,13 @@ func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 // server that is not in the store is only a warning (FR-06). A server that this
 // run already inspected gets no row: the first outcome checked its tools. A
 // second failing outcome with one identity gives no second row (see failed).
-func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
+// ref is the server of the row (see pinRow).
+func (p *pinner) notInspected(ref report.ServerRef, id pins.Identity, err error) {
 	if inspect.Refused(err) {
 		return
 	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.addUnverified(s, reasonNotInspected, riskServerUnverified, fixNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(ref, reasonNotInspected, riskServerUnverified, fixNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -432,13 +440,13 @@ func (p *pinner) markStoreFull() {
 // is printed before savePinned runs, so firstPin must decide this now:
 // otherwise the server would be refused at the save with no finding in the
 // report. The servers before it stay in the budget, so the servers that fit
-// are still pinned.
-func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
+// are still pinned. ref is the server of the row (see pinRow).
+func (p *pinner) firstPin(ref report.ServerRef, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
 		// The row gets the fixed reason, never the error text (see
 		// pinnableReason).
-		p.addUnverified(s, pinnableReason(err), riskServerUnverified, fixNotPinnable, pins.UnverifiedSeverity(true))
+		p.addUnverified(ref, pinnableReason(err), riskServerUnverified, fixNotPinnable, pins.UnverifiedSeverity(true))
 		return
 	}
 	// pinnable checked the pins with pins.ValidateServer, so the only error
@@ -446,10 +454,10 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	// server in the list: savePinned calls Set again, which gives the same
 	// error, and reports it there (exit code 2).
 	if kind := fullKindOf(p.budget.Set(id, snap)); kind != notFull {
-		p.addUnverified(s, kind.reason(), riskServerUnverified, kind.remediation(), pins.UnverifiedSeverity(true))
+		p.addUnverified(ref, kind.reason(), riskServerUnverified, kind.remediation(), pins.UnverifiedSeverity(true))
 		return
 	}
-	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
+	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: ref.Name, tools: len(tools)})
 }
 
 // compare compares the tools of a pinned server with its pins
@@ -473,22 +481,25 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // firstPin, so the server fails the default --fail-on high: no change of its
 // tools could ever be accepted.
 //
+// ref is the server. Every row and every diff of the server gets its Index
+// (see pinRow and appendDiff).
+//
 // redactor holds the secret values of the server (nil when it has none, see
 // compareMask). The compare is pins.CompareMasked with it: the Key of each
 // row, the tool name of each diff and the diff text show each secret value as
 // discover.Mask. The verdicts, the hashes, the digest and the ignore lookup
 // (Change.RawTool) use the real text.
-func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, redactor *discover.TextRedactor) {
+func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, redactor *discover.TextRedactor) {
 	snap, pinErr := pinnable(id, tools)
 	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
-		p.addUnverified(s, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
+		p.addUnverified(ref, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
 	}
-	h := acceptHint{name: s.Name, id: id}
+	h := acceptHint{name: ref.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.CompareMasked(stored, tools, compareMask(redactor)) {
 		// ch.Tool is the masked name, for the report. ch.RawTool is the real
 		// name, for the ignore lookup only.
-		row := pinRow(ch.Kind, s, ch.Tool, ch.Severity)
+		row := pinRow(ch.Kind, ref, ch.Tool, ch.Severity)
 		if ch.Kind == pins.KindUnverified {
 			// ch.Reason is a fixed text from internal/pins.
 			row.Related = ch.Reason
@@ -503,7 +514,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		kept = true
 		h.truncated = h.truncated || ch.Truncated
 		h.noText = h.noText || ch.DiffIsNote()
-		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
+		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, ref, ch)
 	}
 	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)
@@ -576,21 +587,24 @@ const (
 	fixShareFull = "Servers of the user scope are not affected: remove project servers you no longer use from pins.json, or remove this server from its project config, then run mcpmoat scan again."
 )
 
-// pinRow returns the report row of one pin change on the server s. The caller
+// pinRow returns the report row of one pin change on the server ref. The caller
 // gives the severity: findingRule would answer "critical" for these rule
 // IDs, because the rule set has no rule for them. The risk and the remediation
 // are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
 // have no title, so the row has an empty Title and the report leaves the
 // title out of the finding line.
 //
+// ref.Index is the position of the server in the scanned list
+// (inspect.Outcome.Index). It becomes server_index in scan --json.
+//
 // tool is the masked tool name (pins.Change.Tool from pins.CompareMasked),
 // never pins.Change.RawTool, or "" for a row about the whole server. The Key is
 // pinKey(tool): a long name is cut, but the mask came first, so the cut cannot
 // leave a part of a secret. The caller gives the full real name to add for the
 // ignore list.
-func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) report.FindingRow {
+func pinRow(kind pins.ChangeKind, ref report.ServerRef, tool, severity string) report.FindingRow {
 	return report.FindingRow{
-		ServerRef:   report.NewServerRef(s),
+		ServerRef:   ref,
 		RuleID:      kind.RuleID(),
 		Severity:    severity,
 		Risk:        kind.Risk(),
@@ -622,10 +636,11 @@ func pinKey(tool string) string {
 //   - A server that a gate refused (the client config turns it off, or it is
 //     untrusted) was not started, so it gives "not inspected".
 //
-// The warnings of the inspection come from outcomeWarnings.
+// The warnings of the inspection come from outcomeWarnings. The entry gets
+// o.Index, the position of the server in the scanned list.
 func outcomeSummary(o inspect.Outcome, findings int) report.ServerStatus {
 	status := report.ServerStatus{
-		ServerRef: report.NewServerRef(o.Server),
+		ServerRef: report.NewServerRef(o.Server, o.Index),
 		Findings:  findings,
 		Warnings:  outcomeWarnings(o),
 	}
@@ -666,7 +681,7 @@ func (r pinReport) serverStatuses(servers []discover.Server, configFindings []in
 	out := make([]report.ServerStatus, len(servers))
 	for i, s := range servers {
 		out[i] = report.ServerStatus{
-			ServerRef: report.NewServerRef(s),
+			ServerRef: report.NewServerRef(s, i),
 			Status:    report.StatusNotInspected,
 		}
 	}

@@ -129,7 +129,7 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 		{"MOAT-T4-002", "high", "remote-url-secret", "url", "-"},
 		// medium
 		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
-		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
+		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example~corp/files~mcp"},
 		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
 		// low
 		{"MOAT-T4-004", "low", "env-secret", "args", "-"},
@@ -1596,7 +1596,7 @@ func checkCapJSON(t *testing.T, stdout string, wantCap bool, envRelated, hdrRela
 	if wantCap {
 		want = []report.JSONFinding{
 			{RuleID: rules.RuleConfigFindingCap, Severity: "high", Server: "env-srv", Related: envRelated, Source: report.SourceRule},
-			{RuleID: rules.RuleConfigFindingCap, Severity: "high", Server: "hdr-srv", Related: hdrRelated, Source: report.SourceRule},
+			{RuleID: rules.RuleConfigFindingCap, Severity: "high", Server: "hdr-srv", ServerIndex: 1, Related: hdrRelated, Source: report.SourceRule},
 		}
 	}
 	if !slices.Equal(got, want) {

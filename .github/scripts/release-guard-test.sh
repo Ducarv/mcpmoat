@@ -18,7 +18,8 @@
 # selects another copy of release.yml, for example a copy with one check
 # removed, to see that the cases fail.
 set -euo pipefail
-
+# shellcheck source-path=SCRIPTDIR source=test-harness.sh
+. "$(dirname -- "$0")/test-harness.sh"
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 workflow=${GUARD_WORKFLOW:-$PWD/.github/workflows/release.yml}
 tmp=$(mktemp -d)
@@ -31,64 +32,15 @@ mkdir -p "$HOME"
 
 step="Check that the build left the scripts unchanged"
 repo=$tmp/repo
-failed=0
-total=0
 
-# fail stops the test at once.
-fail() {
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::error::$*" >&2
-  else
-    echo "FAIL: $*" >&2
-  fi
-  exit 1
-}
-
-# record_failure reports a failed case and goes on with the next one.
-record_failure() {
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::error::$*" >&2
-  else
-    echo "FAIL: $*" >&2
-  fi
-  failed=$((failed + 1))
-}
-
-# Take the body of the first run block of the step and remove the YAML indent.
-# The block ends at the first line with a smaller indent. That line is still
-# read by the rules below, so a later step is seen. The awk stops after the
-# block.
 [ -r "$workflow" ] || fail "Cannot read the workflow $workflow."
-awk -v step="$step" '
-  inrun {
-    if ($0 ~ /^ *$/) { print ""; next }
-    match($0, /^ */)
-    if (RLENGTH >= indent) { print substr($0, indent + 1); next }
-    exit
-  }
-  $0 ~ /^ *- name: / {
-    name = $0
-    sub(/^ *- name: */, "", name)
-    sub(/ *$/, "", name)
-    instep = (name == step)
-    next
-  }
-  instep && /^ *run: \|[+-]? *$/ {
-    match($0, /^ */)
-    indent = RLENGTH + 2
-    inrun = 1
-    found = 1
-  }
-  END { exit found ? 0 : 3 }
-' "$workflow" >"$tmp/run.sh" ||
+extract_run_block "$workflow" "$step" release >"$tmp/run.sh" ||
   fail "$workflow has no run block in the step '$step'."
-grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step '$step' is empty."
 
 # The run body is inline shell in the workflow, and `shellcheck
 # .github/scripts/*.sh` does not see it.
 if command -v shellcheck >/dev/null 2>&1; then
-  total=$((total + 1))
-  shellcheck -s bash "$tmp/run.sh" || record_failure "shellcheck reports a problem in the run block"
+  check_cmd "shellcheck passes on the run block" shellcheck -s bash "$tmp/run.sh"
 fi
 
 # A step starts at a line with six spaces and a dash. An unnamed step has the
@@ -127,113 +79,106 @@ next_step_name() {
 
 # The body can pass while a step key turns the step off, changes what it
 # compares, a different shell runs it, or it runs after the publish. Check
-# these keys by text.
-# check_step MESSAGE CHECK: the check is a function that must succeed.
-check_step() {
-  local msg=$1
-  shift
-  total=$((total + 1))
-  "$@" || record_failure "the guard step: $msg"
-}
+# these keys by text. Each check is a function that must succeed.
 only_known_keys() { ! step_text | grep -E "^ {8}[\"']?[A-Za-z_-]+[\"']? *:" | grep -Evq '^ {8}(shell|run):'; }
 uses_bash() { step_text | grep -Eq '^ {8}shell: bash *$'; }
 runs_before_publish() { [ "$(next_step_name)" = "Verify and publish the release" ]; }
-check_step "it has a key other than name, shell and run (for example if:, env: or working-directory:)" only_known_keys
-check_step "it does not have 'shell: bash'" uses_bash
-check_step "the next step is not 'Verify and publish the release'" runs_before_publish
+check_cmd "the guard step has no key other than name, shell and run (for example if:, env: or working-directory:)" only_known_keys
+check_cmd "the guard step has 'shell: bash'" uses_bash
+check_cmd "the step after the guard step is 'Verify and publish the release'" runs_before_publish
 
-# new_repo makes a repo with one commit and sets GITHUB_SHA for the case.
+# new_repo makes a repo with one commit and sets the global sha for the case.
+# guard_case runs it in the current shell, where set -e has no effect, so the
+# commands are joined with &&.
 new_repo() {
-  rm -rf "${repo:?}"
-  mkdir -p "$repo/.github/scripts"
-  git -C "$repo" init -q
-  git -C "$repo" config user.email test@example.com
-  git -C "$repo" config user.name test
-  git -C "$repo" config commit.gpgsign false
-  git -C "$repo" config core.hooksPath /dev/null
-  git -C "$repo" config core.fileMode true
-  printf '#!/usr/bin/env bash\necho publish\n' >"$repo/.github/scripts/verify-and-publish.sh"
-  printf '#!/usr/bin/env bash\necho other\n' >"$repo/.github/scripts/other.sh"
-  printf 'readme\n' >"$repo/README.md"
-  chmod +x "$repo/.github/scripts/verify-and-publish.sh" "$repo/.github/scripts/other.sh"
-  git -C "$repo" add -A
-  git -C "$repo" commit -q -m initial
-  sha=$(git -C "$repo" rev-parse HEAD)
+  rm -rf "${repo:?}" &&
+    mkdir -p "$repo/.github/scripts" &&
+    git -C "$repo" init -q &&
+    git -C "$repo" config user.email test@example.com &&
+    git -C "$repo" config user.name test &&
+    git -C "$repo" config commit.gpgsign false &&
+    git -C "$repo" config core.hooksPath /dev/null &&
+    git -C "$repo" config core.fileMode true &&
+    printf '#!/usr/bin/env bash\necho publish\n' >"$repo/.github/scripts/verify-and-publish.sh" &&
+    printf '#!/usr/bin/env bash\necho other\n' >"$repo/.github/scripts/other.sh" &&
+    printf 'readme\n' >"$repo/README.md" &&
+    chmod +x "$repo/.github/scripts/verify-and-publish.sh" "$repo/.github/scripts/other.sh" &&
+    git -C "$repo" add -A &&
+    git -C "$repo" commit -q -m initial &&
+    sha=$(git -C "$repo" rev-parse HEAD)
 }
 
-# check_case NAME WANT_CODE WANT_TEXT SETUP [SHA_MODE]
-# SETUP is a shell command that runs in the repo before the guard. WANT_TEXT is
-# a fixed text that the output must contain, or empty for none. SHA_MODE is
-# empty (GITHUB_SHA is the commit), unset or wrong.
-check_case() {
-  local name=$1 want_code=$2 want_text=$3 setup=$4 sha_mode=${5:-}
-  local out code=0
-  total=$((total + 1))
-  new_repo
-  (cd "$repo" && eval "$setup") >/dev/null 2>&1 || {
-    record_failure "$name: the setup failed"
-    return
-  }
-  case $sha_mode in
-    unset) out=$(cd "$repo" && env -u GITHUB_SHA bash -eo pipefail "$tmp/run.sh" 2>&1) || code=$? ;;
-    wrong) out=$(cd "$repo" && GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 bash -eo pipefail "$tmp/run.sh" 2>&1) || code=$? ;;
-    *) out=$(cd "$repo" && GITHUB_SHA=$sha bash -eo pipefail "$tmp/run.sh" 2>&1) || code=$? ;;
+# run_guard SHA_MODE: runs the run block in the repo. SHA_MODE good sets
+# GITHUB_SHA to the commit, unset leaves it out and wrong sets a wrong one.
+# check_case runs it in a subshell, so the cd does not leak.
+run_guard() {
+  cd "$repo" || return
+  case $1 in
+    good) GITHUB_SHA=$sha bash -eo pipefail "$tmp/run.sh" ;;
+    unset) env -u GITHUB_SHA bash -eo pipefail "$tmp/run.sh" ;;
+    wrong) GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 bash -eo pipefail "$tmp/run.sh" ;;
+    *) echo "run_guard: unknown SHA_MODE '$1'" >&2 && return 2 ;;
   esac
-  if [ "$want_code" = nonzero ]; then
-    if [ "$code" -eq 0 ]; then
-      record_failure "$name: want a non-zero exit code, got 0: $out"
-      return
-    fi
-  elif [ "$code" -ne "$want_code" ]; then
-    record_failure "$name: want exit code $want_code, got $code: $out"
-    return
-  fi
-  if [ -n "$want_text" ] && ! printf '%s\n' "$out" | grep -qF -- "$want_text"; then
-    record_failure "$name: the output lacks '$want_text': $out"
-  fi
+}
+
+# guard_case NAME WANT_CODE WANT_TEXT SHA_MODE SETUP [ARGS...]
+# SETUP runs with ARGS in a new repo before the guard. WANT_CODE and WANT_TEXT
+# are as in check_case.
+guard_case() {
+  local name=$1 want_code=$2 want_text=$3 sha_mode=$4
+  shift 4
+  new_repo || fail "$name: new_repo failed"
+  run_setup "$name" in_dir "$repo" "$@"
+  check_case "$name" "$want_code" "$want_text" run_guard "$sha_mode"
 }
 
 p=.github/scripts/verify-and-publish.sh
 o=.github/scripts/other.sh
-edit_p="echo '# edit' >>$p"
-edit_o="echo '# edit' >>$o"
+
+# edit FILE [CMD [ARGS...]] adds a line to FILE, then runs CMD.
+edit() {
+  echo '# edit' >>"$1" || return
+  shift
+  [ "$#" -eq 0 ] || "$@"
+}
+
+# add_new adds an untracked file to .github/scripts.
+add_new() { echo x >.github/scripts/new.sh; }
+
+# ignore_new adds a file to .github/scripts that .git/info/exclude ignores.
+ignore_new() { echo new.sh >>.git/info/exclude && add_new; }
 
 # replace_commit edits the publish script, makes a commit object with the
 # edited tree and writes a replace ref from the tagged commit to it. Then git
 # shows the edited script as the content of the tagged commit.
 replace_commit() {
-  echo '# edit' >>"$p"
-  git add "$p"
-  git replace "$sha" "$(git commit-tree "$(git write-tree)" -m evil)"
+  edit "$p" git add "$p" &&
+    git replace "$sha" "$(git commit-tree "$(git write-tree)" -m evil)"
 }
 
 # hide_by_filter edits the publish script and adds a clean filter that gives
 # git the tagged content, so git diff and git hash-object see no change.
 hide_by_filter() {
-  echo '# edit' >>"$p"
-  git config filter.fake.clean "cat >/dev/null; git cat-file blob $sha:$p"
-  echo "$p filter=fake" >>.git/info/attributes
+  edit "$p" &&
+    git config filter.fake.clean "cat >/dev/null; git cat-file blob $sha:$p" &&
+    echo "$p filter=fake" >>.git/info/attributes
 }
 
-check_case "clean tree" 0 "" ":"
-check_case "publish script edited" 1 "The build changed .github/scripts" "$edit_p"
-check_case "publish script edited and staged" 1 "The build changed .github/scripts" "$edit_p; git add $p"
-check_case "publish script edited, assume-unchanged" 1 "The build changed $p" "$edit_p; git update-index --assume-unchanged $p"
-check_case "publish script edited, skip-worktree" 1 "The build changed $p" "$edit_p; git update-index --skip-worktree $p"
-check_case "other script edited, assume-unchanged" 1 "as hidden" "$edit_o; git update-index --assume-unchanged $o"
-check_case "other script edited, skip-worktree" 1 "as hidden" "$edit_o; git update-index --skip-worktree $o"
-check_case "new untracked file" 1 "added a file" "echo x >.github/scripts/new.sh"
-check_case "new ignored file" 1 "added a file" "echo new.sh >>.git/info/exclude; echo x >.github/scripts/new.sh"
-check_case "mode change on the other script" 1 "The build changed .github/scripts" "chmod -x $o"
-check_case "file outside .github/scripts edited" 0 "" "echo more >>README.md"
-check_case "the build committed a change" 1 "The build changed .github/scripts" "$edit_p; git commit -q -am build"
-check_case "publish script edited, replace ref" 1 "The build changed .github/scripts" "replace_commit"
-check_case "publish script edited, clean filter" 1 "The build changed $p" "hide_by_filter"
-check_case "GITHUB_SHA unset" nonzero "" ":" unset
-check_case "GITHUB_SHA wrong" nonzero "" ":" wrong
+guard_case "clean tree" 0 "" good true
+guard_case "publish script edited" 1 "The build changed .github/scripts" good edit "$p"
+guard_case "publish script edited and staged" 1 "The build changed .github/scripts" good edit "$p" git add "$p"
+guard_case "publish script edited, assume-unchanged" 1 "The build changed $p" good edit "$p" git update-index --assume-unchanged "$p"
+guard_case "publish script edited, skip-worktree" 1 "The build changed $p" good edit "$p" git update-index --skip-worktree "$p"
+guard_case "other script edited, assume-unchanged" 1 "as hidden" good edit "$o" git update-index --assume-unchanged "$o"
+guard_case "other script edited, skip-worktree" 1 "as hidden" good edit "$o" git update-index --skip-worktree "$o"
+guard_case "new untracked file" 1 "added a file" good add_new
+guard_case "new ignored file" 1 "added a file" good ignore_new
+guard_case "mode change on the other script" 1 "The build changed .github/scripts" good chmod -x "$o"
+guard_case "file outside .github/scripts edited" 0 "" good edit README.md
+guard_case "the build committed a change" 1 "The build changed .github/scripts" good edit "$p" git commit -q -am build
+guard_case "publish script edited, replace ref" 1 "The build changed .github/scripts" good replace_commit
+guard_case "publish script edited, clean filter" 1 "The build changed $p" good hide_by_filter
+guard_case "GITHUB_SHA unset" nonzero "GITHUB_SHA: unbound variable" unset true
+guard_case "GITHUB_SHA wrong" nonzero "The build changed .github/scripts" wrong true
 
-if [ "$failed" -ne 0 ]; then
-  echo "release-guard-test: $failed of $total cases failed" >&2
-  exit 1
-fi
-echo "release-guard-test: all $total cases pass"
+harness_footer release-guard-test

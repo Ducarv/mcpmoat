@@ -35,10 +35,15 @@ import (
 //   - nothing follows the document (a second Decode gives io.EOF);
 //   - the document ends with one newline;
 //   - schema_version is report.SchemaVersion;
-//   - the document validates against the schema file of that version.
+//   - the document validates against the schema file of that version;
+//   - every finding and diff has a server_index that names its server (see
+//     assertServerIndexes).
 //
 // The schema check uses the generic form of the document, so a list that is
-// null instead of [] fails it.
+// null instead of [] fails it. The server_index check runs here, so that every
+// test that reads scan --json output also checks the index: a row that is
+// built without an index points at servers[0], and only a check of each
+// document finds that.
 func decodeScanJSON(t *testing.T, stdout string) report.ScanReport {
 	t.Helper()
 
@@ -66,6 +71,7 @@ func decodeScanJSON(t *testing.T, stdout string) report.ScanReport {
 	if err := reporttest.Schema(t).Validate(generic); err != nil {
 		t.Errorf("stdout does not follow %s: %v\nstdout:\n%s", reporttest.SchemaPath(), err, stdout)
 	}
+	assertServerIndexes(t, doc)
 	return doc
 }
 
@@ -1434,4 +1440,166 @@ func TestScanJSONNoAccept(t *testing.T) {
 			t.Errorf("terminal hints = %+v, want one hint for alpha", hints)
 		}
 	})
+}
+
+// serverIndexOf returns the position of the one server of doc whose name is
+// name. It fails the test when no server or more than one server has that
+// name.
+func serverIndexOf(t *testing.T, doc report.ScanReport, name string) int {
+	t.Helper()
+	index := -1
+	for i, s := range doc.Servers {
+		if s.Name != name {
+			continue
+		}
+		if index >= 0 {
+			t.Fatalf("servers %d and %d are both named %q, want one", index, i, name)
+		}
+		index = i
+	}
+	if index < 0 {
+		t.Fatalf("no server is named %q; servers = %v", name, serverNames(doc))
+	}
+	return index
+}
+
+// laterServerIndex returns the position of the one server of doc whose name is
+// name, like serverIndexOf. It also fails the test when that position is 0: a
+// test that checks server_index needs a server after the first one, because a
+// wrong index of 0 would pass for the first server.
+func laterServerIndex(t *testing.T, doc report.ScanReport, name string) int {
+	t.Helper()
+	index := serverIndexOf(t, doc, name)
+	if index < 1 {
+		t.Fatalf("%s is at position %d, want 1 or more: the test needs a server after the first one", name, index)
+	}
+	return index
+}
+
+// assertServerIndexes checks the server_index of every finding and every diff
+// of doc: it is a position in doc.Servers, and the server at that position has
+// the server name of the row. The check compares the two names as they are in
+// the document, and WriteJSON cuts both in the same way, so a long or odd name
+// does not break it. decodeScanJSON calls it on every document.
+func assertServerIndexes(t *testing.T, doc report.ScanReport) {
+	t.Helper()
+	check := func(what string, i, index int, server string) {
+		t.Helper()
+		if index < 0 || index >= len(doc.Servers) {
+			t.Errorf("%s[%d].server_index = %d, want 0 to %d", what, i, index, len(doc.Servers)-1)
+			return
+		}
+		if got := doc.Servers[index].Name; got != server {
+			t.Errorf("%s[%d] (server %q) has server_index %d, but servers[%d].name = %q", what, i, server, index, index, got)
+		}
+	}
+	for i, f := range doc.Findings {
+		check("findings", i, f.ServerIndex, f.Server)
+	}
+	for i, d := range doc.Diffs {
+		check("diffs", i, d.ServerIndex, d.Server)
+	}
+}
+
+// rowsAfterFirstServer returns the number of findings and of diffs of doc whose
+// server_index is 1 or more. A test uses it to check that it covers a server
+// after the first one: with rows of the first server only, a wrong index of 0
+// would still pass assertServerIndexes.
+func rowsAfterFirstServer(doc report.ScanReport) (findings, diffs int) {
+	for _, f := range doc.Findings {
+		if f.ServerIndex > 0 {
+			findings++
+		}
+	}
+	for _, d := range doc.Diffs {
+		if d.ServerIndex > 0 {
+			diffs++
+		}
+	}
+	return findings, diffs
+}
+
+// TestScanJSONServerIndex checks server_index (schema version 4) on scans
+// with several servers: the config rows of two fixtures (--no-connect), and
+// the config, tool rule and pin rows and the diffs of a connect scan. Every
+// row must point to the server that it is about, and each case must have rows
+// of a server after the first one, so that an index that is always 0 fails.
+func TestScanJSONServerIndex(t *testing.T) {
+	t.Parallel()
+
+	// noConnect runs "scan --no-connect --json" on a copy of the fixture dir.
+	noConnect := func(dir string) func(t *testing.T) string {
+		return func(t *testing.T) string {
+			t.Helper()
+			home, work := discovertest.CopyFixture(t, dir)
+			c, stdout, stderr := dirsCLI(t, home, work)
+			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--json")
+			if code != exitOK && code != exitFindings {
+				t.Fatalf("exit code = %d, want %d or %d; stderr:\n%s", code, exitOK, exitFindings, errOut)
+			}
+			return out
+		}
+	}
+
+	tests := []struct {
+		name string
+		// run runs the scan and returns its stdout.
+		run       func(t *testing.T) string
+		wantDiffs bool
+	}{
+		{name: "config rows of the full fixture", run: noConnect(fixtureDir("all", "full"))},
+		{name: "config rows of the dangerous fixture", run: noConnect(testdataPath("configs", "dangerous"))},
+		{
+			name: "pin, tool and config rows and diffs of a connect scan",
+			run: func(t *testing.T) string {
+				t.Helper()
+				// gamma has a config finding (MOAT-T4-003, an npx package
+				// with no version, see failOnMediumServer) on top of its tool
+				// and pin rows.
+				e := newPinEnv(t, map[string]any{
+					"alpha": map[string]any{"command": "npx"},
+					"beta":  map[string]any{"command": "npx"},
+					"gamma": failOnMediumServer,
+				})
+				v1 := map[string][]inspect.Tool{
+					"alpha": {mkTool("a1", "Add.")},
+					"beta":  {mkTool("b1", "Echo.")},
+					"gamma": {mkTool("g1", "Log.")},
+				}
+				if got := e.scan(fakeServers(v1)); got.code != exitFindings && got.code != exitOK {
+					t.Fatalf("first scan: exit code = %d; stderr:\n%s", got.code, got.stderr)
+				}
+				v2 := map[string][]inspect.Tool{
+					"alpha": {mkTool("a1", "Add. Changed.")},
+					"beta":  {mkTool("b1", "Echo."), mkTool("b2", "New.")},
+					"gamma": {mkTool("g1", "Log. Changed."), poisonedTool("g2")},
+				}
+				got := e.scan(fakeServers(v2), "--json")
+				if got.code != exitFindings {
+					t.Fatalf("second scan: exit code = %d, want %d; stderr:\n%s", got.code, exitFindings, got.stderr)
+				}
+				return got.stdout
+			},
+			wantDiffs: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// decodeScanJSON checks that every row points to its server.
+			doc := decodeScanJSON(t, tt.run(t))
+
+			if len(doc.Servers) < 2 {
+				t.Fatalf("servers = %v, want 2 or more", serverNames(doc))
+			}
+			findingsAfter, diffsAfter := rowsAfterFirstServer(doc)
+			if findingsAfter == 0 {
+				t.Errorf("no finding has a server_index of 1 or more (%d findings), want rows of a later server", len(doc.Findings))
+			}
+			if tt.wantDiffs && diffsAfter == 0 {
+				t.Errorf("no diff has a server_index of 1 or more (%d diffs), want diffs of a later server", len(doc.Diffs))
+			}
+		})
+	}
 }

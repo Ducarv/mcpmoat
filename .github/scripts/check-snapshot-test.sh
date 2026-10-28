@@ -6,19 +6,10 @@
 # It needs go, jq and file, and sha256sum or shasum, because check-snapshot.sh
 # needs them, and it runs go env itself.
 set -euo pipefail
-
-src=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-
-# fail prints an error to stderr and stops the script. In GitHub Actions it
-# also makes an annotation.
-fail() {
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::error::$*" >&2
-  else
-    echo "$*" >&2
-  fi
-  exit 1
-}
+# shellcheck source-path=SCRIPTDIR source=test-harness.sh
+. "$(dirname -- "$0")/test-harness.sh"
+CDPATH='' cd -- "$(dirname -- "$0")/../.."
+src=$PWD
 
 [ -f "$src/dist/checksums.txt" ] || fail "dist/ is missing: run goreleaser release --snapshot --clean first"
 
@@ -36,9 +27,6 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "${tmp:?}"' EXIT
-
-failed=0
-total=0
 
 # archive prints the name of the archive for a target in the copy of dist/.
 archive() {
@@ -99,63 +87,46 @@ change_version() {
   jq '.version = "9.9.9"' dist/metadata.json >dist/metadata.new && mv dist/metadata.new dist/metadata.json
 }
 
-# check_case copies check-snapshot.sh and dist/ to a new tree, changes the
-# copy with the command after the message, and runs the script in the tree.
-# check-snapshot.sh goes to the directory of its own path in the tree, because
-# it uses "cd ../.." from there. The case passes when the exit code is the
-# wanted one. A case that wants exit 1 also needs the message to contain the
-# text of $3, so that it fails for the reason in its name.
-check_case() {
-  local name=$1 want=$2 msg=$3 got=0 out
+# snapshot_case NAME WANT_CODE WANT_TEXT SETUP [ARGS...] copies
+# check-snapshot.sh and dist/ to a new tree, changes the copy with SETUP, and
+# runs the script in the tree. check-snapshot.sh goes to the directory of its
+# own path in the tree, because it uses "cd ../.." from there. A failed setup
+# stops the script and names the case.
+snapshot_case() {
+  local name=$1 want_code=$2 want_text=$3
   shift 3
-  total=$((total + 1))
   rm -rf "${tmp:?}/w"
   mkdir -p "$tmp/w/.github/scripts"
   cp "$src/.github/scripts/check-snapshot.sh" "$tmp/w/.github/scripts/"
   cp -R "$src/dist" "$tmp/w/dist"
-  if ! (cd "$tmp/w" && "$@"); then
-    echo "FAIL: $name: the change to the copy failed" >&2
-    failed=$((failed + 1))
-    return
-  fi
-  out=$("$tmp/w/.github/scripts/check-snapshot.sh" 2>&1) || got=$?
-  if [ "$got" != "$want" ]; then
-    echo "FAIL: $name: exit $got, want $want: $out" >&2
-    failed=$((failed + 1))
-  elif [ "$want" = 1 ] && [[ $out != *"$msg"* ]]; then
-    echo "FAIL: $name: the message lacks '$msg': $out" >&2
-    failed=$((failed + 1))
-  fi
+  run_setup "$name" in_dir "$tmp/w" "$@"
+  check_case "$name" "$want_code" "$want_text" "$tmp/w/.github/scripts/check-snapshot.sh"
 }
 
 # The real snapshot must pass.
-check_case "real snapshot" 0 "" true
+snapshot_case "real snapshot" 0 "" true
 
 # The archives.
-check_case "extra archive" 1 "expected only the archives for" extra_archive
-check_case "missing archive" 1 "expected 1 archive for linux_arm64 in dist/, found 0" drop_archive linux_arm64
-check_case "changed archive" 1 "dist/checksums.txt does not match the archives" change_archive
+snapshot_case "extra archive" 1 "expected only the archives for" extra_archive
+snapshot_case "missing archive" 1 "expected 1 archive for linux_arm64 in dist/, found 0" drop_archive linux_arm64
+snapshot_case "changed archive" 1 "dist/checksums.txt does not match the archives" change_archive
 
 # checksums.txt.
-check_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found $(($(wc -l <"$src/dist/checksums.txt") - 1))" drop_checksum_line
+snapshot_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found $(($(wc -l <"$src/dist/checksums.txt") - 1))" drop_checksum_line
 
 # The binaries.
-check_case "Linux binary is not statically linked" 1 "is not statically linked" dynamic_linux_binary
+snapshot_case "Linux binary is not statically linked" 1 "is not statically linked" dynamic_linux_binary
 
 # artifacts.json and metadata.json. On every host, the first lookup that fails
 # is the one for the host binary. check-snapshot.sh looks up linux amd64, then
 # linux arm64, then the host. On a linux/amd64 host the first lookup is the host
 # binary. On a linux/arm64 host the second is. On macOS the third is. So the
 # first message names the host in all cases.
-check_case "missing Binary entry for this host" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got '')" drop_host_binary
-check_case "Binary file of this host is missing on disk" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got 'dist/" delete_host_binary
-check_case "missing artifacts.json" 1 "dist/artifacts.json is missing" rm dist/artifacts.json
-check_case "missing checksums.txt" 1 "dist/checksums.txt is missing" rm dist/checksums.txt
-check_case "missing metadata.json" 1 "dist/metadata.json is missing" rm dist/metadata.json
-check_case "version in metadata.json differs from the binary" 1 "version output does not start with" change_version
+snapshot_case "missing Binary entry for this host" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got '')" drop_host_binary
+snapshot_case "Binary file of this host is missing on disk" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got 'dist/" delete_host_binary
+snapshot_case "missing artifacts.json" 1 "dist/artifacts.json is missing" rm dist/artifacts.json
+snapshot_case "missing checksums.txt" 1 "dist/checksums.txt is missing" rm dist/checksums.txt
+snapshot_case "missing metadata.json" 1 "dist/metadata.json is missing" rm dist/metadata.json
+snapshot_case "version in metadata.json differs from the binary" 1 "version output does not start with" change_version
 
-if [ "$failed" -ne 0 ]; then
-  echo "check-snapshot-test: $failed of $total cases failed" >&2
-  exit 1
-fi
-echo "check-snapshot-test: all $total cases pass"
+harness_footer check-snapshot-test

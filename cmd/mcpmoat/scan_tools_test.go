@@ -128,6 +128,13 @@ func budgetJSONRow(server, severity string, notChecked, total int) report.JSONFi
 	}
 }
 
+// atServer returns f with server_index set to index, the position of the
+// server of f in the "servers" list (see twoServers for the order).
+func atServer(f report.JSONFinding, index int) report.JSONFinding {
+	f.ServerIndex = index
+	return f
+}
+
 // jsonRowsOf returns the rows of rows whose rule ID is ruleID, in order. It
 // returns nil when there is none.
 func jsonRowsOf(rows []report.JSONFinding, ruleID string) []report.JSONFinding {
@@ -276,7 +283,8 @@ func TestScanToolsRuleRows(t *testing.T) {
 		want := []report.JSONFinding{
 			toolRow("MOAT-T1-001", "high", "srv-a", "read_file", "description"),
 			toolRow("MOAT-T1-009", "high", "srv-a", "write_file", "schema"),
-			toolRow("MOAT-T1-001", "high", "srv-b", "fetch_url", "description"),
+			// srv-b is the second server, so its rows have server_index 1.
+			atServer(toolRow("MOAT-T1-001", "high", "srv-b", "fetch_url", "description"), 1),
 		}
 		if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
 			t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
@@ -672,7 +680,8 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 		assertScanRun(t, got, scanWant{code: exitFindings})
 		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned(e)...))
 		assertNoToolText(t, got.stderr, toolNames...)
-		want := []report.JSONFinding{budgetJSONRow("srv-a", "high", 3, 3), budgetJSONRow("srv-b", "high", 2, 2)}
+		// srv-b is the second server, so its row has server_index 1.
+		want := []report.JSONFinding{budgetJSONRow("srv-a", "high", 3, 3), atServer(budgetJSONRow("srv-b", "high", 2, 2), 1)}
 		if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
 			t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
 		}
@@ -2329,7 +2338,7 @@ func TestScanToolsStepBudgetScan(t *testing.T) {
 			})
 			assertScanRun(t, jsonRun, scanWant{code: tt.code, stderr: wantJSONStderr})
 			assertStderrLines(t, jsonRun.stderr, exactLines(wantJSONStderr))
-			want := []report.JSONFinding{budgetJSONRow("srv-a", tt.severity, 3, 3), budgetJSONRow("srv-b", tt.severity, 2, 2)}
+			want := []report.JSONFinding{budgetJSONRow("srv-a", tt.severity, 3, 3), atServer(budgetJSONRow("srv-b", tt.severity, 2, 2), 1)}
 			if rows := jsonFindings(t, jsonRun.stdout); !slices.Equal(rows, want) {
 				t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
 			}

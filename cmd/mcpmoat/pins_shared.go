@@ -354,13 +354,22 @@ func compareMask(r *discover.TextRedactor) func(string) string {
 }
 
 // diffOf returns the diff of one change for the report. The change must have a
-// diff (see appendDiff). server is the name that the report shows.
+// diff (see appendDiff). ref is the server: its Name is the name that the report
+// shows, and its Index is the position of the server in the scanned list
+// (report.ToolDiff.ServerIndex).
 //
 // The tool name of the diff is ch.Tool and never ch.RawTool. ch must come from
 // pins.CompareMasked with the mask of the server (see compareMask), so ch.Tool
 // and ch.Diff show each secret value of the server as discover.Mask.
-func diffOf(server string, ch pins.Change) report.ToolDiff {
-	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated, IsNote: ch.DiffIsNote()}
+func diffOf(ref report.ServerRef, ch pins.Change) report.ToolDiff {
+	d := report.ToolDiff{
+		Server:      ref.Name,
+		ServerIndex: ref.Index,
+		Tool:        ch.Tool,
+		Diff:        ch.Diff,
+		Truncated:   ch.Truncated,
+		IsNote:      ch.DiffIsNote(),
+	}
 	switch ch.Kind {
 	case pins.KindNew:
 		d.Kind = report.DiffNew
@@ -384,16 +393,19 @@ func diffOf(server string, ch pins.Change) report.ToolDiff {
 // diffOf). The warning and the diff print ch.Tool, the masked name, and the
 // cut of the warning (cutName) comes after the mask, so it cannot leave a part
 // of a secret value.
-func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch pins.Change) []report.ToolDiff {
+//
+// ref is the server. Its Index becomes server_index in scan --json (see
+// diffOf), and the stderr warning does not use it. The warning uses ref.Name.
+func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, ref report.ServerRef, ch pins.Change) []report.ToolDiff {
 	if ch.Diff == "" {
 		return diffs
 	}
 	if ch.Truncated {
 		// ch.Tool is the masked name; never print ch.RawTool.
 		c.warnf(cmd, "the diff of tool %s on server %s was cut at the size limit; review the full tool before you accept it",
-			cutName(ch.Tool), cutName(server))
+			cutName(ch.Tool), cutName(ref.Name))
 	}
-	return append(diffs, diffOf(server, ch))
+	return append(diffs, diffOf(ref, ch))
 }
 
 // cutName returns an untrusted name (a server or a tool) escaped and cut for a

@@ -415,6 +415,45 @@ func TestSchemaRejectsBadDocuments(t *testing.T) {
 	}
 }
 
+// TestSchemaServerIndex checks that the schema needs server_index in a finding
+// and in a diff, as an integer of at least 0. Each bad value has a control:
+// the same document with a valid index validates, so the error comes from the
+// index and from nothing else.
+func TestSchemaServerIndex(t *testing.T) {
+	t.Parallel()
+	rs := reporttest.Schema(t)
+	valid := writeJSON(t, richReport())
+
+	bad := []struct {
+		name   string
+		mutate func(elem map[string]any)
+	}{
+		{"missing", func(e map[string]any) { delete(e, "server_index") }},
+		{"negative", func(e map[string]any) { e["server_index"] = -1 }},
+		{"a string", func(e map[string]any) { e["server_index"] = "0" }},
+		{"a float", func(e map[string]any) { e["server_index"] = 1.5 }},
+	}
+	for _, list := range []string{"findings", "diffs"} {
+		for _, tt := range bad {
+			t.Run(list+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				doc := decodeAny(t, valid).(map[string]any)
+				elem := doc[list].([]any)[0].(map[string]any)
+				tt.mutate(elem)
+				if err := rs.Validate(doc); err == nil {
+					t.Errorf("Validate() = nil, want an error for server_index %s in %s", tt.name, list)
+				}
+				for _, ok := range []any{0, 3} {
+					elem["server_index"] = ok
+					if err := rs.Validate(doc); err != nil {
+						t.Errorf("control with server_index %v in %s: Validate() = %v, want nil", ok, list, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // A smaller hostile report must still produce a document that the schema
 // accepts, with fields_truncated true.
 func TestWriteJSONHostileReportValidatesAgainstSchema(t *testing.T) {
