@@ -250,7 +250,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 }
 
 // saveAccepted is the locked part of acceptTools, like savePinned for scan. It
-// reads pins.json a third time, now with the lock on the pins directory (see
+// reads pins.json a third time, now with the pins lock (see
 // readPinsLocked), sets the pins of the server id to snap, saves the file and
 // returns the exit code. name is the server name, already escaped and cut for
 // the messages. tools are the tools that snap pins. shown is the store that
@@ -269,21 +269,24 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // saveAccepted writes nothing on stdout or stderr while it holds the lock, so
 // a blocked stdout or stderr never holds the lock. While it holds the lock, it
 // only notes what to print: whether the pins changed, and the error of Set or
-// Save. It releases the lock right after the Save, or right after the step
-// that failed, and only then prints, in this order: the warning, the error,
-// and on success the new pins file notice and the "accepted" line.
+// Save (a saveFailure). It releases the lock right after the Save, or right
+// after the step that failed, and only then prints, in this order: the
+// warning, the error, and on success the new pins file notice and the
+// "accepted" line.
 //
 // This is the second check for a removed pins file (see acceptTools). When the
 // file existed at the read for the diffs (shown), and the locked read does not
-// find it, it was removed while pin showed the diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
-// and gives exit code 2. A file that is missing at every read is a real first
-// run: the save creates it.
+// find it, it was removed while pin showed the diffs: saveAccepted saves
+// nothing, prints pinsRemovedText after the release and gives exit code 2. A
+// file that is missing at every read is a real first run: the save creates it.
 //
 // A Set that would make pins.json larger than its size limit
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
-// tells the user to remove old servers. When the save created a new pins file,
-// saveAccepted prints a notice before the "accepted" line (see
-// printNewPinsFile).
+// tells the user to remove old servers. When a project server does not fit in
+// the share of the project servers (pins.ErrProjectShareFull), the message
+// says so and tells the user to remove old project servers (see fullKind.text
+// and fullKind.fix). When the save created a new pins file, saveAccepted
+// prints a notice before the "accepted" line (see printNewPinsFile).
 func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
 	// release is never nil. Each path below calls release before it prints.
@@ -305,10 +308,11 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	changed := pinsChanged(shown, store, id)
 	counts := changeCounts(store, id, tools)
 
-	setErr := store.Set(id, snap)
-	var saveErr error
-	if setErr == nil {
-		saveErr = store.Save()
+	var fail saveFailure
+	if err := store.Set(id, snap); err != nil {
+		fail = saveFailure{what: "cannot set the pins of server " + name, err: err}
+	} else if err := store.Save(); err != nil {
+		fail = saveFailure{what: "cannot save the pins file", err: err}
 	}
 	// The last step that needs the lock is done. Free the lock before the
 	// output: a blocked pipe must not keep other runs from the pins file.
@@ -317,16 +321,16 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	if changed {
 		c.warnf("pin", "another mcpmoat run changed the pins of server %s while pin showed the diff; the diff is against the older pins", name)
 	}
-	if errors.Is(setErr, pins.ErrStoreFull) {
-		c.cmdPrintf("pin", "cannot pin %s: %s; remove servers you no longer use from pins.json", name, pinsFullText)
+	// Only Set returns ErrStoreFull. It gets its own fixed line, so this check
+	// comes before the general one. A refusal for the project share also
+	// wraps ErrStoreFull. Only project servers count toward the share, so
+	// the text and the fix of the kind name them then.
+	if kind := fullKindOf(fail.err); kind != notFull {
+		c.cmdPrintf("pin", "cannot pin %s: %s; %s", name, kind.text(), kind.fix())
 		return exitError
 	}
-	if setErr != nil {
-		c.cmdErr("pin", "cannot set the pins of server "+name, setErr)
-		return exitError
-	}
-	if saveErr != nil {
-		c.cmdErr("pin", "cannot save the pins file", saveErr)
+	if fail.failed() {
+		c.cmdErr("pin", fail.what, fail.err)
 		return exitError
 	}
 	if !store.Existed() {

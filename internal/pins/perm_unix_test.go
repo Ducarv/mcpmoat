@@ -252,9 +252,11 @@ func TestCheckOwnerAndModeExactMessages(t *testing.T) {
 	}
 }
 
-// TestCheckDirPermNoVerdict covers the paths that checkDirPerm does not judge:
-// a missing path, a path that is not a directory and a Stat error.
-func TestCheckDirPermNoVerdict(t *testing.T) {
+// TestCheckDirPermByPathNoVerdict covers the paths that checkDirPermByPath
+// does not judge: a missing path, a path that is not a directory and a Stat
+// error. It only adds a hint to an open error, so it returns nil for all of
+// them, and the caller reports the open error.
+func TestCheckDirPermByPathNoVerdict(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	plain := filepath.Join(root, "plain")
@@ -271,26 +273,56 @@ func TestCheckDirPermNoVerdict(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		path    string
-		wantErr error // nil means no error
+		name string
+		path string
 	}{
-		{"missing path", filepath.Join(root, "nope", "pins"), nil},
-		{"path below a regular file (ENOTDIR)", filepath.Join(plain, "pins"), nil},
-		{"regular file 0666 is not a directory", plain, nil},
-		{"symlink loop (ELOOP)", loopA, syscall.ELOOP},
+		{"missing path", filepath.Join(root, "nope", "pins")},
+		{"path below a regular file (ENOTDIR)", filepath.Join(plain, "pins")},
+		{"regular file 0666 is not a directory", plain},
+		{"symlink loop (ELOOP)", loopA},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkDirPerm(tt.path)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("checkDirPerm(%q) error = %v, want %v", tt.path, err, tt.wantErr)
+			// A foreign uid too: no case here is a permission verdict.
+			for _, uid := range []int{os.Geteuid(), os.Geteuid() + 1} {
+				if err := checkDirPermByPath(tt.path, uid); err != nil {
+					t.Errorf("checkDirPermByPath(%q, %d) error = %v, want nil", tt.path, uid, err)
+				}
 			}
-			// No case here is a permission verdict.
-			if errors.Is(err, ErrInsecurePermissions) {
-				t.Errorf("error = %v, must not wrap ErrInsecurePermissions", err)
+		})
+	}
+}
+
+// TestCheckDirPermByPath checks the verdicts of checkDirPermByPath on a
+// directory: the rule of checkOwnerAndMode, with a foreign owner faked by an
+// injected uid.
+func TestCheckDirPermByPath(t *testing.T) {
+	t.Parallel()
+	me := os.Geteuid()
+	tests := []struct {
+		name string
+		mode os.FileMode
+		uid  int
+		want []string // nil means no error
+	}{
+		{"own 0700", 0o700, me, nil},
+		{"own 0755", 0o755, me, nil},
+		{"own 0777", 0o777, me, []string{"pins directory {path} is not safe", "mode 0777", msgWritable, msgChmod}},
+		{"foreign 0700", 0o700, me + 1, []string{"pins directory {path} is not safe", "mode 0700", msgForeign, msgChown}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := newPinsDir(t, tt.mode)
+			err := checkDirPermByPath(dir, tt.uid)
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("checkDirPermByPath() error = %v, want nil", err)
+				}
+				return
 			}
+			wantInsecure(t, err, dir, tt.want...)
 		})
 	}
 }
@@ -318,7 +350,7 @@ func TestPinsDirSymlinkFollowsTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		mode    os.FileMode
-		wantErr bool // the target is unsafe, so Load and checkDirPerm refuse it
+		wantErr bool // the target is unsafe, so Load and checkDirPermByPath refuse it
 	}{
 		{0o700, false},
 		{0o777, true},
@@ -334,11 +366,11 @@ func TestPinsDirSymlinkFollowsTarget(t *testing.T) {
 				t.Fatalf("Symlink() error = %v", err)
 			}
 
-			checkErr := checkDirPerm(link)
+			checkErr := checkDirPermByPath(link, os.Geteuid())
 			_, loadErr := Load(filepath.Join(link, "pins.json"))
 			if !tt.wantErr {
 				if checkErr != nil || loadErr != nil {
-					t.Errorf("checkDirPerm() error = %v, Load() error = %v, want nil for a safe target", checkErr, loadErr)
+					t.Errorf("checkDirPermByPath() error = %v, Load() error = %v, want nil for a safe target", checkErr, loadErr)
 				}
 				return
 			}
@@ -544,22 +576,6 @@ func TestSaveRefusesInsecureDir(t *testing.T) {
 	}
 }
 
-// TestWriteFileAtomicChecksDir checks that the write itself checks the
-// directory after MkdirAll, so a directory that appeared after a caller's
-// check is refused too. It writes no temp file and does not change the mode.
-func TestWriteFileAtomicChecksDir(t *testing.T) {
-	t.Parallel()
-	dir := newPinsDir(t, 0o777)
-
-	err := writeFileAtomic(filepath.Join(dir, "pins.json"), []byte(validPins))
-
-	wantInsecure(t, err, dir, "pins directory {path}", "mode 0777", msgChmod, msgWritable)
-	if got := dirNames(t, dir); len(got) != 0 {
-		t.Errorf("directory entries = %v, want none (no temp file)", got)
-	}
-	wantPerm(t, dir, 0o777)
-}
-
 func TestSaveIgnoresOldFileMode(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []os.FileMode{0o666, 0o644} {
@@ -623,7 +639,7 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-func TestCheckDirPermQuotesOddPaths(t *testing.T) {
+func TestCheckDirPermByPathQuotesOddPaths(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -643,7 +659,7 @@ func TestCheckDirPermQuotesOddPaths(t *testing.T) {
 			// The temp dir path holds no quote, so the quoted form is the parent,
 			// a slash and the quoted name, all inside one pair of quotes.
 			quoted := "'" + filepath.Dir(dir) + "/" + tt.quotedName + "'"
-			wantInsecure(t, checkDirPerm(dir), dir, "chmod go-w -- "+quoted)
+			wantInsecure(t, checkDirPermByPath(dir, os.Geteuid()), dir, "chmod go-w -- "+quoted)
 		})
 	}
 }
@@ -1496,5 +1512,43 @@ func symlink(t *testing.T, target, dir, name string) {
 	t.Helper()
 	if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
 		t.Fatalf("Symlink(%q, %q) error = %v", target, filepath.Join(dir, name), err)
+	}
+}
+
+// TestAskOwnerPrefix checks the start of the hint for each owner. An unknown
+// owner fails closed: it asks the owner or root.
+func TestAskOwnerPrefix(t *testing.T) {
+	t.Parallel()
+	info, err := os.Lstat(t.TempDir())
+	if err != nil {
+		t.Fatalf("Lstat() error = %v", err)
+	}
+	owned := func(uid uint32) fs.FileInfo { return fakeInfo{info, &syscall.Stat_t{Uid: uid}} }
+	const (
+		self  = ""
+		root  = "ask root to run "
+		owner = "ask the owner or root to run "
+	)
+	tests := []struct {
+		name string
+		info fs.FileInfo
+		uid  int
+		want string
+	}{
+		{"user owns it", owned(501), 501, self},
+		{"root owns it", owned(0), 501, root},
+		{"root owns it, run as root", owned(0), 0, self},
+		{"another user owns it", owned(4242), 501, owner},
+		{"another user owns it, run as root", owned(4242), 0, owner},
+		{"unknown owner", fakeInfo{info, nil}, 501, owner},
+		{"no info", nil, 501, owner},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := askOwnerPrefix(tt.info, tt.uid); got != tt.want {
+				t.Errorf("askOwnerPrefix() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

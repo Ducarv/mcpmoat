@@ -697,9 +697,12 @@ func TestE2ELLMRetryThenSuccess(t *testing.T) {
 				t.Errorf("stderr lines = %q, want %q", got, wantStderr)
 			}
 			// Not "retry": the temporary paths in the report hold the test name.
+			// The provider URL (a random port) and the temporary paths (a random
+			// number) can hold "429" by chance, so they are cut out first.
 			retryWords := []string{"429", "Too Many", "rate limit", e2eLLMBodyCanary, "failed"}
-			assertContainsNone(t, "stdout", stdout, retryWords)
-			assertContainsNone(t, "stderr", stderr, retryWords)
+			scrub := strings.NewReplacer(provider.srv.URL, "<provider>", home, "<home>", work, "<work>")
+			assertContainsNone(t, "stdout", scrub.Replace(stdout), retryWords)
+			assertContainsNone(t, "stderr", scrub.Replace(stderr), retryWords)
 			doc := decodeScanJSON(t, stdout)
 			if !doc.Complete || len(doc.Errors) != 0 {
 				t.Errorf("complete = %t, errors = %+v, want a complete report without errors", doc.Complete, doc.Errors)

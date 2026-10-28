@@ -116,21 +116,50 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
   directory. A parent passes the owner check when root owns it (group or other write without the
   sticky bit is still refused), and a parent with the sticky bit (as `/tmp`) passes the write
   check. The error names the path and gives a fix (see [Pins and rug pulls](pins.md)).
+- On macOS, an ACL entry of a parent directory of the pins directory lets a user or group change
+  it: an allow entry with a write right, for any user or group. A deny entry passes, so the default
+  `everyone deny delete` entry of a home directory is fine. The error names the directory and the
+  index of the entry, and the fix removes only that entry: `chmod -a# <index> <path>` (or "ask root
+  to run" it, or "ask the owner or root to run" it, when you do not own the directory).
+  `ls -led <path>` shows the entries.
 - No part of the pins path exists, or a part of it is a file.
-- Another process still holds the lock on the pins directory after 10 seconds. The command prints
+- The lock file `pins.json.lock` in the pins directory is unsafe: it is not a regular file (a
+  symlink, for example), another user owns it, its group or others have any access (mode 0600
+  passes, 0644 is refused), or on macOS an ACL entry lets a user or group open it. mcpmoat never
+  changes the mode of an existing lock file. The fix is `rm -- '<path>', then mcpmoat makes a new
+  one with mode 0600` (`rmdir -- '<path>', ...` when the lock entry is a directory). For an ACL
+  entry that comes back after that, the entry is inherited from the pins directory, and the hint
+  also gives `chmod -N -- '<directory>'`. `scan` takes the lock only when it has new servers to pin.
+- You own the lock file and it has no group or other access, but you cannot open it (mode 0400 or
+  0000, for example after a run was killed while it made the file). The error is `open the pins
+  lock file <path>: permission denied (fix: rm -- '<path>', then mcpmoat makes a new one with mode
+  0600; first run mcpmoat again, in case another run is still making the file)`.
+- The pins directory is read-only and has no lock file yet, so mcpmoat cannot create
+  `pins.json.lock`. The error names the lock file and the reason, for example `create the pins
+  lock file <path>: permission denied`. A read-only pins directory with a lock file gets past the
+  lock, and then the save fails.
+- Another process still holds the lock on `pins.json.lock` after 10 seconds. The command prints
   two lines on stderr: the read error, then a line that tells you to run the command again (see
   [Pins and rug pulls](pins.md)).
+- The pins directory was moved, removed or replaced while the command ran. Right before it replaces
+  `pins.json`, the save checks that the path still names the directory that the command opened. If
+  not, it saves nothing, and the error says `the pins directory <path> was moved, removed or
+  replaced while this command ran, and nothing was saved`.
 - `pins.json` existed at the first read of the command, but it was removed while the command ran.
   The command saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A
   real first run is not affected.
 - At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
   the file larger after the report. `scan` prints a warning for that server and still saves the
-  other servers (see [Pins and rug pulls](pins.md)).
+  other servers (see [Pins and rug pulls](pins.md)). The same applies to a project-scope server
+  that no longer fits in the share of the project servers (16 MiB).
 - `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
-  32 MiB. It prints a message that the pins file is full and saves nothing.
+  32 MiB. It prints a message that the pins file is full and saves nothing. For a project-scope
+  server past the 16 MiB share of the project servers, the message says `the project share of the
+  pins file is full (16 MiB)` and tells you to remove project servers you no longer use.
 
 A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
-not an execution error.
+not an execution error. That is also true for a first-run project-scope server past the 16 MiB
+share of the project servers.
 
 ## See also
 

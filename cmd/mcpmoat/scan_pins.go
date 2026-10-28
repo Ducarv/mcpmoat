@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -212,6 +211,9 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 	// pin selects its server among all the servers, also the ones that were
 	// not inspected.
 	setSelectors(p.res.hints, servers)
+	// After the loop: firstPin has now added every first-run server to the
+	// budget, as savePinned adds them before the user can run pin --accept.
+	p.markStoreFull()
 	return p.res
 }
 
@@ -227,7 +229,8 @@ type pinner struct {
 	// real store, to find a server that would make pins.json too large
 	// (pins.ErrStoreFull). The report is printed before the save, so this
 	// must be known before the save. Set on the copy never changes store, and
-	// the copy is never saved.
+	// the copy is never saved. markStoreFull checks the accept hints against
+	// it with CheckSet, which never changes it.
 	budget *pins.Store
 	res    pinReport
 	// handled holds the servers that this run already checked or pinned. Two
@@ -325,9 +328,13 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 }
 
 // add keeps a row, or counts it when the ignore list drops it. It returns false
-// for a dropped row, so the caller keeps no diff for it.
-func (p *pinner) add(row report.FindingRow) bool {
-	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: row.Key}
+// for a dropped row, so the caller keeps no diff for it. tool is the full tool
+// name of the row ("" for a row about the whole server). The ignore list
+// matches it, not row.Key: pinRow cuts the Key of a long name (see pinKey), so
+// an --ignore entry for the real name must still match, and an entry for the
+// cut Key must not.
+func (p *pinner) add(row report.FindingRow, tool string) bool {
+	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: tool}
 	dropped, blocked := p.ign.ignored(key)
 	if blocked && !p.warned[row.RuleID] {
 		p.warned[row.RuleID] = true
@@ -353,7 +360,7 @@ func (p *pinner) addUnverified(s discover.Server, reason, risk, fix, severity st
 	row.Related = reason
 	row.Risk = risk
 	row.Remediation = fix
-	p.add(row)
+	p.add(row, "")
 }
 
 // unverifiedSeverity returns the severity of a MOAT-T2-004 row about the server
@@ -388,6 +395,25 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 	}
 }
 
+// markStoreFull sets full on each accept hint whose new tools (h.snap) do not
+// fit in pins.json, so the hint prints no command that "pin --accept" would
+// refuse. full is shareFull when only the share of the project servers is full
+// (pins.ErrProjectShareFull), so the note of the hint names the project
+// servers, and fileFull for any other pins.ErrStoreFull (see fullKindOf).
+//
+// Each hint is checked alone with CheckSet, because pin --accept saves one
+// server at a time. CheckSet runs the checks of Set but changes nothing, so
+// p.budget stays as it is by construction. Set on p.budget itself would be
+// wrong: the budget must hold only what savePinned will save, and a hint is
+// only a proposal. Any other error from CheckSet leaves the hint as it is:
+// pin --accept reports it.
+func (p *pinner) markStoreFull() {
+	for i := range p.res.hints {
+		h := &p.res.hints[i]
+		h.full = fullKindOf(p.budget.CheckSet(h.id, h.snap))
+	}
+}
+
 // firstPin records the tools of a server that is not in the store yet, so that
 // savePinned can pin them. The store is not changed here. scan prints "pinned N
 // tools for <server>" on stderr only after savePinned saved the server (see
@@ -399,10 +425,12 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 // firstPin also adds the pins to p.budget, a copy of the store. When the pins
 // would make pins.json larger than its size limit (pins.ErrStoreFull), the
 // server is not recorded either, and it gets the same high MOAT-T2-004 finding
-// with the fixed reason reasonStoreFull. The report is printed before
-// savePinned runs, so firstPin must decide this now: otherwise the server
-// would be refused at the save with no finding in the report. The servers
-// before it stay in the budget, so the servers that fit are still pinned.
+// with the fixed reason reasonStoreFull, or reasonShareFull when only the
+// share of the project servers is full (pins.ErrProjectShareFull). The report
+// is printed before savePinned runs, so firstPin must decide this now:
+// otherwise the server would be refused at the save with no finding in the
+// report. The servers before it stay in the budget, so the servers that fit
+// are still pinned.
 func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
@@ -415,8 +443,8 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	// that Set can give here is pins.ErrStoreFull. Any other error keeps the
 	// server in the list: savePinned calls Set again, which gives the same
 	// error, and reports it there (exit code 2).
-	if err := p.budget.Set(id, snap); errors.Is(err, pins.ErrStoreFull) {
-		p.addUnverified(s, reasonStoreFull, riskServerUnverified, fixStoreFull, pins.UnverifiedSeverity(true))
+	if kind := fullKindOf(p.budget.Set(id, snap)); kind != notFull {
+		p.addUnverified(s, kind.reason(), riskServerUnverified, kind.remediation(), pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -429,9 +457,10 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // new tool, and a pinned tool whose pin cannot be checked, also gets a diff
 // (see appendDiff). The store is never changed. When at least one row is kept
 // (not ignored), compare also records the digest for the "--expect" hint
-// (see writeAcceptHints). The hint says so when a kept diff was cut, or when
-// the ignore list dropped a row: the digest covers that change, but the report
-// shows no diff for it.
+// (see writeAcceptHints), and the new pins in the hint (acceptHint.snap), so
+// that markStoreFull can check that they fit in pins.json. The hint says so
+// when a kept diff was cut, or when the ignore list dropped a row: the digest
+// covers that change, but the report shows no diff for it.
 //
 // Tools that cannot be pinned (see pinnable) cannot be accepted either, so
 // they get no hint, and every row of the server gets the fix fixNotPinnable:
@@ -457,7 +486,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		if pinErr != nil {
 			row.Remediation = fixNotPinnable
 		}
-		if !p.add(row) {
+		if !p.add(row, ch.Tool) {
 			h.ignored = true
 			continue
 		}
@@ -468,6 +497,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 	}
 	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)
+		h.snap = snap
 		p.res.hints = append(p.res.hints, h)
 	}
 }
@@ -496,6 +526,17 @@ const (
 // pinsFullText is a var, so this is a var too.
 var reasonStoreFull = pinsFullText + ", so this server is not pinned"
 
+// reasonShareFull is the reason for a first-run project server whose pins
+// would make the project servers use more than their share of pins.json
+// (pins.ErrProjectShareFull, see firstPin). It must stay shorter than
+// report.MaxShortCellRunes, like reasonStoreFull. It starts with
+// pinsShareFullText, so the size is written in one place. pinsShareFullText
+// is a var, so this is a var too. It ends with "; this server is not pinned"
+// and not with ", so this server is not pinned" like reasonStoreFull, because
+// the ", so" form has 81 runes, one more than report.MaxShortCellRunes (80),
+// and TestScanReasonsFitShortCell would fail.
+var reasonShareFull = pinsShareFullText + "; this server is not pinned"
+
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
 // addUnverified). They hold no server text.
 const (
@@ -520,6 +561,9 @@ const (
 	fixNotPinnable    = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
 	fixRelativeSource = "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."
 	fixStoreFull      = "Remove servers you no longer use from pins.json, or remove this server from the client config, then run mcpmoat scan again."
+	// fixShareFull goes with reasonShareFull. The share applies only to
+	// project servers, so the servers of the user scope still get pinned.
+	fixShareFull = "Servers of the user scope are not affected: remove project servers you no longer use from pins.json, or remove this server from its project config, then run mcpmoat scan again."
 )
 
 // pinRow returns the report row of one pin change on the server s. The caller
@@ -527,7 +571,8 @@ const (
 // IDs, because the rule set has no rule for them. The risk and the remediation
 // are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
 // have no title, so the row has an empty Title and the report leaves the
-// title out of the finding line.
+// title out of the finding line. The Key is pinKey(tool): a long tool name is
+// cut, so the caller must give the full name to add for the ignore list.
 func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   report.NewServerRef(s),
@@ -536,8 +581,21 @@ func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) repo
 		Risk:        kind.Risk(),
 		Remediation: kind.Remediation(),
 		Field:       rules.FieldTool,
-		Key:         tool,
+		Key:         pinKey(tool),
 	}
+}
+
+// pinKey returns the Key of a pin row for the tool name. An empty name stays
+// empty: a pin row with an empty Key is about the whole server, as the
+// MOAT-T2-004 rows of addUnverified are, so it does not get the noToolNameKey
+// of toolKey. Any other name gets toolKey, the same cut as the tool rule rows
+// and the LLM rows: a hostile server can send a tool name of many KiB, and the
+// text and --json reports would repeat it in full.
+func pinKey(tool string) string {
+	if tool == "" {
+		return ""
+	}
+	return toolKey(tool)
 }
 
 // outcomeSummary returns the summary entry of one outcome. findings is the
