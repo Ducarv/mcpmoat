@@ -210,15 +210,16 @@ func TestShowDiscoveredURL(t *testing.T) {
 		exp, base := expanded.String(), urlBase(expanded.String())
 		cause := errors.New("dial failed for " + base + " and " + exp + ": dial tcp dev7.example:8443: lookup dev7.example: no such host")
 
-		// serverLen marks the URL at the end of Reason as text of the cause,
-		// as classify does (see ConnectError.serverLen).
+		// serverText is the URL at the end of Reason, as text of the cause,
+		// as classify sets it (see ConnectError.serverText).
 		ce := &ConnectError{
-			Kind:      KindNetwork,
-			Server:    "srv",
-			Reason:    "cannot reach " + exp,
-			URL:       exp,
-			err:       cause,
-			serverLen: len(exp),
+			Kind:       KindNetwork,
+			Server:     "srv",
+			Reason:     "cannot reach " + exp,
+			URL:        exp,
+			err:        cause,
+			fixed:      "cannot reach ",
+			serverText: exp,
 		}
 		showDiscoveredURL(ce, expanded, discovered, nil)
 
@@ -246,7 +247,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 		discovered := discover.NewURL("https://api.example.test/${MCP_TENANT}/mcp")
 		expanded := discover.NewURL("https://api.example.test/acme7/mcp")
 		cause := errors.New("bad status from " + expanded.String() + " at api.example.test")
-		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause, serverLen: len(expanded.String())}
+		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause, fixed: "failed: ", serverText: expanded.String()}
 
 		showDiscoveredURL(ce, expanded, discovered, nil)
 

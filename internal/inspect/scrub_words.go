@@ -32,8 +32,11 @@ import (
 // was before this call, and a discover.Mask already in text is copied as it
 // is: a value such as "*" must not mask the stars of a mask again and again.
 // But a match that starts inside such a Mask and goes on past its end is a
-// value that the copy would cut in two (see maskedWordAt), so it goes too. A
-// text with no value in it comes back unchanged.
+// value that the copy would cut in two (see maskedWordAt), so it goes too.
+// The same rule means that a value glued to a value that is masked stays: with
+// the values "pw!" and "abc", "pw!abc" gives "pw!********". The bytes were in
+// the text already, and the glued rule above accepts this. A text with no
+// value in it comes back unchanged.
 //
 // The text can be large (a JSON-RPC error message of some MiB), and the
 // server controls it, so the cost must not grow with the number of values
@@ -306,7 +309,9 @@ func cutWords(text string, short []string) string {
 	}
 	kept := string(runes[:maxReasonRunes])
 	forms := wordForms(kept, short)
-	for {
+	// A text that ends with a Mask has no unmasked word at its end. Without
+	// this test, a value "*" would match the stars of the Mask one by one.
+	for !strings.HasSuffix(kept, discover.Mask) {
 		n := trailingWord(kept, forms)
 		if n == 0 {
 			break

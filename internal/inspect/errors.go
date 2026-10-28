@@ -94,12 +94,14 @@ type ConnectError struct {
 	// err is the cause. See Unwrap.
 	err error
 
-	// serverLen is the length in bytes of the end of Reason that is the
-	// scrubbed text of the cause (see classify): text that the server or the
-	// transport wrote. Reason[:len(Reason)-serverLen] is fixed text of
-	// mcpmoat, such as "network error: " or a whole httpReason. It is 0 when
-	// all of Reason is fixed text. showDiscoveredURL changes only the end.
-	serverLen int
+	// fixed and serverText make up Reason (see classify): Reason is fixed +
+	// cutWords(serverText, short). fixed is the text of mcpmoat, such as
+	// "network error: " or a whole httpReason. serverText is the text of the
+	// cause, which the server or the transport wrote, after replaceSecrets
+	// and before the cut. showDiscoveredURL needs it uncut: a URL that the
+	// cut split in two would not match as a whole. serverText is "" when
+	// all of Reason is fixed text.
+	fixed, serverText string
 }
 
 // Error returns "<Server>: <Reason> (<URL>)". The part in parentheses is
@@ -207,13 +209,9 @@ func classify(err error, srv discover.Server, ev transportEvents, lists secretLi
 		Server: srv.Name,
 		URL:    redacted,
 	}
-	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, connected, func(text string) string {
-		scrubbed := scrub(text, rawURL, redacted, lists)
-		// classifyCause puts the scrubbed text at the end of the reason, so
-		// its length marks where the fixed text ends.
-		ce.serverLen = len(scrubbed)
-		return scrubbed
-	})
+	ce.Kind, ce.fixed, ce.serverText, ce.Status = classifyCause(cause, srv, status, connected)
+	ce.serverText = replaceSecrets(ce.serverText, rawURL, redacted, lists)
+	ce.Reason = ce.fixed + cutWords(ce.serverText, lists.short)
 	ce.err = safeCause(cause, rawURL, redacted, lists)
 	return ce
 }
@@ -259,30 +257,33 @@ func isBlockedErr(err error) bool {
 
 // classifyCause finds the kind, the reason and the HTTP status of cause. It
 // is the decision table of classify. connected tells whether the session was
-// connected (see transportEvents). scrubText removes secrets from error text.
-// When classifyCause calls scrubText, reason ends with its result, after
-// fixed text only: classify relies on that (see ConnectError.serverLen).
-func classifyCause(cause error, srv discover.Server, status int, connected bool, scrubText func(string) string) (kind ConnectKind, reason string, httpStatus int) {
+// connected (see transportEvents).
+//
+// The reason has two parts. fixed is the text of mcpmoat. serverText is the
+// text of cause, as the server or the transport wrote it: classify removes
+// the secrets from it and cuts it. serverText is "" when the reason is all
+// fixed text.
+func classifyCause(cause error, srv discover.Server, status int, connected bool) (kind ConnectKind, fixed, serverText string, httpStatus int) {
 	for _, b := range blockedKinds {
 		if errors.Is(cause, b.err) {
-			return b.kind, b.reason, 0
+			return b.kind, b.reason, "", 0
 		}
 	}
 	switch {
 	case errors.Is(cause, errInvalidProxy):
-		return KindConfig, errInvalidProxy.Error(), 0
+		return KindConfig, errInvalidProxy.Error(), "", 0
 	case errors.Is(cause, context.DeadlineExceeded):
-		return KindTimeout, "timed out", 0
+		return KindTimeout, "timed out", "", 0
 	case errors.Is(cause, context.Canceled):
-		return KindTimeout, "canceled", 0
+		return KindTimeout, "canceled", "", 0
 	}
 
 	if reason, ok := tlsReason(cause); ok {
-		return KindTLS, reason, 0
+		return KindTLS, reason, "", 0
 	}
 
 	if status != 0 {
-		return KindHTTP, httpReason(srv, status, connected), status
+		return KindHTTP, httpReason(srv, status, connected), "", status
 	}
 
 	var netErr net.Error
@@ -290,11 +291,11 @@ func classifyCause(cause error, srv discover.Server, status int, connected bool,
 		// Some timeouts do not wrap context.DeadlineExceeded, for example the
 		// http.Transport TLS handshake timeout. They still are timeouts.
 		if netErr.Timeout() {
-			return KindTimeout, "timed out", 0
+			return KindTimeout, "timed out", "", 0
 		}
-		return KindNetwork, "network error: " + scrubText(cause.Error()), 0
+		return KindNetwork, "network error: ", cause.Error(), 0
 	}
-	return KindProtocol, scrubText(cause.Error()), 0
+	return KindProtocol, "", cause.Error(), 0
 }
 
 // tlsReason returns the reason text for a TLS error in err's chain, and
@@ -396,7 +397,7 @@ func sentHeaders(srv discover.Server) (names []string, basic bool) {
 	// keys wins, an empty Authorization counts as absent) live in one place.
 	// The callers run only after newHTTPClient accepted the headers, so
 	// buildHeader does not fail here; on a failure, header stays nil.
-	raw, _ := splitHeaders(srv.Headers)
+	raw := headerMap(srv.Headers)
 	header, _ := buildHeader(raw, "")
 	var user *url.Userinfo
 	if u, err := url.Parse(srv.URL.Reveal()); err == nil {
@@ -656,11 +657,12 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 // bytes next to a value, and it cuts with cutWords, so that the new cut does
 // not leave a value at the end as a whole word.
 //
-// In Reason, it changes only the end that classify took from the text of the
-// cause (see ConnectError.serverLen). The fixed text of mcpmoat before it,
-// such as an httpReason, never holds the URL, and a short value that is also
-// a word of that text must not garble it: with ${EP} = "sse", "set type =
-// sse" stays as it is.
+// In Reason, it changes only the text of the cause (ConnectError.serverText),
+// and cuts it again. It works on the text as it was before classify cut it,
+// so an expanded URL that the first cut split is still replaced whole. The
+// fixed text of mcpmoat (ConnectError.fixed), such as an httpReason, never
+// holds the URL, and a short value that is also a word of that text must not
+// garble it: with ${EP} = "sse", "set type = sse" stays as it is.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, short []string) {
 	to := discovered.String()
 	ce.URL = to
@@ -699,12 +701,10 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 		}
 		return replaceWords(text, short)
 	}
-	if ce.serverLen > 0 {
-		// The guard keeps the slice in range if serverLen is ever wrong.
-		fixedLen := max(len(ce.Reason)-ce.serverLen, 0)
-		fixed, fromServer := ce.Reason[:fixedLen], ce.Reason[fixedLen:]
-		ce.Reason = cutWords(fixed+replace(fromServer), short)
-		ce.serverLen = max(len(ce.Reason)-len(fixed), 0)
+	if ce.serverText != "" {
+		// The uncut text: a URL that classify's cut split is still found.
+		ce.serverText = replace(ce.serverText)
+		ce.Reason = ce.fixed + cutWords(ce.serverText, short)
 	}
 	if ce.err != nil {
 		text := ce.err.Error()

@@ -1845,6 +1845,22 @@ func TestScrubShortWords(t *testing.T) {
 			want:  "exit status ******** at line 10",
 		},
 		{
+			// The cut ends with a Mask. The value "*" must not eat the stars
+			// of the Mask one by one.
+			name:  "cut that ends with a Mask and the value star",
+			text:  strings.Repeat("a", maxReasonRunes-len(discover.Mask)) + discover.Mask + "tail",
+			short: []string{"*"},
+			want:  strings.Repeat("a", maxReasonRunes-len(discover.Mask)) + discover.Mask + "…",
+		},
+		{
+			// replaceWords reads the text as it was: "pw!" is glued to "abc"
+			// there, so it stays when "abc" goes (known limit).
+			name:  "value glued to a masked value stays (known limit)",
+			text:  "pw!abc",
+			short: []string{"pw!", "abc"},
+			want:  "pw!" + discover.Mask,
+		},
+		{
 			// %q prints `a"b` as `a\"b`; the raw form is not in the text.
 			name:  "quoted form of a value with a quote",
 			text:  `got "a\"b" from server`,
@@ -2345,9 +2361,9 @@ func TestShowDiscoveredURLHeaderShortValue(t *testing.T) {
 		t.Fatalf("remoteShortSecrets() = %q, want it to hold the expanded value and the header password", short)
 	}
 
-	// All of reason is text of the cause (see ConnectError.serverLen).
+	// All of reason is text of the cause (see ConnectError.serverText).
 	reason := "lookup h1pw: no such host"
-	ce := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverLen: len(reason)}
+	ce := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverText: reason}
 	showDiscoveredURL(ce, expanded.URL, discovered, short)
 	if strings.Contains(ce.Reason, "pw") || strings.Contains(ce.Reason, "h1") {
 		t.Errorf("Reason = %q, want no short value in it", ce.Reason)
@@ -2355,7 +2371,7 @@ func TestShowDiscoveredURLHeaderShortValue(t *testing.T) {
 
 	// The expanded short values alone, the list before the fix, leave the
 	// password as a whole word. This shows that the case tests the fix.
-	old := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverLen: len(reason)}
+	old := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverText: reason}
 	showDiscoveredURL(old, expanded.URL, discovered, lookedUp.short)
 	if !strings.Contains(old.Reason, "pw") {
 		t.Errorf("Reason with the expanded values only = %q, want the case to show %q", old.Reason, "pw")

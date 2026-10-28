@@ -170,3 +170,25 @@ func TestShowDiscoveredURLKeepsFixedText(t *testing.T) {
 		}
 	})
 }
+
+// TestShowDiscoveredURLAfterCut checks that showDiscoveredURL finds an
+// expanded URL that the cut of classify would have split. The text before the
+// URL is long, so the 200-rune cut ends inside the host. Before the fix,
+// showDiscoveredURL worked on the cut Reason and left the start of the host.
+func TestShowDiscoveredURLAfterCut(t *testing.T) {
+	t.Parallel()
+
+	expanded := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL("https://internal-secret-host.corp.example/mcp")}
+	discovered := discover.NewURL("https://${HOST}/mcp")
+	cause := &fakeNetError{text: strings.Repeat("x", 170) + " Post " + expanded.URL.String() + ": boom"}
+
+	ce := classify(cause, expanded, nil, secretLists{})
+	showDiscoveredURL(ce, expanded.URL, discovered, nil)
+
+	if strings.Contains(ce.Reason, "internal") || strings.Contains(ce.Reason, "corp.example") {
+		t.Errorf("Reason = %q, want no part of the expanded host", ce.Reason)
+	}
+	if want := "network error: " + strings.Repeat("x", 170) + " Post " + discovered.String() + ": boom"; ce.Reason != want {
+		t.Errorf("Reason = %q, want %q", ce.Reason, want)
+	}
+}

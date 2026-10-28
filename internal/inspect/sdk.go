@@ -727,6 +727,7 @@ func stdioFailure(s discover.Server, err error, lists secretLists, tooLarge bool
 	case ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)):
 		ce.Kind = KindTooLarge
 		ce.Reason = errRawTooLarge.Error()
+		ce.fixed, ce.serverText = ce.Reason, "" // all of Reason is fixed text now
 		ce.err = errRawTooLarge
 	}
 	return ce
