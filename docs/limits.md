@@ -119,7 +119,8 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   [What is sent](llm.md) for the pieces). This mask has limits:
   - A value shorter than 8 bytes is not masked.
   - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
-    masked.
+    masked. The same is true for a changed letter case: a server that echoes the hex value
+    `deadbeef...` as `DEADBEEF...` is not masked.
   - The mask compares the text after the JSON decode. A configured value that holds characters
     that the output escapes (a backslash sequence such as the `\t` and `\n` of the Windows path
     `C:\tools\new_dir`, a quote, a control character, or a `\uXXXX` written as plain characters)

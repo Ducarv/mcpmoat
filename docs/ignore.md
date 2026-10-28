@@ -48,7 +48,9 @@ MOAT-T1-003 github # reviewed, the server is ours
 MOAT-T1-003 my/server/
 ```
 
-Server and tool names must match exactly, and they are case-sensitive. mcpmoat splits each line on
+Server and tool names must match exactly, and they are case-sensitive. The entry needs the real tool
+name, also when the `Tool:` line of a finding shows a configured value as `********` (see
+[Scan output](scan-output.md)). mcpmoat splits each line on
 spaces and tabs, so you cannot write a name that contains a space or a tab. A line, comments
 included, must not hold control characters (other than tab), invisible characters or other white
 space, because they can hide text in a terminal. mcpmoat skips a malformed line and prints a
