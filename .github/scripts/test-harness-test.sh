@@ -256,6 +256,47 @@ YAML
       - name: Guard
         run: |
           echo real
+  dupseq:
+    steps:
+      - name: Seq
+        args:
+          - |
+            - name: Guard
+              run: |
+                echo DECOY seq
+      - name: Guard
+        run: |
+          echo real
+  dupanchor:
+    steps:
+      - name: Anchor
+        with:
+          x: &a |
+            - name: Guard
+              run: |
+                echo DECOY anchor
+      - name: Guard
+        run: |
+          echo real
+  dupquoted:
+    steps:
+      - name: Quoted
+        run: "echo a
+          - name: Guard
+            run: |
+              echo DECOY quoted
+          "
+      - name: Guard
+        run: |
+          echo real
+  duptwice:
+    steps:
+      - name: Guard
+        run: |
+          echo one
+      - name: Guard
+        run: |
+          echo two
 YAML
 } >>"$tmp/fixture.yml"
 
@@ -273,6 +314,14 @@ check_case "extractor: a step with no run block exits 3" 3 "" extract "$tmp/fixt
 check_case "extractor: the first step with the name has no run block" 3 "" extract "$tmp/fixture.yml" Twice
 check_cmd "extractor: text in a run block or a folded block of an earlier step is not a step" block_is $'echo real\n' Guard decoy
 check_cmd "extractor: the same without the job argument" block_is $'echo real\n' Guard
+# The awk reads lines, not YAML, so a decoy in a form it does not know (a list
+# item block scalar, an anchored one, a multi-line quoted value) can look like
+# a step. A decoy needs the name of the real step, so a second step line with
+# the same name in one job makes the extractor fail closed.
+check_case "extractor: a decoy in a list item block scalar exits 3" 3 "" extract "$tmp/fixture.yml" Guard dupseq
+check_case "extractor: a decoy in an anchored block scalar exits 3" 3 "" extract "$tmp/fixture.yml" Guard dupanchor
+check_case "extractor: a decoy in a multi-line quoted value exits 3" 3 "" extract "$tmp/fixture.yml" Guard dupquoted
+check_case "extractor: two steps with the same name in a job exit 3" 3 "" extract "$tmp/fixture.yml" Guard duptwice
 check_case "extractor: a run block with no body exits 3" 3 "" extract "$tmp/fixture.yml" Empty
 check_case "extractor: a run block of only blank lines exits 3" 3 "" extract "$tmp/fixture.yml" "Blank only"
 check_case "extractor: a missing step exits 3" 3 "" extract "$tmp/fixture.yml" Missing

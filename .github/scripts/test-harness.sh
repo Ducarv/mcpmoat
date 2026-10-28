@@ -178,63 +178,76 @@ harness_footer() {
 # step itself. The block ends at the first line with less indent. Blank lines
 # at its end are always dropped, and the last line always ends with a newline,
 # whatever the chomping indicator (|, |- or |+) says. A line of only spaces and
-# tabs counts as blank. The body of any other block scalar (| or >), such as a
-# heredoc, is text: it never starts a step. Text of later steps and jobs
-# never shows. It exits 3 when
-# there is no such step, when the first step with the name has no block (even
-# when a later step with the name has one), or when the block has no line.
+# tabs counts as blank. Text of later steps and jobs never shows.
+#
+# It reads lines, not YAML. The body of a block scalar (a key that ends in `|`
+# or `>`), such as a heredoc, is text and never starts a step. Other forms that
+# hold text (a list item `- |`, a value with an anchor or a tag, a quoted value
+# over several lines) are not known to it. A decoy in such a form needs the
+# name of the real step, so a second `- name: STEP` line in the same job makes
+# it fail closed.
+#
+# It exits 3 when there is no such step, when the first step with the name has
+# no block, when the block has no line, or when the job has another step line
+# with the same name.
 extract_run_block() {
   HARNESS_STEP=$2 HARNESS_JOB=${3-} awk '
+    # skip_block starts to skip the body of a block scalar when the line ends in
+    # | or >: the lines of the body are indented more than the key.
+    function skip_block() {
+      if ($0 ~ /: *[|>][-+0-9]* *(#.*)?$/) {
+        match($0, /^ *(- +)*/)
+        skipbody = 1
+        skipind = RLENGTH # the column of the key
+      }
+    }
     BEGIN { step = ENVIRON["HARNESS_STEP"]; job = ENVIRON["HARNESS_JOB"] }
     inrun {
       if ($0 ~ /^[[:space:]]*$/) { blank++; next }
       match($0, /^ */)
       if (indent == 0) {
-        if (RLENGTH <= keyindent) exit
-        indent = RLENGTH
+        if (RLENGTH <= keyindent) inrun = 0
+        else indent = RLENGTH
       }
-      if (RLENGTH < indent) exit
-      for (; blank > 0; blank--) print ""
-      print substr($0, indent + 1)
-      printed = 1
-      next
+      if (inrun && RLENGTH < indent) inrun = 0
+      if (inrun) {
+        for (; blank > 0; blank--) print ""
+        print substr($0, indent + 1)
+        printed = 1
+        next
+      }
+      runended = 1 # the run block ended; this line is read as usual
     }
     /^[[:space:]]*(#.*)?$/ { next }
-    # The body of a block scalar (| or >) of another key is text, not YAML:
-    # skip its lines, so a heredoc that holds "- name:" cannot look like a step.
+    # The body of a block scalar of another key is text, not YAML: skip its
+    # lines, so a heredoc that holds "- name:" cannot look like a step.
     skipbody {
       match($0, /^ */)
       if (RLENGTH > skipind) next
       skipbody = 0
     }
     { match($0, /^ */); ind = RLENGTH }
-    ind == 0 { injobs = ($1 == "jobs:"); injob = 0 }
-    ind == 2 && injobs { injob = ($1 == (job ":")) }
-    instep && ind <= dash { exit } # the end of the first step with the name
+    ind == 0 { injobs = ($1 == "jobs:"); injob = 0; curjob = "" }
+    ind == 2 && injobs { curjob = $1; injob = ($1 == (job ":")) }
+    instep && ind <= dash { instep = 0 } # the end of the first step with the name
     !instep && /^ *- +name:/ && (job == "" || injob) {
       name = $0
       sub(/^ *- +name: */, "", name)
       sub(/ *$/, "", name)
-      if (name == step) {
+      if (name == step && seen && curjob == foundjob) { dup = 1; exit }
+      if (name == step && !seen) {
+        seen = 1
+        foundjob = curjob
         instep = 1
         dash = ind
         match($0, /^ *- +/)
         keyindent = RLENGTH
       }
-      # A name that is a block scalar (name: >-) has a body that is text too.
-      if ($0 ~ /: *[|>][-+0-9]* *(#.*)?$/) {
-        match($0, /^ *(- +)*/)
-        skipbody = 1
-        skipind = RLENGTH
-      }
+      skip_block() # a name that is a block scalar has a body that is text too
       next
     }
-    instep && ind == keyindent && /^ *run: *[|][-+]? *(#.*)?$/ { inrun = 1; found = 1 }
-    !inrun && /: *[|>][-+0-9]* *(#.*)?$/ {
-      match($0, /^ *(- +)*/)
-      skipbody = 1
-      skipind = RLENGTH # the column of the key: its body is indented more
-    }
-    END { exit (found && printed) ? 0 : 3 }
+    instep && !runended && ind == keyindent && /^ *run: *[|][-+]? *(#.*)?$/ { inrun = 1; found = 1 }
+    !inrun { skip_block() }
+    END { exit (!dup && found && printed) ? 0 : 3 }
   ' "$1"
 }
