@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
@@ -32,11 +33,21 @@ type llmJob struct {
 	// from the config file. It is untrusted.
 	ref report.ServerRef
 	// in is what the classifier gets: the tool name and description, and the
-	// secret values of the server (inspect.Result.Secrets). The classifier
-	// sends only the name and the description, after it replaces each secret
-	// value in them with discover.Mask (FR-17). The jobs of one server share
-	// one Secrets slice: it is read only.
+	// credential values of the server (inspect.Result.Credentials, the subset
+	// of inspect.Result.Secrets that looks like a credential). The classifier
+	// sends only the name and the description, after it replaces each
+	// credential value in them with discover.Mask (FR-17). A plain config
+	// value that is not a credential (for example an env value "production")
+	// stays in the text that goes to the provider (issues #229 and #235). The
+	// jobs of one server share one Credentials slice: it is read only.
 	in llm.Input
+	// redactor hides the secret values of the server (all of
+	// inspect.Result.Secrets, the wide list) in the Key of the finding row
+	// (see llmRow and maskedToolKey). It is separate from in.Credentials, which
+	// only sets what the request to the provider hides: the local report
+	// hides more values than the request. The jobs of one server share one
+	// redactor, made once for the server. A nil redactor hides nothing.
+	redactor *discover.TextRedactor
 }
 
 // llmPlan is the work of the LLM step, before the first request.
@@ -155,11 +166,17 @@ func fairShare(counts []int, budget int) []int {
 // in their order in the scan (inspect.Outcome.Index). inspect.Run sorts the
 // outcomes, so their order is not the order of the servers.
 //
-// Every job of a server gets the secret values of that server
-// (inspect.Result.Secrets) in llm.Input.Secrets, so that llm removes them
+// Every job of a server gets the credential values of that server
+// (inspect.Result.Credentials) in llm.Input.Credentials, so that llm removes them
 // from the tool text before the request (FR-17). A server that got a token
-// can put it in a tool name or description. The jobs share the slice of the
-// outcome and never change it.
+// can put it in a tool name or description. Only the credentials go to llm,
+// not the wide inspect.Result.Secrets list: a plain config word such as
+// "production" is not removed, so it does not set the redacted flag and the
+// floor row of a benign tool (issues #229 and #235). The jobs share the slice
+// of the outcome and never change it. Every job of a server also gets the
+// redactor of all the secret values of that server (the wide list, see
+// llmJob.redactor) for the Key of its finding row. The redactor is made once
+// for each server.
 func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(a, b inspect.Outcome) int {
 		return cmp.Compare(a.Index, b.Index)
@@ -170,6 +187,7 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 			continue
 		}
 		ref := report.NewServerRef(o.Server)
+		redactor := discover.NewTextRedactor(o.Result.Secrets)
 		jobs := make([]llmJob, 0, len(o.Result.Tools))
 		for _, t := range o.Result.Tools {
 			jobs = append(jobs, llmJob{
@@ -178,8 +196,10 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 				in: llm.Input{
 					ToolName:    t.Name,
 					Description: t.Description,
-					Secrets:     o.Result.Secrets,
+					// Only the credential subset: see the doc comment above.
+					Credentials: o.Result.Credentials,
 				},
+				redactor: redactor,
 			})
 		}
 		servers = append(servers, jobs)

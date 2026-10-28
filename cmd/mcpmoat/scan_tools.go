@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"slices"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
@@ -154,9 +156,11 @@ const (
 // (see lateServersText). The JSON "complete" field stays true: the budget row
 // marks each server that was not fully checked.
 //
-// A finding row holds the rule ID, the tool name in Key (see toolKey) and the
-// target ("description" or "schema") in Related. It never holds tool text or
-// pattern text. The ignore list ignore drops rows like the rows of the config
+// A finding row holds the rule ID, the tool name in Key (see
+// maskedToolKey: each secret value of the server, from
+// inspect.Result.Secrets, shows as discover.Mask) and the target
+// ("description" or "schema") in Related. It never holds tool text or pattern
+// text. The ignore list ignore drops rows like the rows of the config
 // rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
 // row and the rules.RuleToolFindingCap row, which only --ignore drops (see
 // fileCannotIgnore). It compares the real tool name, not the Key. The step
@@ -331,13 +335,21 @@ func (r *toolRulesRun) checkServer(ctx, stepCtx context.Context, o inspect.Outco
 
 	r.pending, r.omitted = r.pending[:0], 0
 	ref := report.NewServerRef(o.Server)
+	// One redactor for the whole server: the secret values are the same for
+	// each tool, so they are read once.
+	redactor := discover.NewTextRedactor(o.Result.Secrets)
 	tools := o.Result.Tools
 	for i, t := range tools {
 		found, err := r.checker.CheckTool(serverCtx, t)
 		// Keep the findings also when err is not nil: every finding that
-		// CheckTool returns is a real match.
-		for _, f := range found {
-			r.addTool(t.Name, textRow(r.set, ref, t.Name, f))
+		// CheckTool returns is a real match. All rows of one tool share one
+		// Key, so the mask runs once for each tool with a finding. The ignore
+		// list gets the real name, the row gets the masked Key.
+		if len(found) > 0 {
+			key := maskedToolKey(redactor, t.Name)
+			for _, f := range found {
+				r.addTool(t.Name, textRow(r.set, ref, key, f))
+			}
 		}
 		if err == nil {
 			continue
@@ -486,11 +498,13 @@ func (r *toolRulesRun) keep(index int, row report.FindingRow) {
 	}
 }
 
-// textRow returns the finding row of the rule hit f on the tool toolName of
-// the server ref. The severity, the title, the risk and the remediation come
-// from the rule set, as for the config rules (see findingRule). The Key is
-// toolKey(toolName).
-func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.TextFinding) report.FindingRow {
+// textRow returns the finding row of the rule hit f on a tool of the server
+// ref. The severity, the title, the risk and the remediation come from the
+// rule set, as for the config rules (see findingRule). key is the Key of the
+// row: maskedToolKey of the tool name, so a secret value that the server
+// echoes in the name shows as discover.Mask. The ignore list never reads the
+// Key: it compares the real tool name (see passIgnore).
+func textRow(set *rules.Set, ref report.ServerRef, key string, f rules.TextFinding) report.FindingRow {
 	rule, severity := findingRule(set, f.RuleID)
 	return report.FindingRow{
 		ServerRef:   ref,
@@ -500,16 +514,19 @@ func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.Text
 		Risk:        rule.Risk,
 		Remediation: rule.Remediation,
 		Field:       rules.FieldTool,
-		Key:         toolKey(toolName),
+		Key:         key,
 		Related:     string(f.Target),
 	}
 }
 
-// toolKey returns the Key of a tool rule row for the tool name: the name cut
-// to maxToolKeyRunes runes, with termsafe.CutMarker at the end when it was
-// cut. An empty name gives noToolNameKey: the report writers treat a row with
-// an empty Key as a row about the whole server. The Key is raw text: the
-// report writers escape it, as they escape every Key.
+// toolKey returns the name cut to maxToolKeyRunes runes, with
+// termsafe.CutMarker at the end when it was cut. An empty name gives
+// noToolNameKey: the report writers treat a row with an empty Key as a row
+// about the whole server. The Key is raw text: the report writers escape it,
+// as they escape every Key.
+//
+// toolKey does not hide secret values. A row Key comes from maskedToolKey,
+// which hides them first and then calls toolKey.
 func toolKey(name string) string {
 	if name == "" {
 		return noToolNameKey
@@ -519,6 +536,29 @@ func toolKey(name string) string {
 		return short + termsafe.CutMarker
 	}
 	return short
+}
+
+// maskedToolKey returns the Key of a tool rule row or an LLM row for the tool
+// name: the name with each secret value of the server replaced with
+// discover.Mask, then cut like toolKey (to maxToolKeyRunes runes, or
+// noToolNameKey for an empty name).
+//
+// r holds the secret values of the server (discover.NewTextRedactor of
+// inspect.Result.Secrets). A server gets the configured env values, header
+// values and argv secrets, and a hostile server can echo one of them in a tool
+// name. mcpmoat never prints such a value (FR-14, FR-17). A nil r hides
+// nothing: the methods of discover.TextRedactor work on a nil pointer and
+// then return their input.
+//
+// The mask comes before the cut, so a cut can split a Mask but never a secret
+// value. The mask reads only the start of a long name: maxToolKeyRunes runes
+// have at most utf8.UTFMax bytes each, so a masked text of more than
+// utf8.UTFMax*maxToolKeyRunes bytes has more than maxToolKeyRunes runes, and
+// the start that r.Prefix returns for that limit gives the same cut as the
+// whole masked name.
+func maskedToolKey(r *discover.TextRedactor, name string) string {
+	masked, _ := r.Prefix(name, utf8.UTFMax*maxToolKeyRunes)
+	return toolKey(masked)
 }
 
 // failClosedSeverity returns the severity of a rules.RuleAnalysisBudget row and

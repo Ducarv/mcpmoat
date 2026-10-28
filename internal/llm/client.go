@@ -574,8 +574,8 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 //
 // Each request has a timeout of requestTimeout. The verdict has Truncated
 // set when toolMessage cut the tool name or description, and Redacted set
-// when it removed a configured secret value from them (see Verdict). On an
-// error, only Truncated and Redacted are set, and only when toolMessage
+// when it removed a credential from them (see Verdict). On an error, only
+// Truncated and Redacted are set, and only when toolMessage
 // succeeded: the caller can then still rate a cut or redacted tool when the
 // answer is not usable (ErrInvalidOutput). Risk and Category stay zero on an
 // error. See the error variables above for how to sort an error. Classify is

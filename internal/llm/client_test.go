@@ -912,14 +912,14 @@ func TestClassifyRedacted(t *testing.T) {
 		wantErr error
 		want    Verdict
 	}{
-		{name: "secret in description", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
-		{name: "secret in name", in: Input{ToolName: secret, Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
-		{name: "secret not in text", in: Input{ToolName: "t", Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther}},
-		{name: "redacted and truncated", in: Input{ToolName: "t", Description: secret + " " + long, Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Truncated: true, Redacted: true}},
-		{name: "redacted and unusable", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Redacted: true}},
-		{name: "redacted and truncated and unusable", in: Input{ToolName: "t", Description: secret + " " + long, Secrets: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Truncated: true, Redacted: true}},
-		{name: "redacted and provider failure", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{Redacted: true}},
-		{name: "not redacted and provider failure", in: Input{ToolName: "t", Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{}},
+		{name: "secret in description", in: Input{ToolName: "t", Description: "key " + secret, Credentials: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
+		{name: "secret in name", in: Input{ToolName: secret, Description: "d", Credentials: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
+		{name: "secret not in text", in: Input{ToolName: "t", Description: "d", Credentials: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther}},
+		{name: "redacted and truncated", in: Input{ToolName: "t", Description: secret + " " + long, Credentials: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Truncated: true, Redacted: true}},
+		{name: "redacted and unusable", in: Input{ToolName: "t", Description: "key " + secret, Credentials: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Redacted: true}},
+		{name: "redacted and truncated and unusable", in: Input{ToolName: "t", Description: secret + " " + long, Credentials: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Truncated: true, Redacted: true}},
+		{name: "redacted and provider failure", in: Input{ToolName: "t", Description: "key " + secret, Credentials: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{Redacted: true}},
+		{name: "not redacted and provider failure", in: Input{ToolName: "t", Description: "d", Credentials: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{}},
 	}
 	for _, p := range bothProviders {
 		for _, tt := range tests {

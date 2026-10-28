@@ -60,11 +60,11 @@ func (c *cli) runPin(_ options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	tools, ok := c.inspectOne(ctx, server, a.connOpts)
+	res, ok := c.inspectOne(ctx, server, a.connOpts)
 	if !ok {
 		return exitError
 	}
-	return c.acceptTools(ctx, server, tools, a.expect, first.Existed())
+	return c.acceptTools(ctx, server, res, a.expect, first.Existed())
 }
 
 // pinArgs holds the checked flags of "pin".
@@ -142,38 +142,44 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	return a, exitOK, true
 }
 
-// inspectOne inspects the one server and returns its tools. It returns false,
-// after a message on stderr, when the process got a signal (the result may be
-// partial, so pin saves nothing) or when the server was not inspected (failed,
-// timeout, or refused: an untrusted or turned-off server). scan prints the
-// second case as a warning, but here it is an error: nothing is accepted.
-func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) ([]inspect.Tool, bool) {
+// inspectOne inspects the one server and returns the result: its tools, and
+// the secret values that it got (inspect.Result.Secrets), so that pin can hide
+// them in what it prints. It returns false, after a message on stderr, when
+// the process got a signal (the result may be partial, so pin saves nothing)
+// or when the server was not inspected (failed, timeout, or refused: an
+// untrusted or turned-off server). scan prints the second case as a warning,
+// but here it is an error: nothing is accepted.
+func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) (inspect.Result, bool) {
 	outcomes, err := inspect.Run(ctx, []discover.Server{server}, opts, c.inspector)
 	if c.interrupted(ctx, "pin") {
-		return nil, false
+		return inspect.Result{}, false
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
 		c.cmdErr("pin", "cannot inspect the server", err)
-		return nil, false
+		return inspect.Result{}, false
 	}
 	// Run gives one outcome for one server. Any other number is a bug.
 	if len(outcomes) != 1 {
 		c.cmdPrintf("pin", "server %s: not inspected", cutName(server.Name))
-		return nil, false
+		return inspect.Result{}, false
 	}
 	c.warnInspection(outcomes[0])
 	if outcomes[0].Status != inspect.StatusOK {
 		c.cmdPrintf("pin", "%s", notInspectedText(outcomes[0]))
-		return nil, false
+		return inspect.Result{}, false
 	}
-	return outcomes[0].Result.Tools, true
+	return outcomes[0].Result, true
 }
 
-// acceptTools sets the pins of the server to its tools and saves the store. It
-// prints the diff of each changed or new tool first, so the user sees what the
-// accept changes. Then saveAccepted does the save with the lock. It returns
-// the exit code.
+// acceptTools sets the pins of the server to the tools of res, the result of
+// its inspection, and saves the store. It prints the diff of each changed or
+// new tool first, so the user sees what the accept changes. Then saveAccepted
+// does the save with the lock. It returns the exit code.
+//
+// The diffs and the stderr warnings show each secret value of the server
+// (res.Secrets) as discover.Mask (see pinChanges). The pins and the --expect
+// digest use the real tools.
 //
 // The server can run for a long time, so acceptTools reads pins.json again
 // after the inspection, without the lock, and prints the diffs against that
@@ -196,7 +202,8 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
 // before it saves.
-func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string, firstExisted bool) int {
+func (c *cli) acceptTools(ctx context.Context, server discover.Server, res inspect.Result, expect string, firstExisted bool) int {
+	tools := res.Tools
 	name := cutName(server.Name)
 	id := serverIdentity(server)
 	// A relative path gives another identity than the one in the store, so
@@ -227,7 +234,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError
 	}
-	diffs := c.pinChanges(shown, id, server.Name, tools)
+	diffs := c.pinChanges(shown, id, server.Name, tools, discover.NewTextRedactor(res.Secrets))
 
 	// Show the diffs before pin saves. Do not use fprintf: a write error (a
 	// closed pipe) must stop pin before the save, because the user did not see
@@ -536,7 +543,8 @@ func (p *pinCounts) add(k pins.ChangeKind) {
 // changeCounts counts what accepting tools changes in the pins of the server
 // id. It makes no diff and prints nothing. saveAccepted uses it on the locked
 // store, after pinChanges gave the diffs, because the counts describe the
-// entry that the save replaces.
+// entry that the save replaces. It reads only the kind of each change, never
+// a tool name or a diff, so it uses pins.Compare without a mask.
 func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pinCounts {
 	var n pinCounts
 	stored, _ := store.Get(id)
@@ -553,12 +561,17 @@ func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pin
 // and each one gets a diff of added lines. It reads the store and does not
 // change it. It prints a warning on stderr for each diff that was cut at the
 // size limit. It does not count the changes: changeCounts does that.
-func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) []report.ToolDiff {
+//
+// redactor holds the secret values of the server (nil when it has none, see
+// compareMask). The compare is pins.CompareMasked with it, so the tool names
+// and the text of the diffs, and the tool names in the warnings, show each
+// secret value as discover.Mask.
+func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool, redactor *discover.TextRedactor) []report.ToolDiff {
 	var diffs []report.ToolDiff
-	// An unpinned server gives nil pins, and pins.Compare then reports every
-	// valid tool as new.
+	// An unpinned server gives nil pins, and pins.CompareMasked then reports
+	// every valid tool as new.
 	stored, _ := store.Get(id)
-	for _, ch := range pins.Compare(stored, tools) {
+	for _, ch := range pins.CompareMasked(stored, tools, compareMask(redactor)) {
 		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
 	return diffs

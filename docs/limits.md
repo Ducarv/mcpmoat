@@ -13,7 +13,8 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as
   you and can read your files and use the network.
 - A server can also echo a configured env value into a tool description, and then that text is
-  stored in `pins.json`.
+  stored in `pins.json` as the server sent it. The report masks the value (see below), but
+  `pins.json` (mode `0600`) keeps the raw text.
 - mcpmoat does not start a server from an untrusted project file or a turned-off server, and no flag
   allows it yet.
 - The description and schema rules read only the description and the input schema of each tool.
@@ -111,29 +112,81 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   finding, not a rating. That is below the default `--fail-on high`, so a hostile server that makes
   the provider refuse its tool descriptions can keep their LLM rating from reaching `high`. When
   the provider refuses every tool that it answers, the LLM step fails and the scan exits with 2.
-- `--llm` replaces the secret values of a server with `********` in the tool text that it sends,
-  also the secrets in the args of a stdio server, but not all of them (see
-  [What is sent](llm.md)):
-  - A value shorter than 8 bytes is not removed.
+- The report on the terminal and the `--json` output show each configured value that a server
+  echoes in its tool text as `********`: the env values, the header values, the expanded
+  placeholder values, the secrets in the args and the secret URL parts, and the credential pieces
+  inside them, such as one cookie (see [Scan output](scan-output.md), and
+  [What is sent](llm.md) for the pieces). This mask has limits:
+  - A value shorter than 8 bytes is not masked.
   - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
-    removed.
-  - A secret in an arg that mcpmoat does not recognise is not removed, for example
-    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`.
+    masked. The same is true for a changed letter case: a server that echoes the hex value
+    `deadbeef...` as `DEADBEEF...` is not masked.
+  - The mask compares the text after the JSON decode. A configured value that holds characters
+    that the output escapes (a backslash sequence such as the `\t` and `\n` of the Windows path
+    `C:\tools\new_dir`, a quote, a control character, or a `\uXXXX` written as plain characters)
+    is not found when the server sends the real characters (a tab, a newline). The pin diff or the
+    quoted tool name then shows those characters as escapes, so the value can show again.
+  - A value that a server splits over two JSON strings (for example a key and its value) or over
+    the tool name and the description is not found.
+  - The password of the Oracle form `scott/pw@orcl` in an env value, an expanded value or a header
+    value is not masked alone. Only the whole value is.
+  - The decoded text `name:password` of a `Basic` header value is not masked as a whole. Only the
+    password (8 bytes or more) and the base64 forms are, so the name can show.
+  - The mask uses the values that are configured now. A value that is no longer configured (for
+    example a rotated token) can still show on the pinned side of a pin diff.
+  - The mask of a pin diff can also hide text that is not secret. It uses every env value of 8
+    bytes or more and the plain words that the arg check finds on purpose. So a config value can
+    hide that text from the diff that you read before `pin --accept`. The hash still changes and
+    the rules still read the raw text, so no detection is lost. Only your review of the diff is
+    weaker. A server from an untrusted project file runs only when you opt in.
+  - A numeric secret that a server echoes as a JSON number goes through a float64 in the canonical
+    form before the mask. mcpmoat itself can then round an all-digit value of 16 digits or more,
+    and the rounded number in a pin diff shows most of its digits.
   - A secret that starts or ends with `*`, or holds a whole `********`, can show again across a
     `********`.
-  - A header value of 8 bytes or more is replaced also when it is not secret, for example
-    `application/json`. Arg text that the report masks is replaced also when it is not secret, for
-    example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
-  - A tool whose text had a configured value removed gets a `medium` finding at least, also when
-    the removed text is an ordinary word of your config (for example the env value `production`).
-    A config that you do not control can choose which text is removed, for example an env value
-    that equals an injection phrase in a tool description. The finding is `medium`, not `high`,
-    so the default `--fail-on high` does not fail on it. The rule findings still read the full
+  - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
+    masked a value.
+- `--llm` replaces with `********` only the configured values that look like a credential in the
+  tool text that it sends (see [What is sent](llm.md)). The limits of the report mask above apply
+  here too. Also:
+  - A plain config value that a server echoes reaches the provider, for example the env value
+    `production` of `NODE_ENV`, or a password under a key that does not look secret.
+  - A secret in an arg that mcpmoat does not recognise is not removed, for example
+    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`. The password
+    of a positional `admin:pw` or `scott/pw@orcl` is removed only when the whole value looks like
+    a token.
+  - The check fails closed, so some text that is not secret is removed too: a word of 32 bytes or
+    more (also a readable path segment, such as a segment of the macOS `$TMPDIR`), a nix hash, a
+    UUID, or a header value that starts with an auth scheme word, such as `Token count`. The model
+    then sees `********` in its place, and the message has `"redacted": true`.
+  - A tool whose text had a credential removed gets a `medium` finding at least. A config that you
+    do not control can choose which text is removed, for example an env value under a secret-like
+    key that equals an injection phrase in a tool description. The finding is `medium`, not
+    `high`, so the default `--fail-on high` does not fail on it. A phrase under a key that does
+    not look secret is not removed, so the model reads it. The rule findings still read the full
     text.
-- The report on the terminal and the `--json` output show the tool names as the server sent them.
-  mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
-  can make it show on stdout. Only the rows of the `--llm` step hide such a value (as
-  `********`). Issue #228 tracks the other rows.
+- In the args and inside a config value, mcpmoat reads the value of a pair with a secret-like key
+  whole, also a quoted one (see [What is sent](llm.md)). It does not read these forms whole, so a
+  server that echoes the value alone can show a part of it in the report, and `--llm` can send it:
+  - A quote inside another quoted value (`conn='password="a b"'`).
+  - A value that ends with a backslash in a format with no backslash escapes (ADO.NET
+    `Password="C:\"`).
+  - A JSON `\uXXXX` escape. Only the raw form is kept.
+  - A value on more than one line with no quotes. It ends at the newline.
+  - A key that is not a plain name. Only the run of name bytes before the `=` counts as the key.
+  - A pair inside a quoted value whose own key is not secret-like (`conn='password=a b'`). Its
+    value ends at the next space or `;`, or keeps the closing quote.
+  - The other way, a `NAME=value` arg with a secret-like NAME also gives its first word alone
+    (`correct` of `APP_SEED=correct horse`), so that word can be masked or removed too.
+- When a server fails, mcpmoat removes the configured values and their credential pieces from the
+  failure text. A value or piece shorter than 8 bytes is removed only where it stands as a whole
+  word (see [Placeholders](stdio-servers.md#placeholders)). The limits:
+  - The whole-word rule stops an accidental echo only. A hostile server can glue a letter to a
+    short value (`1234x`) or split it (`1_2_3_4`), and then the value shows.
+  - A common word that is also a short configured value is masked too (with the value `1`,
+    `exit status 1` shows as `exit status ********`). The arg check finds more text than the
+    secrets on purpose, so words such as `unknown` or `2.0` from JSON or `key=value` args, and a
+    short word of a URL query (`eng` of `?workspace=eng`), can be masked too.
 - When you give a wrong argument, every command hides the user info of each URL in the error text
   (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
   `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors

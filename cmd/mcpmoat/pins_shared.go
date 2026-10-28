@@ -335,8 +335,30 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 	return snap, nil
 }
 
+// compareMask returns the mask for pins.CompareMasked that hides the secret
+// values of a server: r.Text, where r is discover.NewTextRedactor of
+// inspect.Result.Secrets. scan and pin both compare with it, so the tool names
+// and the diffs that they print show each secret value as discover.Mask. Only
+// the printed text is masked: the hashes, the verdicts and the lookups by name
+// use the real tool text.
+//
+// For a nil r (a server with no secret value of at least
+// discover.MinSecretBytes bytes) it returns nil, and CompareMasked then works
+// like pins.Compare. The check is needed because a method value such as r.Text
+// is never nil, also when r is nil: it is a func that calls Text on r.
+func compareMask(r *discover.TextRedactor) func(string) string {
+	if r == nil {
+		return nil
+	}
+	return r.Text
+}
+
 // diffOf returns the diff of one change for the report. The change must have a
 // diff (see appendDiff). server is the name that the report shows.
+//
+// The tool name of the diff is ch.Tool and never ch.RawTool. ch must come from
+// pins.CompareMasked with the mask of the server (see compareMask), so ch.Tool
+// and ch.Diff show each secret value of the server as discover.Mask.
 func diffOf(server string, ch pins.Change) report.ToolDiff {
 	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated, IsNote: ch.DiffIsNote()}
 	switch ch.Kind {
@@ -357,11 +379,17 @@ func diffOf(server string, ch pins.Change) report.ToolDiff {
 // accept it. A change without a diff adds nothing. When the diff was cut at
 // the size limit, it prints one warning on stderr for the command cmd ("scan"
 // or "pin"), because the user would review only a part of the tool.
+//
+// ch must come from pins.CompareMasked with the mask of the server (see
+// diffOf). The warning and the diff print ch.Tool, the masked name, and the
+// cut of the warning (cutName) comes after the mask, so it cannot leave a part
+// of a secret value.
 func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch pins.Change) []report.ToolDiff {
 	if ch.Diff == "" {
 		return diffs
 	}
 	if ch.Truncated {
+		// ch.Tool is the masked name; never print ch.RawTool.
 		c.warnf(cmd, "the diff of tool %s on server %s was cut at the size limit; review the full tool before you accept it",
 			cutName(ch.Tool), cutName(server))
 	}

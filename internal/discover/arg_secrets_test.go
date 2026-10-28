@@ -84,7 +84,9 @@ func TestArgSecrets(t *testing.T) {
 		},
 		{
 			// innerValues gives the word after ":" ("session=..."), its
-			// value after "=", and the value of the next pair.
+			// value after "=", and the value of the next pair. Then
+			// secretPairValues gives the value of the secret-like key
+			// "session" whole.
 			name: "cookie header",
 			args: []string{"--header", "Cookie: session=supersecret123; other=1"},
 			want: []string{
@@ -93,6 +95,7 @@ func TestArgSecrets(t *testing.T) {
 				"session=supersecret123",
 				"supersecret123",
 				"1",
+				"supersecret123",
 			},
 		},
 		{
@@ -151,7 +154,8 @@ func TestArgSecrets(t *testing.T) {
 			args: []string{"ghp_abcdef123456=1"},
 			want: []string{"ghp_abcdef123456=1", "1", "ghp_abcdef123456"},
 		},
-		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db", "p@tcp(h)/db"}},
+		// The last value is the password alone (see userPassword).
+		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db", "p@tcp(h)/db", "p"}},
 		{name: "user and password", args: []string{"admin:" + argShort}, want: []string{"admin:" + argShort, argShort, argShort}},
 		{
 			name: "user and long password",
@@ -161,29 +165,40 @@ func TestArgSecrets(t *testing.T) {
 		{name: "secret label", args: []string{"token:abc"}, want: []string{"token:abc", "abc", "abc"}},
 		{
 			// The segment after "Server=" is masked; innerValues gives the
-			// password.
+			// password, and secretPairValues gives it again, whole.
 			name: "connection string",
 			args: []string{"--conn", "Server=h;Password=supersecret123"},
-			want: []string{"h;Password=supersecret123", "supersecret123"},
+			want: []string{"h;Password=supersecret123", "supersecret123", "supersecret123"},
 		},
 		{
-			// libpq text: the masked value after "host=", then each value.
+			// libpq text: the masked value after "host=", then each value,
+			// then the password again from secretPairValues.
 			name: "libpq text",
 			args: []string{"host=h password=supersecret123 dbname=x"},
-			want: []string{"h password=supersecret123 dbname=x", "supersecret123", "x"},
+			want: []string{"h password=supersecret123 dbname=x", "supersecret123", "x", "supersecret123"},
 		},
 		{
 			// A flag inside an env value: the masked value, then its value
-			// after "=".
+			// after "=" from innerValues and from secretPairValues.
 			name: "flag in an env value",
 			args: []string{"-e", "OPTS=--password=supersecret123"},
-			want: []string{"--password=supersecret123", "supersecret123"},
+			want: []string{"--password=supersecret123", "supersecret123", "supersecret123"},
 		},
 		{
 			// JSON: the value after `"token":`. The key has no ":" before it.
+			// secretPairValues then gives the quoted value with and without
+			// its quotes.
 			name: "JSON",
 			args: []string{"--cfg", `{"token":"supersecret123"}`},
-			want: []string{`{"token":"supersecret123"}`, "supersecret123"},
+			want: []string{`{"token":"supersecret123"}`, "supersecret123", `"supersecret123"`, "supersecret123"},
+		},
+		{
+			// The value after "password=" whole, then innerValues ("x"),
+			// then secretPairValues: the quoted value with its quotes, as
+			// written and with the escape removed.
+			name: "quoted value with an escape",
+			args: []string{`password='it\'s ok' host=x`},
+			want: []string{`'it\'s ok' host=x`, "x", `'it\'s ok'`, `it\'s ok`, "it's ok"},
 		},
 		{name: "path segment", args: []string{"/data/ghp_abc123xyz/x"}, want: []string{"ghp_abc123xyz"}},
 
@@ -252,9 +267,9 @@ func TestArgSecrets(t *testing.T) {
 			want: []string{"ftp://h/x", "//h/x", "//h/x"},
 		},
 		{
-			// The whole URL, its headerLineParts and innerValues, then the
-			// query values of wholeURLParts ("password" is not a token-like
-			// key, so it is not kept).
+			// The whole URL, its headerLineParts, innerValues and
+			// secretPairValues, then the query values of wholeURLParts
+			// ("password" is not a token-like key, so it is not kept).
 			name: "JDBC URL with a query password",
 			args: []string{"--db", "jdbc:postgresql://h/db?user=a&password=supersecret123"},
 			want: []string{
@@ -263,6 +278,7 @@ func TestArgSecrets(t *testing.T) {
 				"postgresql",
 				"//h/db?user=a",
 				"a",
+				"supersecret123",
 				"supersecret123",
 				"a",
 				"supersecret123",
@@ -353,7 +369,10 @@ func TestArgSecrets(t *testing.T) {
 //     for it. A URL part can be
 //     unescaped (a password, a fragment, url.QueryUnescape of a query part)
 //     or escaped again by url.URL (a path segment comes from EscapedPath, so
-//     a space in the arg is "%20" in the part).
+//     a space in the arg is "%20" in the part). The value of a quoted span
+//     with its escapes removed ("it's" from 'it\'s'; see quotedSpan) is a
+//     substring of the plain form of a span that starts at the same quote
+//     in such a form of the arg (see quotedPlainForms).
 //  2. secrets is not empty only when the RedactArgs output holds Mask.
 //  3. When the RedactArgs output of an arg is p + Mask, the arg starts with p
 //     and the rest of the arg is not empty, that rest is in secrets. This
@@ -369,9 +388,11 @@ func checkArgSecretsConsistent(t *testing.T, args, secrets []string) {
 		forms := []string{s, percentDecode(s, false)}
 		if !slices.ContainsFunc(args, func(a string) bool {
 			for _, arg := range []string{a, percentDecode(a, false), percentDecode(a, true)} {
-				for _, f := range forms {
-					if strings.Contains(arg, f) {
-						return true
+				for _, text := range append([]string{arg}, quotedPlainForms(arg)...) {
+					for _, f := range forms {
+						if strings.Contains(text, f) {
+							return true
+						}
 					}
 				}
 			}
@@ -394,6 +415,22 @@ func checkArgSecretsConsistent(t *testing.T, args, secrets []string) {
 			t.Errorf("RedactArgs(%q)[%d] = %q masks %q, but ArgSecrets = %q does not hold it", args, i, out, rest, secrets)
 		}
 	}
+}
+
+// quotedPlainForms returns, for each quote byte in s, the plain form of the
+// quoted span that starts there (see discover.QuotedSpan). A plain form of a
+// span in a part of s is a prefix of the plain form of the span that starts
+// at the same quote in s, so the check above finds it. It reads s once for
+// each quote, which is fine for the short args of the tests.
+func quotedPlainForms(s string) []string {
+	var forms []string
+	for i := range len(s) {
+		if s[i] == '"' || s[i] == '\'' {
+			_, _, plain := discover.QuotedSpan(s[i:])
+			forms = append(forms, plain)
+		}
+	}
+	return forms
 }
 
 // percentDecode decodes every valid "%XX" escape of s and keeps every other
@@ -483,6 +520,9 @@ func FuzzArgSecrets(f *testing.F) {
 	f.Add("--conn\x00Server=h;Password=pw\x00host=h password=pw dbname=x", `{"token":"pw"}`)
 	f.Add("jdbc:postgresql://h/db?user=a&password=pw\x00jdbc:mysql://u:pw@h/db", "jdbc:x://u:p%zz1@h")
 	f.Add("-pghp_abcdefghij1234567890\x00ghp_abcdef123456=1", "https://ghp_abcdef123456:x@h/\x00https://tok:@h/x")
+	// Shapes of secretPairValues and quotedSpan.
+	f.Add(`host=db password='a\'b c'`+"\x00"+`Server=h;Pwd="x;""y";`, `{"token":"a\"b"}`+"\x00"+`password='a\`)
+	f.Add(`x/password="a\/b"/y`+"\x00"+`https://h/?password='a%20b'`, `jdbc:x://h/?pwd="a;b"`+"\x00"+`-p'password=x'`)
 
 	f.Fuzz(func(t *testing.T, before, after string) {
 		args := append(strings.Split(before, "\x00"), strings.Split(after, "\x00")...)

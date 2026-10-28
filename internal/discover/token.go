@@ -17,9 +17,17 @@ const (
 	uuidLen = 36
 )
 
-// looksLikeCredential reports whether s (a path segment, a query key or an
-// argument) looks like a token. The RedactURL doc comment lists the rules
-// and their limits.
+// looksLikeCredential reports whether s (a path segment, a query key, an
+// argument or a word of a config value) looks like a token: it starts with a
+// known token prefix (see HasTokenPrefix), it is a UUID, it has
+// minMixedTokenLen or more bytes with at least one ASCII letter and one
+// digit, or it has minTokenLen or more bytes. The RedactURL doc comment lists
+// the rules and their limits.
+//
+// The length rule does not look at the bytes, so a long text with spaces
+// counts too. Code that checks free text, such as an env value, uses
+// TokenLike, which splits the text into words first. It never prints or
+// stores s.
 func looksLikeCredential(s string) bool {
 	if len(s) >= minTokenLen || isUUID(s) || HasTokenPrefix(s) {
 		return true

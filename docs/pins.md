@@ -7,7 +7,8 @@
   prints `mcpmoat scan: pinned N tools for <server>` on stderr. The file is
   `$XDG_CONFIG_HOME/mcpmoat/pins.json`, or `~/.config/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is
   not set. The file has mode `0600`. It stores each tool's hash and text. It never stores env,
-  header, args or URL values from your configs.
+  header, args or URL values from your configs. But a server can echo such a value in its tool
+  text, and `pins.json` keeps that text as the server sent it.
 - **New pins file:** when `scan` or `pin --accept` creates a new `pins.json`, it prints one line on
   stderr after the save: `mcpmoat <cmd>: no pins file was found, so a new one was created at
   <path>; if this is not your first run, the old file was removed or moved`. On your first run
@@ -80,6 +81,17 @@
   `scan` cuts it and prints a warning on stderr with the tool and the server name. Review the full
   tool before you accept it. You can ignore these IDs with `--ignore` only (see [Ignore
   findings](ignore.md)).
+- **Secret values in diffs:** a diff shows each configured value of the server (the env, header and
+  expanded values, the secrets in the args and the URL, and the credential pieces inside them, of 8
+  bytes or more) as `********`, on the pinned side and on the current side. So does the tool name
+  of the diff and of the finding. mcpmoat masks the decoded text before it wraps and cuts the
+  diff, so a wrap or a cut never leaves a part of a value. When a tool changed only in text that
+  holds such a value, the diff is the fixed note `the tool changed only in text that holds a
+  secret value from the config, so the diff is hidden`. Like any diff that is only a note, it
+  gives a `To accept` line with no command. The hashes, `pins.json` and the digest of `--expect`
+  use the raw text, so an echoed secret still changes the hash and gives a `MOAT-T2-001` finding.
+  The mask uses the values that are configured now. See [What mcpmoat does not do](limits.md) for
+  its limits, such as a rotated token.
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
   change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
   exactly. If two clients use it, narrow it with `--config <file>`. If one file uses it in several

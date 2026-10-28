@@ -447,7 +447,7 @@ func TestCompareHashVersionMismatch(t *testing.T) {
 			// tell the tool from an unchanged one.
 			stored := ServerPins{tool.Name: {Hash: tt.hash, Canonical: good.Canonical}}
 			got := Compare(stored, []inspect.Tool{tool})
-			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, tool), Reason: ReasonHashVersion, Severity: "high"}}
+			want := []Change{{Kind: KindUnverified, Tool: tool.Name, RawTool: tool.Name, Diff: mustCurrentDiff(t, tool), Reason: ReasonHashVersion, Severity: "high"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("Compare() = %+v, want %+v", got, want)
 			}
@@ -466,7 +466,7 @@ func TestCompareHashVersionMismatchNeverChanged(t *testing.T) {
 	cur := cloneTool(tool)
 	cur.Description = "different"
 	got := Compare(stored, []inspect.Tool{cur})
-	want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonHashVersion, Severity: "high"}}
+	want := []Change{{Kind: KindUnverified, Tool: tool.Name, RawTool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonHashVersion, Severity: "high"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Compare() = %+v, want %+v", got, want)
 	}
@@ -489,7 +489,7 @@ func TestCompareCorruptStoredCanonical(t *testing.T) {
 			t.Parallel()
 			stored := ServerPins{tool.Name: {Hash: good.Hash, Canonical: canonical}}
 			got := Compare(stored, []inspect.Tool{cur})
-			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonPinMismatch, Severity: "high"}}
+			want := []Change{{Kind: KindUnverified, Tool: tool.Name, RawTool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonPinMismatch, Severity: "high"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Compare() = %+v, want %+v", got, want)
 			}
@@ -511,7 +511,7 @@ func TestCompareUnrenderableMatchingCanonical(t *testing.T) {
 	tool := compareTools()[0]
 	stored := ServerPins{tool.Name: pinFor(`{"name": 5}`)}
 	got := Compare(stored, []inspect.Tool{tool})
-	want := []Change{{Kind: KindChanged, Tool: tool.Name, Diff: diffUnavailable, Severity: "high"}}
+	want := []Change{{Kind: KindChanged, Tool: tool.Name, RawTool: tool.Name, Diff: diffUnavailable, Severity: "high"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Compare() = %+v, want %+v", got, want)
 	}
@@ -541,7 +541,7 @@ func TestCompareChangedDiffNeverEmpty(t *testing.T) {
 			t.Parallel()
 			stored := ServerPins{tool.Name: pinFor(tt.canonical)}
 			got := Compare(stored, []inspect.Tool{tool})
-			want := []Change{{Kind: KindChanged, Tool: tool.Name, Diff: diffNotVisible, Severity: "high"}}
+			want := []Change{{Kind: KindChanged, Tool: tool.Name, RawTool: tool.Name, Diff: diffNotVisible, Severity: "high"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Compare() = %+v, want %+v", got, want)
 			}
@@ -553,7 +553,7 @@ func TestCompareChangedDiffNeverEmpty(t *testing.T) {
 // makes it for a new tool and for a pin that cannot be checked.
 func mustCurrentDiff(t testing.TB, tool inspect.Tool) string {
 	t.Helper()
-	diff, truncated, err := newToolDiff(mustCanonical(t, tool))
+	diff, truncated, err := newToolDiff(mustCanonical(t, tool), nil)
 	if err != nil || truncated {
 		t.Fatalf("newToolDiff() = truncated %v, error %v; want a full diff", truncated, err)
 	}
@@ -585,7 +585,7 @@ func TestCompareUnverifiedReasons(t *testing.T) {
 	mismatch := maps.Clone(good)
 	mismatch["list"] = Pin{Hash: good["list"].Hash, Canonical: good["read_file"].Canonical}
 	changedList := withTool(t, base, "list", func(x *inspect.Tool) { x.Description = "z" })
-	newDiff, _, err := newToolDiff(mustCanonical(t, inspect.Tool{Name: "write_file", Description: "Write."}))
+	newDiff, _, err := newToolDiff(mustCanonical(t, inspect.Tool{Name: "write_file", Description: "Write."}), nil)
 	if err != nil {
 		t.Fatalf("newToolDiff() error = %v, want nil", err)
 	}
@@ -600,40 +600,40 @@ func TestCompareUnverifiedReasons(t *testing.T) {
 			name:    "duplicate name",
 			stored:  good,
 			current: append(compareTools(), inspect.Tool{Name: "list", Description: "again"}),
-			want:    []Change{{Kind: KindUnverified, Tool: "list", Reason: ReasonDuplicateName, Severity: "high"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "list", RawTool: "list", Reason: ReasonDuplicateName, Severity: "high"}},
 		},
 		{
 			name:    "empty name",
 			stored:  good,
 			current: append(compareTools(), inspect.Tool{Name: "", Description: "x"}),
-			want:    []Change{{Kind: KindUnverified, Tool: "", Reason: ReasonEmptyName, Severity: "medium"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "", RawTool: "", Reason: ReasonEmptyName, Severity: "medium"}},
 		},
 		{
 			name:    "invalid tool data",
 			stored:  good,
 			current: append(compareTools(), inspect.Tool{Name: "bad", InputSchema: []byte(`{not json`)}),
-			want:    []Change{{Kind: KindUnverified, Tool: "bad", Reason: ReasonInvalidTool, Severity: "medium"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "bad", RawTool: "bad", Reason: ReasonInvalidTool, Severity: "medium"}},
 		},
 		{
 			name:    "hash version",
 			stored:  badHash,
 			current: compareTools(),
-			want:    []Change{{Kind: KindUnverified, Tool: "list", Diff: mustCurrentDiff(t, toolNamed(t, base, "list")), Reason: ReasonHashVersion, Severity: "high"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "list", RawTool: "list", Diff: mustCurrentDiff(t, toolNamed(t, base, "list")), Reason: ReasonHashVersion, Severity: "high"}},
 		},
 		{
 			name:    "pin mismatch",
 			stored:  mismatch,
 			current: changedList,
-			want:    []Change{{Kind: KindUnverified, Tool: "list", Diff: mustCurrentDiff(t, toolNamed(t, changedList, "list")), Reason: ReasonPinMismatch, Severity: "high"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "list", RawTool: "list", Diff: mustCurrentDiff(t, toolNamed(t, changedList, "list")), Reason: ReasonPinMismatch, Severity: "high"}},
 		},
 		{
 			name:    "no reason for new and removed",
 			stored:  good,
 			current: append(without(compareTools(), "list"), inspect.Tool{Name: "write_file", Description: "Write."}),
 			want: []Change{
-				{Kind: KindRemoved, Tool: "list", Severity: "low"},
+				{Kind: KindRemoved, Tool: "list", RawTool: "list", Severity: "low"},
 				// A new tool next to a removed one is a likely rename: high.
-				{Kind: KindNew, Tool: "write_file", Diff: newDiff, Severity: "high"},
+				{Kind: KindNew, Tool: "write_file", RawTool: "write_file", Diff: newDiff, Severity: "high"},
 			},
 		},
 	}
