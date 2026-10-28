@@ -84,35 +84,19 @@ If your tool has no task tracker, report the status in your final result block o
 
 ## Atomic write
 
-```go
-func writeFileAtomic(path string, data []byte, perm fs.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".pins-*.tmp") // same dir: rename stays on one filesystem
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = os.Remove(f.Name())
-		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err = f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("sync temp file: %w", err)
-	}
-	if err = f.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err = os.Chmod(f.Name(), perm); err != nil {
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	return os.Rename(f.Name(), path)
-}
-```
+Follow `Store.saveWith` (`internal/pins/store.go`) and `atomicWriter.writeFile`
+(`internal/pins/atomic.go`). Never write `pins.json` by path:
+
+- Write through the `*os.Root` of the pins directory that `LoadLocked` checked and whose lock
+  file it locked. Check the directory handle again first (`checkDirHandle`).
+- A `Store` from plain `Load` holds no directory: its `Save` opens the directory again with the
+  same checks (`openPinsDir`: the parent walk, a missing directory created, the handle check).
+- Create the temp file `.pins-<26 base32 chars>.tmp` through the root with `O_EXCL` and mode `0600`
+  (random name from `crypto/rand`). Write, set mode `0600` on the open file, fsync and close.
+- Then `verifyPinsDir` (`os.Stat` of the directory path and `os.SameFile` with the opened
+  handle). When the directory was moved, removed or replaced, return an error that wraps
+  `ErrPinsDirChanged`, remove the temp file and save nothing.
+- Then `root.Rename` the temp file to `pins.json`, and fsync the directory (best effort).
 
 - Never use a fixed `path + ".tmp"`: two concurrent runs would corrupt each other.
 - Serialise writers inside one process with a mutex. Across processes, a read-change-save of

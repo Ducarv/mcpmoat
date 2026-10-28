@@ -514,13 +514,12 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   others. On macOS, their ACL must not give a write right to any user or group. `pins.json` must
   not be a symlink. mcpmoat checks the directory and the file that it reads, not only their paths.
   Each parent directory of the pins directory must belong to the user or to root, and must not be
-  writable by group or others unless the sticky bit is set. A symlink on the path to the pins
-  directory must belong to the user or to root, also a symlink that is reached only through the
-  target of another symlink. A pins path where no part exists is an error, not a first run.
-  Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
-  [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so on
-  macOS an allow entry for another user on `~/.config` or `~` is not detected (see
-  [docs/limits.md](limits.md)).
+  writable by group or others unless the sticky bit is set. On macOS, its ACL must not have an
+  allow entry with a write right for any user or group (a deny entry passes). A symlink on the path
+  to the pins directory must belong to the user or to root, also a symlink that is reached only
+  through the target of another symlink. A pins path where no part exists is an error, not a first
+  run. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
+  [docs/pins.md](pins.md).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).
@@ -580,7 +579,9 @@ text diff.
   pinned. It is a `high` `MOAT-T2-004` with a reason that says that the pins file is full, and the
   other servers are still pinned. If the server no longer fits at save time (another run made the
   file larger after the report), `scan` prints a warning on stderr, saves the other servers and
-  exits with code 2.
+  exits with code 2. The project-scope servers (from a project config) share at most 16 MiB of the
+  file, so the user-scope servers always keep the other half. A project-scope server past that
+  share gets the same treatment, with a reason that says that the project share is full.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
   (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
@@ -591,7 +592,9 @@ text diff.
   another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold
   yet, and prints `pinned N tools for <server>` only for those, after the save. `pin --accept`
   changes only the entry of its server. For that read and the save, they hold an advisory lock on
-  the pins directory, so two parallel runs keep each other's changes. A run waits up to 10 seconds
+  the file `pins.json.lock` in the pins directory, so two parallel runs keep each other's changes.
+  mcpmoat creates the lock file with mode 0600 and refuses a lock file that another user owns or
+  can open, so another user cannot hold the lock. A run waits up to 10 seconds
   for the lock, then exits with code 2. A file system that cannot lock runs without the lock, after
   one warning on stderr. When a save creates a new `pins.json`, `scan` and `pin --accept` print one
   notice on stderr, because a removed file makes every server look new (see
@@ -629,13 +632,20 @@ text diff.
   every shell, also `cmd.exe` and PowerShell, reads as plain text. Else the line says what to run
   and gives the digest, with no command. The line has no command either when the user did not see
   every change (a cut diff, a change that `--ignore` hid, or a diff that is only a note), when the
-  name cannot select the server, or when a config file has a problem. The line ends with
+  name cannot select the server, when a config file has a problem, or when `pins.json` or its
+  project share has no room for the new tools (then `pin --accept` would fail). The line ends with
   ` (the diff was cut: review the full tool first)`, ` (--ignore hid some changes: run scan without
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
-  change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
-  could not be inspected, an ignored finding, or tools that cannot be pinned.
+  change that the user did not see: the digest covers those changes too. A line for a server whose
+  new tools do not fit then ends with ` (pins.json has no room for these tools: pin --accept fails
+  until you remove servers you no longer use from pins.json)`. When only the project share has no
+  room, it ends with ` (the project share of pins.json has no room for these tools: pin --accept
+  fails until you remove project servers you no longer use from pins.json)`. There is no line for
+  a server pinned for the first time, a server that could not be inspected, an ignored finding, or
+  tools that cannot be pinned.
 - `scan` shows the inspection warnings in the summary of the server on stdout (on stderr with
-  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names
+  only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
   `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the

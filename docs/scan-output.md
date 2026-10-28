@@ -123,16 +123,23 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it` (see
   [Ignore findings](ignore.md)) and the warnings of the time limit and the caps above.
 - **Exit codes** do not change: 0, 1 or 2 (see [Exit codes](exit-codes.md)).
-- **`complete`** is `false` when the report can miss results, for example when a config file has a
+- **`complete`** is `true` when the report holds every result of the scan steps: the configs were
+  read, the servers were inspected, the rules ran, and the LLM step (with `--llm`) classified every
+  tool. It is `false` when the report can miss results, for example when a config file has a
   problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
   tool: a provider failure, a provider refusal of every tool, the 10-minute time limit of the LLM
   step, an internal error of the LLM step, or tools over the 500-tool cap (see
   [Optional LLM classification](llm.md)). The exit code is then 2, and the reason is on stderr. A
   tool that the provider refused (HTTP 400, 413 or 422) alone does not make `complete` `false`: it
   is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut or had a credential removed).
-  `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
-  always check the exit code too. A failed write to stdout (for example a closed pipe) can leave
-  only the first part of the document. It is not valid JSON, and the exit code is 2.
+  `complete` does not cover the save of new pins. `scan` saves them after it writes the document,
+  on purpose, so that you see the report before the pins are saved. So `"complete": true` with exit
+  code 2 can mean that the save failed, for example: another process held the pins lock or the
+  lock file was unsafe, `pins.json` was removed during the run, a server no longer fit in
+  `pins.json`, the pins directory was unsafe or changed, or a signal came before the save. The
+  reason is on stderr. Always check the exit code too. A failed write to stdout (for example a
+  closed pipe) can leave only the first part of the document. It is not valid JSON, and the exit
+  code is 2.
 - **`complete` stays `true` when the rule analysis stops at its time limit.** The `MOAT-T1-023`
   finding of each server that was cut or not analysed is the marker for an incomplete rule
   analysis. `complete` `false` would force exit code 2, and then a hostile server or rule could
@@ -150,7 +157,13 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **`accept`** is an optional field of a server. A pinned server that has a `To accept` hint in the
   terminal has `accept` with `digest` (`pd1:` and 64 hex characters, the same digest as in the
   terminal hint) and, only when the terminal hint prints a command, `command`. It never holds the
-  prose steps of a hint without a command. The `To accept` line itself is not in the JSON. When two
+  prose steps of a hint without a command. A server whose new tools do not fit in `pins.json` gets
+  a hint with no command, because `pin --accept` would fail: its `accept` has the digest only, and
+  its terminal line ends with `(pins.json has no room for these tools: pin --accept fails until you
+  remove servers you no longer use from pins.json)`. A project server whose new tools do not fit in
+  the project share gets the same hint with the digest only, and its terminal line ends with `(the
+  project share of pins.json has no room for these tools: pin --accept fails until you remove
+  project servers you no longer use from pins.json)`. The `To accept` line itself is not in the JSON. When two
   servers have the same identity (the same client, source, project path and name), `scan` prints one
   `To accept` line, and the JSON gives both servers the same `accept` object, with the same digest.
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at
@@ -166,12 +179,13 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   kind of finding, and [Size bound](ARCHITECTURE.md#size-bound) for the tests.
 - A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
   in `related`. An LLM finding (`MOAT-LLM-001`, `MOAT-LLM-002`) also has `"field": "tool"` and
-  the tool name in `key`. In a tool rule finding and in an LLM finding, a tool name longer than
-  512 characters (runes) is cut to 512 in `key` and ends with `...`. A pin finding
-  (`MOAT-T2-001` to `MOAT-T2-003`) is not cut yet: its `key` holds the full tool name. In all
-  these `key` fields, and in the `tool` and `diff` of each entry of `diffs`, a configured value
-  that the server echoes shows as `********` (see **Configured values in tool text** above). The
-  `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
+  the tool name in `key`. A pin finding (`MOAT-T2-001` to `MOAT-T2-003`) also has the tool name in
+  `key`. In each of these findings, a tool name longer than 512 characters (runes) is cut to 512 in
+  `key` and ends with `...`. A pin finding for a tool with an empty name keeps an empty `key`, like
+  the `MOAT-T2-004` findings about a whole server. An ignore entry matches the full tool name, not
+  the cut `key`. In all these `key` fields, and in the `tool` and `diff` of each entry of `diffs`, a
+  configured value that the server echoes shows as `********` (see **Configured values in tool
+  text** above). The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
   (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
 - mcpmoat never writes the env or header values of your config itself. A finding names the key it
   is about, for example `GITHUB_TOKEN`, never its value. A server can echo a value in its tool

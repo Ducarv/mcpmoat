@@ -10,11 +10,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -197,7 +199,10 @@ func aclEntries(aces ...aclACE) []byte {
 	return aclFilesec(kauthFilesecMagic, uint32(len(aces)), aces, 0) //nolint:gosec // G115: tests use a few entries.
 }
 
-func TestACLAllowsWrite(t *testing.T) {
+// TestFirstWriteACEFound checks whether firstWriteACE finds a write entry
+// (the rule of checkACL and checkParentACL). TestFirstPermitACE checks the
+// index.
+func TestFirstWriteACEFound(t *testing.T) {
 	t.Parallel()
 	// Values from <sys/kauth.h> that acl_darwin.go does not name.
 	const (
@@ -257,9 +262,9 @@ func TestACLAllowsWrite(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := aclAllowsWrite(tt.in)
+			_, got, err := firstWriteACE(tt.in)
 			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Errorf("aclAllowsWrite() = %v, %v, want %v, error %v", got, err, tt.want, tt.wantErr)
+				t.Errorf("firstWriteACE() found = %v, error %v, want %v, error %v", got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
@@ -341,13 +346,323 @@ func TestReadFilesecReal(t *testing.T) {
 		return sec
 	}
 	if sec := read(); len(sec) != 0 {
-		if w, err := aclAllowsWrite(sec); err != nil || w {
-			t.Errorf("no ACL: aclAllowsWrite() = %v, %v, want false, nil", w, err)
+		if _, w, err := firstWriteACE(sec); err != nil || w {
+			t.Errorf("no ACL: firstWriteACE() found = %v, %v, want false, nil", w, err)
 		}
 	}
 	aclAdd(t, path, "everyone allow write")
 	sec := read()
-	if w, err := aclAllowsWrite(sec); err != nil || !w {
-		t.Errorf("allow write: aclAllowsWrite() = %v, %v, want true, nil", w, err)
+	if _, w, err := firstWriteACE(sec); err != nil || !w {
+		t.Errorf("allow write: firstWriteACE() found = %v, %v, want true, nil", w, err)
+	}
+}
+
+// aclParentSetup makes base/cfg/mcpmoat/pins.json with private modes and
+// returns the parent directory cfg, the pins directory and the pins file.
+func aclParentSetup(t *testing.T) (parent, pinsDir, path string) {
+	t.Helper()
+	parent = newNamedPinsDir(t, "cfg", 0o700)
+	pinsDir = filepath.Join(parent, "mcpmoat")
+	if err := os.Mkdir(pinsDir, 0o700); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	return parent, pinsDir, seedPins(t, pinsDir, 0o600)
+}
+
+// aclWantParentRefused fails the test unless err is the ACL refusal of the
+// parent directory parent (a real path) for the entry index, with the chmod
+// -a# hint for the owner and without "--" or chmod -N.
+func aclWantParentRefused(t *testing.T, err error, parent string, index int) {
+	t.Helper()
+	cmd := fmt.Sprintf("chmod -a# %d %s", index, shellQuote(parent))
+	wantInsecure(t, err, parent,
+		"pins parent directory {path} is not safe",
+		fmt.Sprintf("its ACL entry %d lets a user or group change it", index),
+		"(fix: "+cmd+", "+privateConfigHint,
+		"ls -led "+shellQuote(parent))
+	for _, bad := range []string{"chmod -N", fmt.Sprintf("chmod -a# %d -- ", index)} {
+		if strings.Contains(err.Error(), bad) {
+			t.Errorf("error = %q, must not contain %q", err, bad)
+		}
+	}
+}
+
+// TestParentACL checks that the parent walk refuses a parent directory whose
+// ACL has an allow entry with a write-class right (#217), through
+// checkParents, Load and LoadLocked, and that deny entries pass.
+func TestParentACL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		entries []string // added in this order with chmod +a
+		index   int      // the index in the hint; -1 means no refusal
+	}{
+		{"no ACL", nil, -1},
+		{"allow delete_child", []string{"everyone allow delete_child"}, 0},
+		{"allow add_subdirectory", []string{"everyone allow add_subdirectory"}, 0},
+		{"allow add_file", []string{"everyone allow add_file"}, 0},
+		{"allow writesecurity", []string{"everyone allow writesecurity"}, 0},
+		{"allow write", []string{"everyone allow write"}, 0},
+		{"allow delete", []string{"everyone allow delete"}, 0},
+		{"allow chown", []string{"everyone allow chown"}, 0},
+		{"allow read only", []string{"everyone allow list,search,readattr,readextattr,readsecurity"}, -1},
+		{"deny delete", []string{"everyone deny delete"}, -1},
+		{"deny delete, then allow delete_child", []string{"everyone deny delete", "everyone allow delete_child"}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			parent, pinsDir, path := aclParentSetup(t)
+			for _, e := range tt.entries {
+				aclAdd(t, parent, e)
+			}
+			resolved := realPath(t, parent)
+
+			checkErr := checkParents(pinsDir)
+			s, loadErr := Load(path)
+			ls, release, lockErr := LoadLocked(t.Context(), path, 0)
+			release()
+			if tt.index < 0 {
+				if checkErr != nil || loadErr != nil || lockErr != nil {
+					t.Errorf("checkParents, Load, LoadLocked errors = %v, %v, %v, want nil", checkErr, loadErr, lockErr)
+				}
+				return
+			}
+			for name, err := range map[string]error{"checkParents": checkErr, "Load": loadErr, "LoadLocked": lockErr} {
+				t.Run(name, func(t *testing.T) { aclWantParentRefused(t, err, resolved, tt.index) })
+			}
+			if s != nil || ls != nil {
+				t.Errorf("Load() and LoadLocked() stores = %v, %v, want nil", s, ls)
+			}
+			// LoadLocked checks the parents before it opens the lock file.
+			if _, err := os.Lstat(path + lockSuffix); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Lstat(lock file) error = %v, want not exist after a refusal", err)
+			}
+		})
+	}
+
+	// An ACL on the pins directory itself is not a parent ACL: the check of
+	// the pins directory handle (checkACL) refuses it, with its own hint.
+	t.Run("ACL on the pins directory only", func(t *testing.T) {
+		t.Parallel()
+		_, pinsDir, path := aclParentSetup(t)
+		aclAdd(t, pinsDir, "everyone allow add_file")
+		if err := checkParents(pinsDir); err != nil {
+			t.Errorf("checkParents() error = %v, want nil: the pins directory is not its own parent", err)
+		}
+		_, err := Load(path)
+		aclWantRefused(t, err, pinsDir)
+		if !strings.Contains(err.Error(), "pins directory "+pinsDir) || strings.Contains(err.Error(), "parent") {
+			t.Errorf("Load() error = %q, want the pins directory check, not the parent check", err)
+		}
+	})
+}
+
+// TestCheckParentACLHint covers the owner variants of the checkParentACL hint.
+// The owner comes from info, so a faked Stat_t covers root and another user.
+func TestCheckParentACLHint(t *testing.T) {
+	t.Parallel()
+	me := os.Geteuid()
+	meOwner := uint32(me) //nolint:gosec // G115: a uid from Geteuid fits in the uint32 of Stat_t.
+	dir := newNamedPinsDir(t, "my parent'dir", 0o700)
+	aclAdd(t, dir, "everyone allow delete_child")
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("Lstat() error = %v", err)
+	}
+	cmd := "chmod -a# 0 " + shellQuote(dir)
+	tests := []struct {
+		name string
+		info fs.FileInfo
+		uid  int
+		fix  string
+	}{
+		{"own, real info", info, me, "(fix: " + cmd + ", "},
+		{"own, faked", fakeInfo{info, &syscall.Stat_t{Uid: meOwner}}, me, "(fix: " + cmd + ", "},
+		{"root owns it", fakeInfo{info, &syscall.Stat_t{Uid: 0}}, me + 1, "(fix: ask root to run " + cmd + ", "},
+		{"another user owns it", fakeInfo{info, &syscall.Stat_t{Uid: 4242}}, me + 1, "(fix: ask the owner or root to run " + cmd + ", "},
+		{"unknown owner", fakeInfo{info, nil}, me, "(fix: ask the owner or root to run " + cmd + ", "},
+		{"no info", nil, me, "(fix: ask the owner or root to run " + cmd + ", "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkParentACL(dir, tt.info, tt.uid)
+			wantInsecure(t, err, dir, tt.fix, "pins parent directory {path} is not safe")
+			if strings.Contains(err.Error(), "chmod -N") || strings.Contains(err.Error(), "-- ") {
+				t.Errorf("checkParentACL() error = %q, want no chmod -N and no --", err)
+			}
+		})
+	}
+
+	t.Run("exact text", func(t *testing.T) {
+		t.Parallel()
+		want := "pins parent directory " + dir + " is not safe: its ACL entry 0 lets a user or group change it (fix: " +
+			cmd + ", or use a private XDG_CONFIG_HOME; ls -led " + shellQuote(dir) + " shows the entries): insecure permissions"
+		if err := checkParentACL(dir, info, me); err == nil || err.Error() != want {
+			t.Errorf("error = %v\nwant    %q", err, want)
+		}
+	})
+
+	t.Run("no ACL passes", func(t *testing.T) {
+		t.Parallel()
+		clean := newNamedPinsDir(t, "clean", 0o700)
+		if err := checkParentACL(clean, nil, me); err != nil {
+			t.Errorf("checkParentACL() error = %v, want nil", err)
+		}
+	})
+
+	t.Run("missing path fails closed", func(t *testing.T) {
+		t.Parallel()
+		missing := filepath.Join(t.TempDir(), "missing")
+		err := checkParentACL(missing, nil, me)
+		wantInsecure(t, err, missing, "cannot read the ACL of the pins parent directory {path}")
+	})
+}
+
+func TestFirstPermitACE(t *testing.T) {
+	t.Parallel()
+	// Values from <sys/kauth.h> that acl_darwin.go does not name.
+	const (
+		aceDeny        = 2       // KAUTH_ACE_DENY
+		vnodeReadAttrs = 1 << 7  // KAUTH_VNODE_READ_ATTRIBUTES
+		vnodeReadSec   = 1 << 11 // KAUTH_VNODE_READ_SECURITY
+	)
+	permit := func(r uint32) aclACE { return aclACE{kauthACEPermit, r} }
+	write, open := uint32(aclWriteRights), uint32(lockOpenRights)
+	tests := []struct {
+		name      string
+		in        []byte
+		rights    uint32
+		wantIndex int
+		wantFound bool
+		wantErr   bool
+	}{
+		{"nil", nil, open, 0, false, false},
+		{"short", make([]byte, filesecHeaderSize-1), open, 0, false, true},
+		{"bad magic", aclFilesec(0x12345678, 0, nil, 0), open, 0, false, true},
+		{"read data opens the lock file", aclEntries(permit(kauthVnodeReadData)), open, 0, true, false},
+		{"read data is not a write right", aclEntries(permit(kauthVnodeReadData)), write, 0, false, false},
+		{"execute opens the lock file", aclEntries(permit(kauthVnodeExecute)), open, 0, true, false},
+		{"execute is not a write right", aclEntries(permit(kauthVnodeExecute)), write, 0, false, false},
+		{"generic read", aclEntries(permit(kauthACEGenericRead)), open, 0, true, false},
+		{"generic execute", aclEntries(permit(kauthACEGenericExecute)), open, 0, true, false},
+		{"write data opens the lock file", aclEntries(permit(kauthVnodeWriteData)), open, 0, true, false},
+		{"read attributes and security only", aclEntries(permit(vnodeReadAttrs | vnodeReadSec)), open, 0, false, false},
+		{"deny read", aclEntries(aclACE{aceDeny, open}), open, 0, false, false},
+		{"index of the first match, open", aclEntries(aclACE{aceDeny, open}, permit(vnodeReadAttrs), permit(kauthVnodeReadData), permit(kauthVnodeWriteData)), open, 2, true, false},
+		{"index of the first match, write", aclEntries(aclACE{aceDeny, open}, permit(vnodeReadAttrs), permit(kauthVnodeReadData), permit(kauthVnodeDeleteChild)), write, 3, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			index, found, err := firstPermitACE(tt.in, tt.rights)
+			if (err != nil) != tt.wantErr || found != tt.wantFound || index != tt.wantIndex {
+				t.Errorf("firstPermitACE() = %d, %v, %v, want %d, %v, error %v", index, found, err, tt.wantIndex, tt.wantFound, tt.wantErr)
+			}
+			if tt.rights != write {
+				return
+			}
+			// firstWriteACE is firstPermitACE with aclWriteRights.
+			wi, wf, werr := firstWriteACE(tt.in)
+			if wi != index || wf != found || (werr != nil) != (err != nil) {
+				t.Errorf("firstWriteACE() = %d, %v, %v, want the result of firstPermitACE", wi, wf, werr)
+			}
+		})
+	}
+}
+
+// TestCheckLockFileACL checks that a lock file with an allow entry that lets a
+// user or group open it is refused, with the rm hint, and that deny entries
+// and read-attribute entries pass.
+func TestCheckLockFileACL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		entries []string
+		refused bool
+	}{
+		{"no ACL", nil, false},
+		{"allow read", []string{"everyone allow read"}, true},
+		{"allow execute", []string{"everyone allow execute"}, true},
+		{"allow write", []string{"everyone allow write"}, true},
+		{"allow readattr only", []string{"everyone allow readattr,readsecurity"}, false},
+		// A deny entry for everyone would lock the test out too, so it names nobody.
+		{"deny read", []string{"user:nobody deny read,execute,write"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(newPinsDir(t, 0o700), lockName)
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			for _, e := range tt.entries {
+				aclAdd(t, path, e)
+			}
+			check := func() error {
+				f, err := os.Open(path) //nolint:gosec // G304: the test builds path under t.TempDir().
+				if err != nil {
+					// On some CI runners the deny entry for "nobody" also locks
+					// the test user out. The check under test has not run then.
+					if len(tt.entries) > 0 && !tt.refused && errors.Is(err, fs.ErrPermission) {
+						t.Skipf("the deny entry %q locks the test user out: %v", tt.entries, err)
+					}
+					t.Fatalf("Open() error = %v", err)
+				}
+				defer func() { _ = f.Close() }()
+				return checkLockFileACL(path, f)
+			}
+			err := check()
+			if !tt.refused {
+				if err != nil {
+					t.Errorf("checkLockFileACL() error = %v, want nil", err)
+				}
+				return
+			}
+			aclWantLockRefused(t, err, path)
+
+			// LoadLocked refuses it too, and does not remove the ACL.
+			_, release, err := LoadLocked(t.Context(), filepath.Join(filepath.Dir(path), "pins.json"), 0)
+			release()
+			aclWantLockRefused(t, err, path)
+			aclWantLockRefused(t, check(), path)
+		})
+	}
+
+	t.Run("no usable file fails closed", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(newPinsDir(t, 0o700), lockName)
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		f, err := os.Open(path) //nolint:gosec // G304: the test builds path under t.TempDir().
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		_ = f.Close()
+		for name, file := range map[string]*os.File{"nil file": nil, "closed file": f} {
+			t.Run(name, func(t *testing.T) {
+				wantInsecure(t, checkLockFileACL(path, file), path, "cannot read the ACL of the pins lock file {path}")
+			})
+		}
+	})
+}
+
+// aclWantLockRefused fails the test unless err is the ACL refusal of the lock
+// file path, with the rm hint (lockFileFix). It never says chmod for the lock
+// file itself; the only chmod is the chmod -N of the pins directory.
+func aclWantLockRefused(t *testing.T, err error, path string) {
+	t.Helper()
+	wantInsecure(t, err, path)
+	want := "pins lock file " + path + " is not safe: its ACL entry 0 lets a user or group open it (fix: rm -- " +
+		shellQuote(path) + ", then mcpmoat makes a new one with mode 0600; " +
+		"if the entry comes back, it is inherited from the pins directory, so also run chmod -N -- " +
+		shellQuote(filepath.Dir(path)) + "): insecure permissions"
+	if err.Error() != want {
+		t.Errorf("error = %q\nwant    %q", err, want)
+	}
+	if strings.Contains(err.Error(), "chmod -- ") || strings.Contains(err.Error(), "chmod 0") {
+		t.Errorf("error = %q, the fix for the lock file must be rm, never chmod", err)
 	}
 }
