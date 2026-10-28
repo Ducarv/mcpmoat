@@ -95,6 +95,9 @@ func TestIsSecretName(t *testing.T) {
 		{name: "SIGNATURE", want: true},
 		{name: "webhookSignature", want: true},
 		{name: "x-hub-signature-256", want: true},
+		{name: "X_HMAC", want: true},
+		{name: "hmacKey", want: true},
+		{name: "X-Hmac-Sha256", want: true},
 		// Accepted false positives: the name holds a secret word but is
 		// not a credential name.
 		{name: "SIGNATURE_ALGORITHM", want: true},

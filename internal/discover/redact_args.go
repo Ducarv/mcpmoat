@@ -1400,7 +1400,7 @@ func IsSecretName(name string) bool {
 	secretParts := [...]string{
 		"token", "secret", "password", "passwd", "passphrase", "passcode",
 		"pwd", "key", "auth", "credential", "bearer", "cookie", "session",
-		"mnemonic", "private", "signature", "accesscode",
+		"mnemonic", "private", "signature", "accesscode", "hmac",
 	}
 	joined := strings.ToLower(strings.Join(words, ""))
 	for _, part := range secretParts {
