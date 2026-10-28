@@ -12,8 +12,9 @@ import (
 // This file checks the duplicate checks of valueCredentials, cookieSecrets
 // and headerSecrets. The config controls the value, and a large value has one
 // piece per pair, so the check must not grow with the square of the number
-// of pieces (NFR-03). The benchmarks show the cost; the test shows that the
-// output is the same as the one of the old linear search.
+// of pieces (NFR-03). The benchmarks show the cost; the tests show that the
+// lists have each piece one time, in the order of first occurrence. They do
+// not copy the parsers, so a change of a parser does not break them.
 
 // manyPairs returns n pairs "<key>=<7 digits>", joined with sep. Each value
 // differs, so no pair is a duplicate.
@@ -48,105 +49,96 @@ func BenchmarkHeaderSecretsManyPairs(b *testing.B) {
 	}
 }
 
-// oldValueCredentials, oldCookieSecrets and oldHeaderSecrets are the old
-// forms of the three functions, with a linear search in the lists. They are
-// the reference for TestDedupeSameOutput.
-func oldValueCredentials(value string) (long, short []string) {
-	for _, v := range discover.ArgCredentials([]string{value}) {
-		switch {
-		case v == value, slices.Contains(long, v), slices.Contains(short, v):
-		case len(v) >= discover.MinSecretBytes:
-			long = append(long, v)
-		case v != "":
-			short = append(short, v)
-		}
-	}
-	return long, short
+// headersWithRepeats are header values that repeat pieces on purpose. They
+// are fake values, not real credentials.
+var headersWithRepeats = []struct{ key, value string }{
+	{"Cookie", "sid=abcdefgh12; sid=abcdefgh12; theme=dark; a=b; a=b; q=\"quoted-value-1\"; x=sid=abcdefgh12"},
+	{"Set-Cookie", "sid=abcdefgh12; Path=/; Domain=example.com"},
+	{"Cookie2", "a=1;b=1;c=abcdefgh12;d=abcdefgh12"},
+	{"Authorization", "Bearer tok_abcdefgh12345678"},
+	{"Authorization", "Basic " + rmBasic("user", "password-123")},
+	{"X-Db", "postgres://u:pw@h/db password=pw password=secret-12345 password=secret-12345"},
+	{"X-Conn", "pw=abc;pw=abc;pw=abcdefgh12;pw=abcdefgh12"},
+	{"Content-Type", "application/json"},
+	{"Cookie", manyPairs("sid", "; ", 50) + "; " + manyPairs("sid", "; ", 50)},
+	{"X-Many", manyPairs("pw", ";", 50) + ";" + manyPairs("pw", ";", 50)},
+	{"Cookie", ""},
 }
 
-func oldCookieSecrets(key, value string) (long, short []string) {
-	if !isCookieHeader(key) {
-		return nil, nil
-	}
-	add := func(piece string) {
-		switch {
-		case piece == "", piece == value, slices.Contains(long, piece), slices.Contains(short, piece):
-		case len(piece) >= discover.MinSecretBytes:
-			long = append(long, piece)
-		default:
-			short = append(short, piece)
-		}
-	}
-	parts := strings.Split(value, ";")
-	if strings.EqualFold(strings.TrimSpace(key), "set-cookie") {
-		parts = parts[:1]
-	}
-	for _, part := range parts {
-		pair := strings.TrimSpace(part)
-		name, val, found := strings.Cut(pair, "=")
-		if !found || strings.TrimSpace(name) == "" {
-			continue
-		}
-		val = strings.TrimSpace(val)
-		add(pair)
-		add(val)
-		if len(val) >= 2 && strings.HasPrefix(val, `"`) && strings.HasSuffix(val, `"`) {
-			add(val[1 : len(val)-1])
-		}
-	}
-	return long, short
-}
-
-func oldHeaderSecrets(key, value string) []string {
-	var secrets []string
-	if value != "" {
-		secrets = append(secrets, value)
-	}
-	if cred := credentialPart(value); cred != "" {
-		secrets = append(secrets, cred)
-	}
-	secrets = append(secrets, basicSecrets(value)...)
-	cookieLong, _ := oldCookieSecrets(key, value)
-	innerLong, _ := oldValueCredentials(value)
-	for _, piece := range slices.Concat(cookieLong, innerLong) {
-		if !slices.Contains(secrets, piece) {
-			secrets = append(secrets, piece)
-		}
-	}
-	return secrets
-}
-
-// TestDedupeSameOutput checks that the seen-sets give the same lists, in the
-// same order, as the old linear search. The values repeat pieces on purpose.
-// They are fake values, not real credentials.
-func TestDedupeSameOutput(t *testing.T) {
+// TestDedupeLists checks the lists of valueCredentials, cookieSecrets and
+// headerSecrets for the properties of a set that keeps its order: no piece
+// twice, no empty piece, no piece that is the whole value, and each piece
+// in the list of its size.
+func TestDedupeLists(t *testing.T) {
 	t.Parallel()
-	headers := []struct{ key, value string }{
-		{"Cookie", "sid=abcdefgh12; sid=abcdefgh12; theme=dark; a=b; a=b; q=\"quoted-value-1\"; x=sid=abcdefgh12"},
-		{"Set-Cookie", "sid=abcdefgh12; Path=/; Domain=example.com"},
-		{"Cookie2", "a=1;b=1;c=abcdefgh12;d=abcdefgh12"},
-		{"Authorization", "Bearer tok_abcdefgh12345678"},
-		{"Authorization", "Basic " + rmBasic("user", "password-123")},
-		{"X-Db", "postgres://u:pw@h/db password=pw password=secret-12345 password=secret-12345"},
-		{"X-Conn", "pw=abc;pw=abc;pw=abcdefgh12;pw=abcdefgh12"},
-		{"Content-Type", "application/json"},
-		{"Cookie", manyPairs("sid", "; ", 50) + "; " + manyPairs("sid", "; ", 50)},
-		{"X-Many", manyPairs("pw", ";", 50) + ";" + manyPairs("pw", ";", 50)},
-		{"Cookie", ""},
+	noDups := func(t *testing.T, what string, lists ...[]string) {
+		t.Helper()
+		seen := make(map[string]struct{})
+		for _, list := range lists {
+			for _, v := range list {
+				if _, dup := seen[v]; dup {
+					t.Errorf("%s: a piece is in the lists twice", what)
+				}
+				seen[v] = struct{}{}
+			}
+		}
 	}
-	for _, h := range headers {
+	sizes := func(t *testing.T, what, value string, long, short []string) {
+		t.Helper()
+		for _, v := range long {
+			if len(v) < discover.MinSecretBytes || v == "" || v == value {
+				t.Errorf("%s: a piece of long has %d bytes or is the whole value", what, len(v))
+			}
+		}
+		for _, v := range short {
+			if len(v) >= discover.MinSecretBytes || v == "" || v == value {
+				t.Errorf("%s: a piece of short has %d bytes or is the whole value", what, len(v))
+			}
+		}
+	}
+	for _, h := range headersWithRepeats {
+		long, short := valueCredentials(h.value)
+		noDups(t, "valueCredentials of "+h.key, long, short)
+		sizes(t, "valueCredentials of "+h.key, h.value, long, short)
+
+		long, short = cookieSecrets(h.key, h.value)
+		noDups(t, "cookieSecrets of "+h.key, long, short)
+		sizes(t, "cookieSecrets of "+h.key, h.value, long, short)
+
+		noDups(t, "headerSecrets of "+h.key, headerSecrets(h.key, h.value))
+	}
+}
+
+// TestDedupeOrder checks that valueCredentials keeps the order of first
+// occurrence of the pieces that discover.ArgCredentials gives, and that
+// cookieSecrets does so for a cookie with repeated pairs.
+func TestDedupeOrder(t *testing.T) {
+	t.Parallel()
+	for _, h := range headersWithRepeats {
+		var wantLong, wantShort []string
+		seen := make(map[string]struct{})
+		for _, v := range discover.ArgCredentials([]string{h.value}) {
+			if _, dup := seen[v]; dup || v == "" || v == h.value {
+				continue
+			}
+			seen[v] = struct{}{}
+			if len(v) >= discover.MinSecretBytes {
+				wantLong = append(wantLong, v)
+			} else {
+				wantShort = append(wantShort, v)
+			}
+		}
 		gotLong, gotShort := valueCredentials(h.value)
-		wantLong, wantShort := oldValueCredentials(h.value)
 		if !slices.Equal(gotLong, wantLong) || !slices.Equal(gotShort, wantShort) {
-			t.Errorf("valueCredentials of the %s value: the lists differ from the linear search", h.key)
+			t.Errorf("valueCredentials of the %s value: the lists differ from the pieces of discover.ArgCredentials", h.key)
 		}
-		gotLong, gotShort = cookieSecrets(h.key, h.value)
-		wantLong, wantShort = oldCookieSecrets(h.key, h.value)
-		if !slices.Equal(gotLong, wantLong) || !slices.Equal(gotShort, wantShort) {
-			t.Errorf("cookieSecrets of the %s value: the lists differ from the linear search", h.key)
-		}
-		if got, want := headerSecrets(h.key, h.value), oldHeaderSecrets(h.key, h.value); !slices.Equal(got, want) {
-			t.Errorf("headerSecrets of the %s value: the list differs from the linear search", h.key)
-		}
+	}
+
+	long, short := cookieSecrets("Cookie", "sid=abcdefgh12; sid=abcdefgh12; theme=dark; a=b; a=b")
+	if want := []string{"sid=abcdefgh12", "abcdefgh12", "theme=dark"}; !slices.Equal(long, want) {
+		t.Errorf("cookieSecrets() long = %q, want %q", long, want)
+	}
+	if want := []string{"dark", "a=b", "b"}; !slices.Equal(short, want) {
+		t.Errorf("cookieSecrets() short = %q, want %q", short, want)
 	}
 }

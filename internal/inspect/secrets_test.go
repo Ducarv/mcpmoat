@@ -589,6 +589,7 @@ func TestIsCredential(t *testing.T) {
 		// Must match.
 		{varName: "API_KEY", value: "production", want: true, describe: "secret-like name, plain value"},
 		{varName: "MCPMOAT_TEST_TOKEN", value: "production", want: true, describe: "token in the name"},
+		{varName: "X_HMAC", value: "deadbeefdeadbeef", want: true, describe: "hmac in the name, short hex value"},
 		{varName: "NODE_ENV", value: credTok, want: true, describe: "plain name, token-like value"},
 		{varName: "", value: credTok, want: true, describe: "no name, token-like value"},
 		{varName: "DATABASE_URL", value: credDSN, want: true, describe: "URL with a password"},
@@ -677,7 +678,7 @@ func TestEnvCredentials(t *testing.T) {
 // TestInnerCredentialsEverySource checks that the credentials inside one
 // config value (see valueCredentials) reach the same lists whether the value
 // is an env value (envSecrets, envCredentials), the value of an expanded
-// variable (lookupRecorder) or a header value (splitHeaders,
+// variable (lookupRecorder) or a header value (headerSecretValues,
 // headerCredentials, headerShortSecrets). A server can echo the password of a
 // connection URL alone, so a long piece goes to Secrets and Credentials and a
 // short piece to the whole-word list only. A value with no credential in it
@@ -703,7 +704,7 @@ func TestInnerCredentialsEverySource(t *testing.T) {
 		},
 		"header value": func(value string) lists {
 			cfg := discover.SecretMap{"X-Db": discover.NewSecret(value)}
-			_, secrets := splitHeaders(cfg)
+			secrets := headerSecretValues(cfg)
 			return lists{secrets, headerCredentials(cfg), headerShortSecrets(cfg)}
 		},
 	}

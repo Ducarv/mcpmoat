@@ -31,8 +31,7 @@ type secretLists struct {
 
 // resultSecrets returns the values in list as discover.Secret values, for
 // Result.Secrets. It keeps only the values of at least discover.MinSecretBytes
-// bytes, each one time. The callers pass secretLists.long; a test that has
-// more than one list joins them with slices.Concat.
+// bytes, each one time. The callers pass secretLists.long.
 //
 // The scrub of error text (see scrub) also removes shorter header values and
 // a short URL password. Result.Secrets does not hold them: a consumer removes
@@ -43,7 +42,7 @@ type secretLists struct {
 // The result is sorted longest first, then by value. The sort makes the
 // output stable: it does not depend on the order of a map. The consumers
 // (discover.NewTextRedactor in cmd/mcpmoat, and llm through
-// Result.Credentials) do not need that order, and discover.SecretTextValues
+// Result.Credentials) do not need that order, and discover.NewTextRedactor
 // removes duplicates again. It is nil when no value is long enough.
 //
 // The sort and the duplicate check compare the raw values in memory only.
@@ -125,11 +124,7 @@ func isCredential(name, value string) bool {
 // inside a longer value, such as the password of "postgres://u:pw@h/db", the
 // token of "Bearer x" or the value of "password=x" in a connection string.
 // Plain words, such as "production" or "application/json", give false.
-//
-// discover.TokenLike checks each word of value (it splits value with
-// strings.Fields). holdsCredential adds the check of discover.ArgCredentials
-// for a credential inside a longer value, such as the password of a
-// connection URL, which no word check finds.
+// discover.TokenLike splits value with strings.Fields.
 //
 // It never prints or stores value.
 func holdsCredential(value string) bool {

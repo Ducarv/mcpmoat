@@ -175,7 +175,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	endpointURL, user := splitUserinfo(u)
 	endpoint := endpointURL.String()
 
-	headers, _ := splitHeaders(srv.Headers)
+	headers := headerMap(srv.Headers)
 	// lists are all the strings that classify removes from error text, and
 	// the ones that go to the Result lists on success.
 	lists := remoteSecretLists(srv, u, opts.lookedUp)
@@ -204,7 +204,8 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	})
 	if err != nil {
 		if errors.Is(err, errReservedHeader) || errors.Is(err, errInvalidHeaderValue) {
-			// The text holds the header key only, never a value.
+			// The text holds the header key only, never a value, so there is
+			// nothing to remove: a nil list makes cutWords only cut.
 			return Result{}, configError(srv, cutWords(err.Error(), nil))
 		}
 		return Result{}, configError(srv, "invalid HTTP client settings")
@@ -327,7 +328,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 // in srv itself.
 //
 //   - long: the header values and the secrets inside them (see
-//     splitHeaders), the secrets of the URL user info (see userinfoSecrets),
+//     headerSecretValues), the secrets of the URL user info (see userinfoSecrets),
 //     the secret query parts and path segments (see urlSecrets), the URL
 //     credentials (see urlCredentials) and lookedUp.long.
 //   - short: the short values of remoteShortSecrets.
@@ -344,7 +345,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 // The result holds raw values. Never print, log or encode them.
 func remoteSecretLists(srv discover.Server, u *url.URL, lookedUp secretLists) secretLists {
 	raw := srv.URL.Reveal()
-	_, headerValues := splitHeaders(srv.Headers)
+	headerValues := headerSecretValues(srv.Headers)
 	userValues := userinfoSecrets(u.User)
 	urlCreds := urlCredentials(raw)
 	return secretLists{
@@ -473,23 +474,30 @@ func urlSecrets(rawQuery, raw string) []string {
 	return secrets
 }
 
-// splitHeaders returns the config headers with their raw values, for the
-// HTTP client, and the secrets in them, for classify to remove from error
-// text: each non-empty value and, for a value with an auth scheme such as
-// "Bearer <token>", the credential part alone (see credentialPart), and the
-// other secrets of headerSecrets.
-func splitHeaders(cfg discover.SecretMap) (headers map[string]string, secrets []string) {
-	headers = make(map[string]string, len(cfg))
+// headerMap returns the config headers with their raw values, for the HTTP
+// client. It does not look for secrets in the values: see headerSecretValues.
+func headerMap(cfg discover.SecretMap) map[string]string {
+	headers := make(map[string]string, len(cfg))
 	for key, secret := range cfg {
-		value := secret.Reveal()
-		headers[key] = value
-		secrets = append(secrets, headerSecrets(key, value)...)
+		headers[key] = secret.Reveal()
 	}
-	return headers, secrets
+	return headers
+}
+
+// headerSecretValues returns the secrets in the config headers, for classify
+// to remove from error text: each non-empty value and, for a value with an
+// auth scheme such as "Bearer <token>", the credential part alone (see
+// credentialPart), and the other secrets of headerSecrets.
+func headerSecretValues(cfg discover.SecretMap) []string {
+	var secrets []string
+	for key, secret := range cfg {
+		secrets = append(secrets, headerSecrets(key, secret.Reveal())...)
+	}
+	return secrets
 }
 
 // headerSecrets returns the secrets in the value of the header key, for
-// splitHeaders and headerCredentials: the value when it is not empty, the
+// headerSecretValues and headerCredentials: the value when it is not empty, the
 // credential part after an auth scheme (see credentialPart), the parts of a
 // decoded Basic value (see basicSecrets), the long pieces of a cookie header
 // (see cookieSecrets) and the credentials inside the value of at least
@@ -530,7 +538,7 @@ func headerSecrets(key, value string) []string {
 // cookieSecrets), for classify to remove from error text as whole words only
 // (see replaceWords). A short piece is too likely to match ordinary words to
 // remove it wherever it stands, and it never goes to Result.Secrets. The
-// whole header values, at any length, are in the list of splitHeaders.
+// whole header values, at any length, are in the list of headerSecretValues.
 //
 // The result holds raw values. Never print, log or encode them.
 func headerShortSecrets(cfg discover.SecretMap) []string {
@@ -591,7 +599,7 @@ func cookieSecrets(key, value string) (long, short []string) {
 	add := func(piece string) {
 		if _, dup := seen[piece]; dup || piece == "" || piece == value {
 			// A piece that is in a list already, empty, or the whole value
-			// (splitHeaders has it already).
+			// (headerSecretValues has it already).
 			return
 		}
 		seen[piece] = struct{}{}
@@ -625,7 +633,7 @@ func cookieSecrets(key, value string) (long, short []string) {
 
 // headerCredentials returns the secrets of the config headers that are
 // credentials, for Result.Credentials. For each header that
-// isCredentialHeader accepts, it returns all the secrets that splitHeaders
+// isCredentialHeader accepts, it returns all the secrets that headerSecretValues
 // takes from its value (see headerSecrets): the whole value, the credential
 // after the auth scheme, the parts of a decoded Basic value, the long cookie
 // pieces and the long credentials inside the value. A Basic credential that

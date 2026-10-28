@@ -2311,10 +2311,10 @@ func TestCredentialPart(t *testing.T) {
 	}
 }
 
-// TestSplitHeaders checks that splitHeaders gives the raw values to the HTTP
+// TestHeaderSecretValues checks that headerSecretValues gives the raw values to the HTTP
 // client and, for classify, each value, the credential part of a value with
 // an auth scheme, and the decoded secrets of a Basic value.
-func TestSplitHeaders(t *testing.T) {
+func TestHeaderSecretValues(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -2329,7 +2329,7 @@ func TestSplitHeaders(t *testing.T) {
 		"X-Empty":       discover.NewSecret(""),
 		"X-Basic":       discover.NewSecret("Basic " + basicTok),
 	}
-	headers, values := splitHeaders(cfg)
+	headers, values := headerMap(cfg), headerSecretValues(cfg)
 
 	wantHeaders := map[string]string{
 		"Authorization": "Bearer " + tok,
@@ -3329,7 +3329,7 @@ func TestIsCredentialHeader(t *testing.T) {
 }
 
 // TestHeaderSecretsAndCredentials checks the header lists as Remote joins
-// them: Result.Secrets from splitHeaders (the wide list, unchanged by issue
+// them: Result.Secrets from headerSecretValues (the wide list, unchanged by issue
 // #229) and Result.Credentials from headerCredentials. It runs without a
 // server, so it also covers Content-Type and Accept, which Remote refuses as
 // config headers (see isReservedHeader).
@@ -3414,7 +3414,7 @@ func TestHeaderSecretsAndCredentials(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := rmServer(discover.TransportHTTP, "https://example.test/mcp", tt.headers).Headers
-			_, secrets := splitHeaders(cfg)
+			secrets := headerSecretValues(cfg)
 			r := Result{Secrets: resultSecrets(secrets)}
 			r.Credentials = resultCredentials(r.Secrets, headerCredentials(cfg))
 
@@ -3505,7 +3505,7 @@ func TestCookieHeaderSecrets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := rmServer(discover.TransportHTTP, "https://example.test/mcp", tt.headers).Headers
-			_, secrets := splitHeaders(cfg)
+			secrets := headerSecretValues(cfg)
 			r := Result{Secrets: resultSecrets(secrets)}
 			r.Credentials = resultCredentials(r.Secrets, headerCredentials(cfg))
 
