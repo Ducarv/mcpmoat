@@ -57,8 +57,8 @@ const maxReasonRunes = 200
 // ConnectError describes why mcpmoat could not connect to a server, or why
 // the server did not answer as expected.
 //
-// Error never contains the raw URL or a header value: classify and scrub
-// remove them. Reason can contain text that the server controls (a status
+// Error never contains the raw URL or a header value: classify and
+// replaceSecrets remove them. Reason can contain text that the server controls (a status
 // text, a JSON-RPC message) and text from the config (Server, header names).
 // Callers must escape the result of Error with internal/termsafe before they
 // print it to a terminal.
@@ -100,8 +100,12 @@ type ConnectError struct {
 	// cause, which the server or the transport wrote, after replaceSecrets
 	// and before the cut. showDiscoveredURL needs it uncut: a URL that the
 	// cut split in two would not match as a whole. serverText is "" when
-	// all of Reason is fixed text.
+	// all of Reason is fixed text, and then Reason == fixed.
 	fixed, serverText string
+	// causeText is the text of the cause after replaceSecrets and before the
+	// cut, when safeCause changed the cause, and "" otherwise. It is the
+	// same as serverText for err: showDiscoveredURL needs it uncut.
+	causeText string
 }
 
 // Error returns "<Server>: <Reason> (<URL>)". The part in parentheses is
@@ -128,6 +132,7 @@ func configError(srv discover.Server, reason string) *ConnectError {
 		Kind:   KindConfig,
 		Server: srv.Name,
 		Reason: reason,
+		fixed:  reason,
 		URL:    srv.URL.String(),
 	}
 }
@@ -212,7 +217,7 @@ func classify(err error, srv discover.Server, ev transportEvents, lists secretLi
 	ce.Kind, ce.fixed, ce.serverText, ce.Status = classifyCause(cause, srv, status, connected)
 	ce.serverText = replaceSecrets(ce.serverText, rawURL, redacted, lists)
 	ce.Reason = ce.fixed + cutWords(ce.serverText, lists.short)
-	ce.err = safeCause(cause, rawURL, redacted, lists)
+	ce.safeCause(cause, rawURL, redacted, lists)
 	return ce
 }
 
@@ -435,27 +440,33 @@ func stripURLError(err error) error {
 	}
 }
 
-// safeCause returns cause if its text holds no secret, and an error with the
-// scrubbed text otherwise. That error does not keep the chain of cause, which
+// safeCause sets the cause of e (see Unwrap): cause itself if its text holds
+// no secret, and an error with the scrubbed text otherwise. That error does not keep the chain of cause, which
 // is the price for text that is safe to print, but it still matches the
 // context error and the sentinel that cause wraps (see withText). So
 // errors.Is(err, context.DeadlineExceeded) still works when the scrub changed
 // the text, as it often does: with a short value "1", "exit status 1" changes.
-// A nil cause gives nil. lists is the one of scrub.
-func safeCause(cause error, rawURL, redactedURL string, lists secretLists) error {
+// A nil cause gives nil. lists is the one of classify.
+//
+// It also sets e.causeText, the text before the cut, or "" when cause is
+// kept as it is.
+func (e *ConnectError) safeCause(cause error, rawURL, redactedURL string, lists secretLists) {
 	if cause == nil {
-		return nil
+		return
 	}
 	text := cause.Error()
 	replaced := replaceSecrets(text, rawURL, redactedURL, lists)
 	if replaced == text {
-		return cause
+		e.err = cause
+		return
 	}
-	return withText(cause, cutWords(replaced, lists.short))
+	e.err = withText(cause, cutWords(replaced, lists.short))
+	e.causeText = replaced
 }
 
-// scrub removes secrets from text and shortens it, so that it is safe to
-// put in a ConnectError. It replaces:
+// replaceSecrets removes secrets from text, so that it is safe to put in a
+// ConnectError. It does not cut the text: classify cuts it with cutWords
+// after this. It replaces:
 //
 //   - rawURL, the URL as written in the config, with redactedURL;
 //   - the raw URL without its query and fragment, with the redacted URL
@@ -474,18 +485,9 @@ func safeCause(cause error, rawURL, redactedURL string, lists secretLists) error
 // quotes escaped). For a value of lists.long that is not valid UTF-8, it also
 // replaces the form with one U+FFFD for each invalid byte (see
 // discover.PerByteForm): a JSON decoder writes that form when the server
-// echoes the value in a JSON-RPC error. It then cuts the result to
-// maxReasonRunes runes and adds "…" if it cut anything (see cutWords: the cut
-// never leaves a value of lists.short at the end as a whole word). The result
-// can still hold text that the server controls; callers must escape it with
-// internal/termsafe before they print it. scrub does not read
-// lists.credentials.
-func scrub(text, rawURL, redactedURL string, lists secretLists) string {
-	return cutWords(replaceSecrets(text, rawURL, redactedURL, lists), lists.short)
-}
-
-// replaceSecrets does the replacements that scrub describes, without the
-// cut.
+// echoes the value in a JSON-RPC error. The result can still hold text that
+// the server controls; callers must escape it with internal/termsafe before
+// they print it. replaceSecrets does not read lists.credentials.
 func replaceSecrets(text, rawURL, redactedURL string, lists secretLists) string {
 	if rawURL != "" {
 		text = replaceForms(text, rawURL, redactedURL)
@@ -507,8 +509,17 @@ func replaceSecrets(text, rawURL, redactedURL string, lists secretLists) string 
 			values = append(values, form)
 		}
 	}
-	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
-	for _, v := range values {
+	// Then by bytes, so that equal values are next to each other and
+	// slices.Compact removes the copies: the same value can come from the
+	// env, from a lookup and as a piece of a header, and each copy would cost
+	// one more pass over the text, which can be large.
+	slices.SortFunc(values, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	for _, v := range slices.Compact(values) {
 		text = replaceForms(text, v, discover.Mask)
 	}
 	// The short values last: a short value can be a part of a long one, and
@@ -631,13 +642,13 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 // its Reason and its cause can hold the redacted expanded URL, and that URL can
 // show the values of variables: a host, a port or a path segment that the
 // redaction keeps, and values shorter than discover.MinSecretBytes that no
-// scrub removes. A dial error that prints the resolved IP:port keeps the port
+// replaceSecrets removes. A dial error that prints the resolved IP:port keeps the port
 // when the port is no value of short. When the port is a value of short, such
 // as the value of ${PORT}, the whole-word scrub masks it, as in
 // "127.0.0.1:********". showDiscoveredURL sets ce.URL to the discovered URL,
 // and replaces the expanded URL in Reason and in the text of the cause with it,
 // also in the form without the query and the fragment, the same forms that
-// scrub replaces. Then it replaces the expanded host (host:port, then the host
+// replaceSecrets replaces. Then it replaces the expanded host (host:port, then the host
 // name alone) with the discovered one, because a DNS or dial error names the
 // host without the URL. A host can be a short word, so this can garble other
 // text of the error: a leak is worse than a garbled word. A cause whose text
@@ -670,7 +681,10 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 	if from == to {
 		return
 	}
-	pairs := [][2]string{{from, to}, {urlBase(from), urlBase(to)}}
+	// The whole URL forms come before the host forms: a host form changes the
+	// host inside a URL, and then a whole URL form no longer matches.
+	whole := [][2]string{{from, to}, {urlBase(from), urlBase(to)}}
+	var hosts [][2]string
 	if expandedURL, err := url.Parse(expanded.Reveal()); err == nil {
 		// A placeholder in the host can make the discovered URL fail to
 		// parse. Then Mask stands for its host.
@@ -679,22 +693,26 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 			toHost, toName = discoveredURL.Host, discoveredURL.Hostname()
 		}
 		if expandedURL.Host != toHost {
-			pairs = append(pairs,
-				[2]string{expandedURL.Host, toHost},
-				[2]string{expandedURL.Hostname(), toName})
+			hosts = [][2]string{
+				{expandedURL.Host, toHost},
+				{expandedURL.Hostname(), toName},
+			}
 		}
 	}
 	// The forms as classify left them, after the forms as they are. A form
 	// that is masks only, such as the host "db" with the value "db", is left
 	// out: it would replace the mask of every other secret in the text.
-	var extra [][2]string
-	for _, p := range pairs {
-		masked := replaceWords(p[0], short)
-		if masked != p[0] && strings.ReplaceAll(masked, discover.Mask, "") != "" {
-			extra = append(extra, [2]string{masked, p[1]})
+	withMasked := func(pairs [][2]string) [][2]string {
+		out := slices.Clone(pairs)
+		for _, p := range pairs {
+			masked := replaceWords(p[0], short)
+			if masked != p[0] && strings.ReplaceAll(masked, discover.Mask, "") != "" {
+				out = append(out, [2]string{masked, p[1]})
+			}
 		}
+		return out
 	}
-	pairs = append(pairs, extra...)
+	pairs := slices.Concat(withMasked(whole), withMasked(hosts))
 	replace := func(text string) string {
 		for _, p := range pairs {
 			text = replaceForms(text, p[0], p[1])
@@ -707,7 +725,10 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 		ce.Reason = ce.fixed + cutWords(ce.serverText, short)
 	}
 	if ce.err != nil {
-		text := ce.err.Error()
+		text := ce.causeText
+		if text == "" {
+			text = ce.err.Error()
+		}
 		if replaced := replace(text); replaced != text {
 			ce.err = withText(ce.err, cutWords(replaced, short))
 		}

@@ -18,6 +18,12 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
+// scrub is the text that classify puts in Reason: replaceSecrets, then the
+// cut of cutWords. The tests of the rules use it.
+func scrub(text, rawURL, redactedURL string, lists secretLists) string {
+	return cutWords(replaceSecrets(text, rawURL, redactedURL, lists), lists.short)
+}
+
 // Secrets that must never appear in any error text.
 const (
 	testRawURL      = "https://user:pw@mcp.example.com/mcp?token=QSECRET42" //nolint:gosec // G101: fake test credentials

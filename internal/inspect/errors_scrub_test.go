@@ -192,3 +192,41 @@ func TestShowDiscoveredURLAfterCut(t *testing.T) {
 		t.Errorf("Reason = %q, want %q", ce.Reason, want)
 	}
 }
+
+// TestShowDiscoveredURLCauseAfterCut checks the same case for the cause as
+// TestShowDiscoveredURLAfterCut checks for Reason: safeCause cuts the text of
+// the cause, but showDiscoveredURL must work on the text before the cut.
+func TestShowDiscoveredURLCauseAfterCut(t *testing.T) {
+	t.Parallel()
+
+	expanded := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL("https://internal-secret-host.corp.example/mcp?k=s3cr3t-value-123")}
+	discovered := discover.NewURL("https://${HOST}/mcp?k=${KEY}")
+	cause := &fakeNetError{text: strings.Repeat("x", 170) + " Post " + expanded.URL.Reveal() + ": boom"}
+
+	ce := classify(cause, expanded, nil, secretLists{})
+	showDiscoveredURL(ce, expanded.URL, discovered, nil)
+
+	text := errors.Unwrap(ce).Error()
+	if strings.Contains(text, "internal") || strings.Contains(text, "corp.example") || strings.Contains(text, "s3cr3t") {
+		t.Errorf("cause = %q, want no part of the expanded URL", text)
+	}
+}
+
+// TestShowDiscoveredURLMaskedFormBeforeHost checks the order of the forms. The
+// short value 8080 makes classify write "localhost:********". The masked URL
+// form must be replaced before the host form, or the host form changes the
+// URL first and the masked URL form no longer matches.
+func TestShowDiscoveredURLMaskedFormBeforeHost(t *testing.T) {
+	t.Parallel()
+
+	expanded := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL("http://localhost:8080/mcp")}
+	discovered := discover.NewURL("http://localhost:${PORT}/mcp")
+	lists := secretLists{short: []string{"8080"}}
+
+	ce := classify(&fakeNetError{text: "dial " + expanded.URL.String() + ": refused"}, expanded, nil, lists)
+	showDiscoveredURL(ce, expanded.URL, discovered, lists.short)
+
+	if want := "network error: dial " + discover.Mask + ": refused"; ce.Reason != want {
+		t.Errorf("Reason = %q, want %q", ce.Reason, want)
+	}
+}

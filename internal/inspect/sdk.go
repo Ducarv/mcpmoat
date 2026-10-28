@@ -398,18 +398,15 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 // credentials, and a short piece goes to short, by the same length rule as
 // a whole value.
 //
-// The three lists have the names and the meaning of the fields of
-// secretLists, and lists returns them as one.
+// The embedded secretLists holds the recorded values. Its long and short
+// lists hold raw values of the user's environment and the credentials inside
+// them, each one time, in the order in which they were recorded. Its
+// credentials list holds the strings of long that are credentials, each one
+// time, in the order in which they became one. Never print, log or encode
+// them.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
-	// long and short hold raw values of the user's environment and the
-	// credentials inside them, each one time, in the order in which they
-	// were recorded. credentials holds the strings of long that are
-	// credentials, each one time, in the order in which they became one.
-	// Never print, log or encode them.
-	long        []string
-	short       []string
-	credentials []string
+	secretLists
 	// lookedUpSet holds the whole values that a lookup returned, to skip
 	// the checks of a value that was checked already.
 	lookedUpSet map[string]struct{}
@@ -424,7 +421,7 @@ type lookupRecorder struct {
 // lists returns the recorded values as a secretLists. The slices are the
 // ones of r, not copies; the callers only read them.
 func (r *lookupRecorder) lists() secretLists {
-	return secretLists{long: r.long, short: r.short, credentials: r.credentials}
+	return r.secretLists
 }
 
 // Lookup returns the value of the variable name and whether it is set, and
@@ -743,10 +740,12 @@ func commandError(s discover.Server, err error) *ConnectError {
 	if errors.Is(err, errCommandNotFound) || errors.Is(err, errCommandNotRunnable) || errors.Is(err, errNoWorkDir) {
 		kind = KindStart
 	}
+	reason := strings.TrimPrefix(err.Error(), "inspect: ")
 	return &ConnectError{
 		Kind:   kind,
 		Server: s.Name,
-		Reason: strings.TrimPrefix(err.Error(), "inspect: "),
+		Reason: reason,
+		fixed:  reason,
 		err:    err,
 	}
 }
@@ -776,6 +775,7 @@ func startFailure(s discover.Server, reason string, err error) *ConnectError {
 		Kind:   KindStart,
 		Server: s.Name,
 		Reason: reason,
+		fixed:  reason,
 		err:    err,
 	}
 }

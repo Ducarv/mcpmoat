@@ -10,7 +10,7 @@ import (
 // This file holds the whole-word scrub of error text: the helpers that
 // remove the short values (shorter than discover.MinSecretBytes) only where
 // they stand as whole words, and the cut that keeps that rule at the end of
-// the text. The error scrub in errors.go (scrub, safeCause and
+// the text. The error scrub in errors.go (replaceSecrets, safeCause and
 // showDiscoveredURL) and Remote call them.
 
 // replaceWords replaces each value in short, and the form that %q prints for

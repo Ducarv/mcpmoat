@@ -33,7 +33,7 @@ type secretLists struct {
 // Result.Secrets. It keeps only the values of at least discover.MinSecretBytes
 // bytes, each one time. The callers pass secretLists.long.
 //
-// The scrub of error text (see scrub) also removes shorter header values and
+// The scrub of error text (see replaceSecrets) also removes shorter header values and
 // a short URL password. Result.Secrets does not hold them: a consumer removes
 // the values from ordinary text, such as tool descriptions, and a short value
 // is too likely to match ordinary words ("1", "true", "json"). So the filter
