@@ -232,26 +232,6 @@ func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
 	return calls, nil
 }
 
-// exactPair returns the key node and the value node of the key whose text is
-// exactly name in the mapping m. It returns two nil nodes when m has no such key.
-// The caller must check first that m is a mapping. It is for the keys that
-// GitHub reads case-sensitively. lookup ignores case, so it is not used here.
-func exactPair(m *yaml.Node, name string) (*yaml.Node, *yaml.Node) {
-	for k, v := range pairs(m) {
-		if k.Value == name {
-			return k, v
-		}
-	}
-	return nil, nil
-}
-
-// exactValue returns the value node of the key whose text is exactly name in the
-// mapping m, or nil when m has no such key. See exactPair.
-func exactValue(m *yaml.Node, name string) *yaml.Node {
-	_, v := exactPair(m, name)
-	return v
-}
-
 // gvNameJobProblems returns one message when govulncheck.yml has no job with the
 // ID gvName, or when the job with that ID runs no call. notify-failure waits for
 // the job with that ID (needs: govulncheck). So the job with that ID must be the

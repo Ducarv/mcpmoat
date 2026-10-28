@@ -283,7 +283,7 @@ func loadWorkflows(fsys fs.FS, reported map[string]bool) (map[string]*workflow, 
 		problems = append(problems, fmt.Sprintf("%s: read the directory: %v", workflowDir, noPath(err)))
 	}
 	for _, e := range entries {
-		if !isWorkflowName(e.Name()) {
+		if !isYAMLName(e.Name()) {
 			continue
 		}
 		p := path.Join(workflowDir, e.Name())
@@ -314,14 +314,6 @@ func loadWorkflows(fsys fs.FS, reported map[string]bool) (map[string]*workflow, 
 		wfs[p] = w
 	}
 	return wfs, problems
-}
-
-// isWorkflowName reports whether name ends in .yml or .yaml, in any case. A
-// name that starts with a dot, and the names .yml and .yaml themselves,
-// count too: GitHub runs such a file, so the check must read it.
-func isWorkflowName(name string) bool {
-	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
 }
 
 // readWorkflow reads the file p of fsys with readLimited and parses it.

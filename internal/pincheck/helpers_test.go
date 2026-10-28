@@ -11,12 +11,12 @@ import (
 // tests of the GoReleaser and govulncheck rules. A mutation changes a copy of a
 // good repository (see grGoodRepo and goodGovulncheckSet).
 
-// parseWorkflows parses every .yml file directly in .github/workflows of fsys.
+// parseWorkflows parses every workflow file (see isYAMLName) directly in .github/workflows of fsys.
 func parseWorkflows(t *testing.T, fsys fstest.MapFS) map[string]*workflow {
 	t.Helper()
 	wfs := make(map[string]*workflow)
 	for p, f := range fsys {
-		if path.Dir(p) == workflowDir && isWorkflowName(p) {
+		if path.Dir(p) == workflowDir && isYAMLName(p) {
 			wfs[p] = mustParse(t, p, string(f.Data))
 		}
 	}

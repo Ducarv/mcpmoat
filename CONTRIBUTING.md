@@ -171,8 +171,8 @@ The GoReleaser rules:
   case.
 - `CONTRIBUTING.md` names at least one GoReleaser version (such as a `goreleaser/v2@` command).
   Each `goreleaser@` or `goreleaser/vN@` version in it is the pin of `ci.yml`.
-- A file under `.github/actions` that names the action (in any case) fails, so that a new local
-  action cannot skip the rules. A YAML file there (`.yml` or `.yaml`) is read as decoded YAML, as
+- A file under `.github/actions` that names the action or `GORELEASER_VERSION` (in any case) fails,
+  so that a new local action cannot skip the rules. A YAML file there (`.yml` or `.yaml`) is read as decoded YAML, as
   the workflows are, so an escape such as `\x2d` cannot hide the name. A YAML file that does not
   parse fails. Other files are matched on their raw text. A symlink there fails too, and so does
   any other entry that is not a regular file or a directory. The name `.github/actions` matches in
@@ -205,6 +205,8 @@ Not covered:
 - Other ways to install GoReleaser, such as `docker://goreleaser/goreleaser`, a remote reusable
   workflow, `brew install` or `go install`, and a composite action outside `.github/actions`.
 - A name that a step builds from pieces, for example in a `$GITHUB_ENV` write.
+- A `$GITHUB_ENV` write in a script file that a step runs, such as a file in `.github/scripts/`
+  or any other file. The check reads the workflows and the local actions only.
 - Where a `GOVULNCHECK_VERSION` pin is. It can be in any mapping, not only an `env:`.
 - The other keys of the step with the govulncheck call, such as `if:`, `shell:` and
   `working-directory:`. The check reads the job-level `if:` and `needs:` of the job with the call,
@@ -236,7 +238,7 @@ Not covered:
   another ref. The check also does not read the `ref:` of a checkout step. A `$GITHUB_PATH` write can
   put another `go` first on the path.
 
-Review must catch those. A follow-up issue tracks a stricter check.
+Review must catch those. A stricter check is a possible follow-up.
 
 The `release-check` job runs `goreleaser check` and a snapshot build. Then it runs one test and a
 check: `.github/scripts/check-snapshot-test.sh` (positive and negative cases for the archive check)

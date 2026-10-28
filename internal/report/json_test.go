@@ -251,14 +251,12 @@ func TestWriteJSONEmptyReport(t *testing.T) {
 func TestWriteJSONServerIndex(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		findingIdx  int
-		diffIdx     int
-		wantFinding float64
-		wantDiff    float64
+		name       string
+		findingIdx int
+		diffIdx    int
 	}{
-		{name: "non-zero", findingIdx: 3, diffIdx: 2, wantFinding: 3, wantDiff: 2},
-		{name: "zero is written", findingIdx: 0, diffIdx: 0, wantFinding: 0, wantDiff: 0},
+		{name: "non-zero", findingIdx: 3, diffIdx: 2},
+		{name: "zero is written", findingIdx: 0, diffIdx: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -279,11 +277,11 @@ func TestWriteJSONServerIndex(t *testing.T) {
 			if len(raw.Findings) != 1 || len(raw.Diffs) != 1 {
 				t.Fatalf("got %d findings and %d diffs, want 1 of each", len(raw.Findings), len(raw.Diffs))
 			}
-			if got, ok := raw.Findings[0]["server_index"]; !ok || got != tt.wantFinding {
-				t.Errorf("finding server_index = %#v (present %v), want %v", got, ok, tt.wantFinding)
+			if got, ok := raw.Findings[0]["server_index"]; !ok || got != float64(tt.findingIdx) {
+				t.Errorf("finding server_index = %#v (present %v), want %d", got, ok, tt.findingIdx)
 			}
-			if got, ok := raw.Diffs[0]["server_index"]; !ok || got != tt.wantDiff {
-				t.Errorf("diff server_index = %#v (present %v), want %v", got, ok, tt.wantDiff)
+			if got, ok := raw.Diffs[0]["server_index"]; !ok || got != float64(tt.diffIdx) {
+				t.Errorf("diff server_index = %#v (present %v), want %d", got, ok, tt.diffIdx)
 			}
 		})
 	}

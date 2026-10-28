@@ -377,6 +377,8 @@ pins_case "call: no call in release.yml" 1 "release.yml: $no_call" sub "$wfdir/r
 # the key Run, or a job under the key Steps, runs nothing.
 pins_case "call: Run key in govulncheck.yml" 1 "govulncheck.yml: $no_call" sub "$wfdir/govulncheck.yml" 's/^( +)run: go run/\1Run: go run/'
 pins_case "call: Steps key in the govulncheck job" 1 "govulncheck.yml: $no_call" sub "$wfdir/govulncheck.yml" '/^  govulncheck:/,/^  notify-failure:/ s/^    steps:/    Steps:/'
+# GitHub reads the key jobs with its exact case, so Jobs: is no jobs mapping.
+pins_case "jobs: Jobs key in govulncheck.yml" 1 "govulncheck.yml:1: the workflow has no jobs mapping" sub "$wfdir/govulncheck.yml" 's/^jobs:$/Jobs:/'
 pins_case "comment names govulncheck@v1.2.3" 0 "" append "$wfdir/release.yml" '# see govulncheck@v1.2.3'
 
 # A workflow outside the list.
@@ -426,6 +428,8 @@ pins_case "goreleaser-action: text after the variable" 1 "$bad_input" sub "$wfdi
 pins_case "goreleaser-action: no version input" 1 "the goreleaser-action step \"Run GoReleaser\" $no_input" sub "$wfdir/release.yml" "$ga_release"'{/version:/d;}'
 pins_case "goreleaser-action: no version input, next step has one" 1 "the goreleaser-action step \"Check the GoReleaser config\" $no_input" sub "$wfdir/ci.yml" "$ga_check"'{/version:/d;}'
 pins_case "goreleaser-action: version key in another case" 1 "Write the version input key as version" sub "$wfdir/release.yml" "$ga_release"'s/version:/Version:/'
+# GitHub reads the key with its exact case, so With: is no with mapping.
+pins_case "goreleaser-action: With key in release.yml" 1 "the goreleaser-action step \"Run GoReleaser\" has no with mapping" sub "$wfdir/release.yml" "$ga_release"'s/^( +)with:$/\1With:/'
 pins_case "goreleaser-action: new workflow without a version" 1 "extra.yml:9: the goreleaser-action step \"goreleaser/goreleaser-action@x\" $no_input" wf_gr_inputs extra.yml ""
 pins_case "goreleaser-action: new .yaml workflow with latest" 1 "extra.yaml:10: the goreleaser-action step" wf_gr_inputs extra.yaml "version: latest"
 pins_case "goreleaser-action: new workflow, quoted pin and trailing spaces" 0 "" wf_gr_inputs extra.yml 'version: "${{ env.GORELEASER_VERSION }}"   '
@@ -576,7 +580,7 @@ pins_case "scope: pin at the wrong indent in the job" 1 "$mention" wf_pin_indent
 pins_case "scope: pin under another job key" 1 "$mention" wf_pin_other_key extra.yml
 
 # The composite actions are not read, so a file that names the action fails.
-in_action="names goreleaser/goreleaser-action. This check does not read .github/actions"
+in_action="names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions"
 pins_case "actions: composite action with goreleaser-action" 1 ".github/actions/x/action.yml: $in_action" actions_file "runs:
   using: composite
   steps:
@@ -590,6 +594,10 @@ pins_case "actions: escaped name in action.yml" 1 ".github/actions/x/action.yml:
   using: composite
   steps:
     - uses: "goreleaser/goreleaser\x2daction@v6"'
+pins_case "actions: GORELEASER_VERSION written to GITHUB_ENV" 1 ".github/actions/x/action.yml: $in_action" actions_file 'runs:
+  using: composite
+  steps:
+    - run: echo "GORELEASER_VERSION=v1.0.0" >> "$GITHUB_ENV"'
 pins_case "actions: symlinked directory" 1 ".github/actions/y: is a symlink" symlinked_action
 
 # A # starts a comment only after a space.

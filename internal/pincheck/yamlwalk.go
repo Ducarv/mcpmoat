@@ -217,9 +217,9 @@ func (w *workflow) checkKeys(m *yaml.Node) error {
 // that fits it:
 //   - lookup ignores case. Use it for a rule that reads a value and must
 //     overmatch, so that a key GitHub may read as the name is still checked.
-//   - exactValue and exactPair (in govulncheck.go) match the exact case. Use
-//     them where finding the key SATISFIES a "must have" rule. GitHub reads
-//     keys case-sensitively, so a key in another case does not satisfy it.
+//   - exactValue and exactPair match the exact case. Use them where finding the
+//     key SATISFIES a "must have" rule. GitHub reads keys case-sensitively, so
+//     a key in another case does not satisfy it.
 //   - keyIs ignores case and the spaces around the key. Use it for a rule that
 //     looks for a forbidden key, so that any spelling GitHub may read fails.
 func (w *workflow) lookup(m *yaml.Node, key string) (k, v *yaml.Node, err error) {
@@ -232,6 +232,26 @@ func (w *workflow) lookup(m *yaml.Node, key string) (k, v *yaml.Node, err error)
 		}
 	}
 	return nil, nil, nil
+}
+
+// exactPair returns the key node and the value node of the key whose text is
+// exactly name in the mapping m. It returns two nil nodes when m has no such key.
+// The caller must check first that m is a mapping. It is for the keys that
+// GitHub reads case-sensitively. lookup ignores case, so it is not used here.
+func exactPair(m *yaml.Node, name string) (*yaml.Node, *yaml.Node) {
+	for k, v := range pairs(m) {
+		if k.Value == name {
+			return k, v
+		}
+	}
+	return nil, nil
+}
+
+// exactValue returns the value node of the key whose text is exactly name in the
+// mapping m, or nil when m has no such key. See exactPair.
+func exactValue(m *yaml.Node, name string) *yaml.Node {
+	_, v := exactPair(m, name)
+	return v
 }
 
 // mappingAt returns the value of key in the mapping m when that value is a
@@ -280,12 +300,14 @@ func (w *workflow) wrongKind(k, v *yaml.Node, want yaml.Kind) error {
 // them. GitHub needs jobs in every workflow, so a missing key is a problem.
 // The errors are *nodeError values, as from every other method.
 func (w *workflow) jobsAndProblems() ([]job, []error) {
-	jobsNode, err := w.mappingAt(w.top, "jobs")
-	if err != nil {
-		return nil, []error{err}
-	}
+	// The key jobs is read with its exact spelling. GitHub reads keys
+	// case-sensitively, so a key Jobs: does not give the workflow any jobs.
+	k, jobsNode := exactPair(w.top, "jobs")
 	if jobsNode == nil {
 		return nil, []error{w.errorAt(w.top, "the workflow has no jobs mapping")}
+	}
+	if jobsNode.Kind != yaml.MappingNode {
+		return nil, []error{w.wrongKind(k, jobsNode, yaml.MappingNode)}
 	}
 	var out []job
 	var problems []error
@@ -318,11 +340,12 @@ func (w *workflow) steps(j job) ([]*yaml.Node, error) {
 
 // envProblems returns one problem for each mapping key named env (compared
 // case-insensitively) whose value is not a mapping, at any depth of the
-// workflow, in the order of allPairs. GitHub reads env at the workflow, the job and the
-// step level, and a lower level overrides a higher one. A value that is not a
-// mapping, such as an expression ${{ fromJSON(...) }}, a block scalar or an
-// empty value, can build a variable such as GORELEASER_VERSION at run time,
-// and no check can read its name. So the rule fails closed on any such value.
+// workflow, in the order of allPairs. GitHub reads env at the workflow, the
+// job and the step level, and a lower level overrides a higher one. A value
+// that is not a mapping, such as an expression ${{ fromJSON(...) }}, a block
+// scalar or an empty value, can build a variable such as GORELEASER_VERSION at
+// run time, and no check can read its name. So the rule fails closed on any
+// such value.
 func (w *workflow) envProblems() []string {
 	var out []string
 	for k, v := range w.allPairs() {
@@ -404,9 +427,9 @@ func pairs(m *yaml.Node) iter.Seq2[*yaml.Node, *yaml.Node] {
 // allPairs returns the key and the value node of each entry of each mapping of
 // the workflow. All the pairs of a mapping come before the pairs of the mappings
 // below it, and the pairs of one mapping are in file order. It walks the whole
-// tree with walk, so a mapping at any depth is included. A
-// break in the range loop is safe: after the loop stops, no more pairs are
-// yielded, and the walk ends without a yield.
+// tree with walk, so a mapping at any depth is included. A break in the range
+// loop is safe: after the loop stops, no more pairs are yielded, and the walk
+// ends without a yield.
 func (w *workflow) allPairs() iter.Seq2[*yaml.Node, *yaml.Node] {
 	return func(yield func(*yaml.Node, *yaml.Node) bool) {
 		stopped := false
@@ -422,6 +445,14 @@ func (w *workflow) allPairs() iter.Seq2[*yaml.Node, *yaml.Node] {
 			}
 		})
 	}
+}
+
+// isYAMLName reports whether name ends in .yml or .yaml, in any case. A
+// name that starts with a dot, and the names .yml and .yaml themselves,
+// count too: GitHub runs such a file, so the check must read it.
+func isYAMLName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
 }
 
 // keyIs reports whether the key node k names name, when case and the spaces

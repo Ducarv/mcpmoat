@@ -168,13 +168,15 @@ func grScanWorkflow(w *workflow) grScan {
 // reports whether the env has the key, and returns the pin when its value is a
 // full version. It adds the key and the value nodes to okPin.
 func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins []grPin, msgs []string) {
-	// An env that is not a mapping, such as an expression, is an error.
-	env, err := w.mappingAt(j.body, "env")
-	if err != nil {
-		return false, nil, []string{err.Error()}
-	}
+	// The key env is read with its exact spelling, because a key ENV: is not the
+	// env of the job for GitHub. An env that is not a mapping, such as an
+	// expression, is an error.
+	k, env := exactPair(j.body, "env")
 	if env == nil {
 		return false, nil, nil
+	}
+	if env.Kind != yaml.MappingNode {
+		return false, nil, []string{w.wrongKind(k, env, yaml.MappingNode).Error()}
 	}
 	for k, v := range pairs(env) {
 		if k.Value != grPinKey {
@@ -212,9 +214,11 @@ func grCheckStep(w *workflow, step *yaml.Node, okPin, okUses map[*yaml.Node]bool
 	okUses[uses] = true
 	label := show(grStepLabel(w, step, uses))
 
-	with, err := w.mappingAt(step, "with")
-	if err != nil {
-		return true, []string{err.Error()}
+	// The key with is read with its exact spelling, because a key With: is not the
+	// with mapping for GitHub. A with that is not a mapping is an error.
+	k, with := exactPair(step, "with")
+	if with != nil && with.Kind != yaml.MappingNode {
+		return true, []string{w.wrongKind(k, with, yaml.MappingNode).Error()}
 	}
 	if with == nil {
 		return true, []string{w.problemAt(step, "the goreleaser-action step %s has no with mapping, so it has no version input", label)}
@@ -289,7 +293,8 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 }
 
 // grCheckActions fails each file under .github/actions that names
-// goreleaser-action, because this check does not read the local actions. A
+// goreleaser-action or GORELEASER_VERSION, because this check does not read
+// the local actions. A
 // symlink there fails too, because the check does not follow it. A missing
 // .github/actions is fine.
 func grCheckActions(fsys fs.FS) []string {
@@ -363,16 +368,18 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 
 // grActionProblem returns the one problem of the file p under .github/actions,
 // with its bytes data, or "" when the file is fine. Every file is searched as
-// raw bytes, in any case. A file named .yml or .yaml is also parsed with
-// parseWorkflow, so that its decoded scalars are searched too. A YAML escape
-// such as \x2d can hide the name in the raw bytes, but not in the decoded text.
-// A YAML file that does not parse fails closed, with the error of parseWorkflow,
-// which starts with the path. The raw hit and the decoded hit give the same text.
+// raw bytes, in any case, for goreleaser-action and for GORELEASER_VERSION. A
+// file named .yml or .yaml is also parsed with parseWorkflow, so that its
+// decoded scalars are searched too. A YAML escape such as \x2d can hide the
+// name in the raw bytes, but not in the decoded text. A YAML file that does not
+// parse fails closed, with the error of parseWorkflow, which starts with the
+// path. The raw hit and the decoded hit give the same text.
 func grActionProblem(p string, data []byte) string {
-	if bytes.Contains(bytes.ToLower(data), []byte(grAction)) {
+	raw := bytes.ToLower(data)
+	if bytes.Contains(raw, []byte(grAction)) || bytes.Contains(raw, []byte(grMention)) {
 		return grActionText(p)
 	}
-	if !grIsYAMLName(p) {
+	if !isYAMLName(p) {
 		return ""
 	}
 	w, err := parseWorkflow(p, data)
@@ -380,20 +387,16 @@ func grActionProblem(p string, data []byte) string {
 		return err.Error()
 	}
 	for _, n := range w.scalars() {
-		if strings.Contains(strings.ToLower(n.Value), grAction) {
+		text := strings.ToLower(n.Value)
+		if strings.Contains(text, grAction) || strings.Contains(text, grMention) {
 			return grActionText(p)
 		}
 	}
 	return ""
 }
 
-// grActionText returns the problem of the file p, which names the action.
+// grActionText returns the problem of the file p, which names the action or
+// the pin.
 func grActionText(p string) string {
-	return fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read %s. Extend the check before you add such a file", p, grActionsPath)
-}
-
-// grIsYAMLName reports whether the file name p ends in .yml or .yaml, in any case.
-func grIsYAMLName(p string) bool {
-	ext := strings.ToLower(path.Ext(p))
-	return ext == ".yml" || ext == ".yaml"
+	return fmt.Sprintf("%s: names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read %s. Extend the check before you add such a file", p, grActionsPath)
 }

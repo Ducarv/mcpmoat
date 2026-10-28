@@ -499,12 +499,17 @@ func TestGoreleaserLocalActions(t *testing.T) {
 		{
 			name:   "action names goreleaser-action",
 			mutate: setFile(action, &fstest.MapFile{Data: []byte("runs:\n  steps:\n    - uses: GoReleaser/goreleaser-action@v7\n")}),
-			want:   []grMsg{{action + ": ", "names goreleaser/goreleaser-action. This check does not read .github/actions."}},
+			want:   []grMsg{{action + ": ", "names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions."}},
+		},
+		{
+			name:   "composite action writes GORELEASER_VERSION to GITHUB_ENV",
+			mutate: setFile(action, &fstest.MapFile{Data: []byte("runs:\n  using: composite\n  steps:\n    - run: echo \"GORELEASER_VERSION=v1.0.0\" >> \"$GITHUB_ENV\"\n")}),
+			want:   []grMsg{{action + ": ", "names goreleaser/goreleaser-action or GORELEASER_VERSION."}},
 		},
 		{
 			name:   "Actions directory in another case",
 			mutate: setFile(".github/Actions/build/action.yml", &fstest.MapFile{Data: []byte("uses: goreleaser/goreleaser-action@v7\n")}),
-			want:   []grMsg{{".github/Actions/build/action.yml: ", "names goreleaser/goreleaser-action."}},
+			want:   []grMsg{{".github/Actions/build/action.yml: ", "names goreleaser/goreleaser-action or GORELEASER_VERSION."}},
 		},
 		{
 			name:   "symlink file",
@@ -544,7 +549,7 @@ func TestGoreleaserActionYAML(t *testing.T) {
 	const (
 		action = ".github/actions/build/action.yml"
 		// actionMsg is the message of action when it names the action.
-		actionMsg = action + ": names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"
+		actionMsg = action + ": names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions. Extend the check before you add such a file"
 	)
 	tests := []struct {
 		name string
@@ -574,14 +579,14 @@ func TestGoreleaserActionYAML(t *testing.T) {
 			path: ".github/actions/build/action.yaml",
 			data: `uses: "goreleaser/goreleaser\x2daction@v6"
 `,
-			want: []string{".github/actions/build/action.yaml: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+			want: []string{".github/actions/build/action.yaml: names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions. Extend the check before you add such a file"},
 		},
 		{
 			name: "escaped hyphen in action.YML with an upper case extension",
 			path: ".github/actions/build/action.YML",
 			data: `uses: "goreleaser/goreleaser\x2daction@v6"
 `,
-			want: []string{".github/actions/build/action.YML: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+			want: []string{".github/actions/build/action.YML: names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions. Extend the check before you add such a file"},
 		},
 		{
 			// A backslash at the end of a line in a double-quoted scalar escapes the
@@ -622,7 +627,58 @@ func TestGoreleaserActionYAML(t *testing.T) {
 			name: "plain name in a shell file gives one message",
 			path: ".github/actions/build/run.sh",
 			data: "uses: goreleaser/goreleaser-action@v6\n",
-			want: []string{".github/actions/build/run.sh: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+			want: []string{".github/actions/build/run.sh: names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions. Extend the check before you add such a file"},
+		},
+		{
+			name: "GORELEASER_VERSION written to GITHUB_ENV in action.yml",
+			path: action,
+			data: `runs:
+  using: composite
+  steps:
+    - run: echo "GORELEASER_VERSION=v1.0.0" >> "$GITHUB_ENV"
+`,
+			want: []string{actionMsg},
+		},
+		{
+			name: "lower case goreleaser_version in action.yml",
+			path: action,
+			data: `runs:
+  using: composite
+  steps:
+    - run: echo "goreleaser_version=v1.0.0" >> "$GITHUB_ENV"
+`,
+			want: []string{actionMsg},
+		},
+		{
+			// The escape \x5f is _ in the decoded text. The raw bytes do not hold the name.
+			name: "escaped underscore in a double-quoted run of action.yml",
+			path: action,
+			data: `runs:
+  steps:
+    - run: "echo \"GORELEASER\x5fVERSION=v1.0.0\" >> \"$GITHUB_ENV\""
+`,
+			want: []string{actionMsg},
+		},
+		{
+			name: "GORELEASER_VERSION written to GITHUB_ENV in a shell file",
+			path: ".github/actions/build/write.sh",
+			data: "echo \"GORELEASER_VERSION=v1.0.0\" >> \"$GITHUB_ENV\"\n",
+			want: []string{".github/actions/build/write.sh: names goreleaser/goreleaser-action or GORELEASER_VERSION. This check does not read .github/actions. Extend the check before you add such a file"},
+		},
+		{
+			// The escape is text in a file that is not YAML: only the raw check runs.
+			name: "escaped GORELEASER_VERSION in a text file",
+			path: ".github/actions/build/notes-version.txt",
+			data: `"GORELEASER\x5fVERSION=v1.0.0"
+`,
+		},
+		{
+			name: "action.yml that writes another variable to GITHUB_ENV",
+			path: action,
+			data: `runs:
+  steps:
+    - run: echo "FOO=v1" >> "$GITHUB_ENV"
+`,
 		},
 		{
 			name: "unparsable action.yml fails closed",
@@ -692,6 +748,89 @@ func TestGoreleaserMissingWorkflow(t *testing.T) {
 			mutate: deleteFile(releasePath),
 		},
 	})
+}
+
+// TestGoreleaserExactKeys covers the keys that GitHub reads case-sensitively:
+// jobs, the job env and the step with. A key in another case does not satisfy
+// the rule, so each case gives the whole list of messages, and the count is
+// checked too.
+func TestGoreleaserExactKeys(t *testing.T) {
+	t.Parallel()
+	const (
+		relPin  = `the workflow has no full GORELEASER_VERSION pin in the env of a job, expected "v2.19.0" (the pin in ci.yml)`
+		relEnv  = `the job "release" has a goreleaser-action step, ` + grMsgNoJobPin
+		relWith = `the goreleaser-action step "Run GoReleaser" has no with mapping, so it has no version input`
+		ciWith  = `the goreleaser-action step "Check" has no with mapping, so it has no version input`
+		noJobs  = "the workflow has no jobs mapping"
+	)
+	tests := []struct {
+		name   string
+		mutate mutation
+		want   []grMsg // the whole list; its length is the exact count
+	}{
+		{name: "good repo gives no message"},
+		{
+			name:   "ci.yml with Jobs: key",
+			mutate: replaceOnce(ciPath, "jobs:\n", "Jobs:\n"),
+			want: []grMsg{
+				{ciLine + "1: ", noJobs},
+				{ciLine, grMsgOnePin + " (GORELEASER_VERSION in the env of a job). Found: none"},
+				{ciLine + "7: ", grMsgMention},
+				{ciLine + "10: ", grMsgNames},
+				{ciLine + "13: ", grMsgMention},
+			},
+		},
+		{
+			name:   "release.yml with Jobs: key",
+			mutate: replaceOnce(releasePath, "jobs:\n", "Jobs:\n"),
+			want: []grMsg{
+				{relLine + "1: ", noJobs},
+				{relLine + "7: ", grMsgMention},
+				{relLine + "10: ", grMsgNames},
+				{relLine + "13: ", grMsgMention},
+				{".github/workflows/release.yml: ", relPin},
+			},
+		},
+		{
+			name:   "release.yml with ENV: key in the release job",
+			mutate: replaceOnce(releasePath, "    env:\n", "    ENV:\n"),
+			want: []grMsg{
+				{relLine + "4: ", relEnv},
+				{relLine + "7: ", grMsgMention},
+				{".github/workflows/release.yml: ", relPin},
+			},
+		},
+		{
+			name:   "release.yml with With: key on the goreleaser-action step",
+			mutate: replaceOnce(releasePath, "        with:\n", "        With:\n"),
+			want: []grMsg{
+				{relLine + "9: ", relWith},
+				{relLine + "13: ", grMsgMention},
+			},
+		},
+		{
+			name:   "ci.yml with With: key on the goreleaser-action step",
+			mutate: replaceOnce(ciPath, "        with:\n", "        With:\n"),
+			want: []grMsg{
+				{ciLine + "9: ", ciWith},
+				{ciLine + "13: ", grMsgMention},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := grGoodRepo()
+			if tc.mutate != nil {
+				tc.mutate(t, fsys)
+			}
+			got := checkGoreleaser(fsys, parseWorkflows(t, fsys))
+			grCheckMsgs(t, got, tc.want)
+			if len(got) != len(tc.want) {
+				t.Errorf("checkGoreleaser() gave %d messages, want %d: %q", len(got), len(tc.want), got)
+			}
+		})
+	}
 }
 
 // TestGoreleaserNilMap checks that a nil map gives no message and does not

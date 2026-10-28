@@ -165,6 +165,25 @@ func TestGovulncheckRules(t *testing.T) {
 			n:    1,
 		},
 
+		// (0a) The key jobs is read with its exact spelling. A key Jobs: is not
+		// the jobs mapping for GitHub.
+		{
+			name:   "govulncheck.yml with Jobs: key",
+			mutate: replaceOnce(weeklyPath, "jobs:\n  govulncheck:", "Jobs:\n  govulncheck:"),
+			// The whole list: the jobs are read as no jobs, so every listed rule
+			// that reads a job reports it.
+			want: []string{
+				".github/workflows/govulncheck.yml:1: the workflow has no jobs mapping",
+				".github/workflows/govulncheck.yml: " + noCall,
+				jobMissing,
+				`.github/workflows/govulncheck.yml:8: "govulncheck" ` + notAllowed,
+				`.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed,
+				`.github/workflows/govulncheck.yml:16: "govulncheck" ` + notAllowed,
+				`.github/workflows/govulncheck.yml:17: "failure() || needs.govulncheck.result == 'cancelled'" ` + notAllowed,
+			},
+			n: 7,
+		},
+
 		// (1) Pins.
 		{
 			name:   "ci.yml has no pin",
