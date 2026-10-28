@@ -530,21 +530,6 @@ func TestSDKInspectShortValueEcho(t *testing.T) {
 	}
 }
 
-// sdkCredTok is a fake token: 21 bytes with letters and digits, so it looks
-// like a credential whatever its name.
-const sdkCredTok = "FAKE-TOKEN-0123456789"
-
-// sdkCredDSN is a fake connection URL with a password.
-const sdkCredDSN = "postgres://app:hunter2pw@db/prod" //nolint:gosec // G101: fake test credential
-
-// sdkCredDSNPort is a fake connection URL with a port and a password of 14
-// bytes, so its inner pieces are long enough for Result.Secrets.
-const sdkCredDSNPort = "postgres://app:S3cretPassw0rd@db:5432/app" //nolint:gosec // G101: fake test credential
-
-// sdkCredDSNShortPW is a fake connection URL with a password of 2 bytes, so
-// its inner pieces are too short for Result.Secrets.
-const sdkCredDSNShortPW = "postgres://app:pw@db/app" //nolint:gosec // G101: fake test credential
-
 // sdkCredScript is the sh script of the arg cases of
 // TestSDKInspectCredentialsStdio, for the fixture "benign". discover.ArgSecrets
 // masks the value after "-c", so it is in the wide Result.Secrets. It is not a
@@ -564,7 +549,7 @@ func sdkCredParent(t *testing.T) []string {
 		"PATH=" + filepath.Dir(inspecttest.Fixture(t, "benign")) + ":/usr/bin:/bin",
 		"MCPMOAT_TEST_REGION=production",
 		"MCPMOAT_TEST_API_KEY=production",
-		"MCPMOAT_TEST_DB_URL=" + sdkCredDSNPort,
+		"MCPMOAT_TEST_DB_URL=" + inspect.CredDSNPort,
 	}
 }
 
@@ -601,37 +586,37 @@ func TestSDKInspectCredentialsStdio(t *testing.T) {
 		},
 		{
 			name:        "token-like env value",
-			env:         map[string]string{"MCPMOAT_TEST_PLAIN": sdkCredTok},
-			wantSecrets: []string{sdkCredTok},
-			wantCreds:   []string{sdkCredTok},
+			env:         map[string]string{"MCPMOAT_TEST_PLAIN": inspect.CredTok},
+			wantSecrets: []string{inspect.CredTok},
+			wantCreds:   []string{inspect.CredTok},
 		},
 		{
 			name: "connection URL with a password",
-			env:  map[string]string{"DATABASE_URL": sdkCredDSN},
+			env:  map[string]string{"DATABASE_URL": inspect.CredDSN},
 			// The credentials inside the value too (see valueCredentials).
-			wantSecrets: []string{sdkCredDSN, "app:hunter2pw", "hunter2pw"},
-			wantCreds:   []string{sdkCredDSN, "app:hunter2pw", "hunter2pw"},
+			wantSecrets: []string{inspect.CredDSN, "app:hunter2pw", "hunter2pw"},
+			wantCreds:   []string{inspect.CredDSN, "app:hunter2pw", "hunter2pw"},
 		},
 		{
 			name:        "connection URL with a port",
-			env:         map[string]string{"DATABASE_URL": sdkCredDSNPort},
-			wantSecrets: []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
-			wantCreds:   []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			env:         map[string]string{"DATABASE_URL": inspect.CredDSNPort},
+			wantSecrets: []string{inspect.CredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{inspect.CredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
 		},
 		{
 			// The inner pieces are short: they go to the whole-word list of
 			// the error scrub only (see envSecrets).
 			name:        "connection URL with a short password",
-			env:         map[string]string{"DATABASE_URL": sdkCredDSNShortPW},
-			wantSecrets: []string{sdkCredDSNShortPW},
-			wantCreds:   []string{sdkCredDSNShortPW},
+			env:         map[string]string{"DATABASE_URL": inspect.CredDSNShortPW},
+			wantSecrets: []string{inspect.CredDSNShortPW},
+			wantCreds:   []string{inspect.CredDSNShortPW},
 		},
 		{
 			// The env key and the variable name are plain; the value is not.
 			name:        "expanded connection URL",
 			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_DB_URL}"},
-			wantSecrets: []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
-			wantCreds:   []string{sdkCredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantSecrets: []string{inspect.CredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{inspect.CredDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
 		},
 		{
 			name:        "connection string with no password",
