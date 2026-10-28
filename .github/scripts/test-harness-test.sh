@@ -247,6 +247,12 @@ YAML
             - name: Guard
               run: |
                 echo DECOY folded
+      - name: >-
+          Long name
+          - name: Guard
+            run: |
+              echo DECOY name
+        run: echo x
       - name: Guard
         run: |
           echo real

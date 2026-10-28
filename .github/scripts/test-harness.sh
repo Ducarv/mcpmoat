@@ -175,9 +175,12 @@ harness_footer() {
 # `run: |-`) block of the first step with the name STEP, without the YAML
 # indent. With JOB, it looks only in the job with that ID. The name must be
 # the first key of the step (`- name: STEP`). The run key must be a key of the
-# step itself. The block ends at the first line with less indent, and blank
-# lines at its end are dropped, as YAML does. A line of only spaces and tabs
-# counts as blank. Text of later steps and jobs never shows. It exits 3 when
+# step itself. The block ends at the first line with less indent. Blank lines
+# at its end are always dropped, and the last line always ends with a newline,
+# whatever the chomping indicator (|, |- or |+) says. A line of only spaces and
+# tabs counts as blank. The body of any other block scalar (| or >), such as a
+# heredoc, is text: it never starts a step. Text of later steps and jobs
+# never shows. It exits 3 when
 # there is no such step, when the first step with the name has no block (even
 # when a later step with the name has one), or when the block has no line.
 extract_run_block() {
@@ -217,6 +220,12 @@ extract_run_block() {
         dash = ind
         match($0, /^ *- +/)
         keyindent = RLENGTH
+      }
+      # A name that is a block scalar (name: >-) has a body that is text too.
+      if ($0 ~ /: *[|>][-+0-9]* *(#.*)?$/) {
+        match($0, /^ *(- +)*/)
+        skipbody = 1
+        skipind = RLENGTH
       }
       next
     }
