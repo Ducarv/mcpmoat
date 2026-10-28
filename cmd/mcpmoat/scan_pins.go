@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -83,50 +82,67 @@ type pinnedServer struct {
 
 // scanIgnores holds the two ignore lists of one scan.
 //
-// A .mcpmoat-ignore file can come from a cloned repository, and the user did
-// not write it. If it could ignore a pin finding (MOAT-T2-*), a hostile
-// project could silence the rug-pull alarm for the user's own servers. If it
-// could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002), it could silence
-// the classifier for every server of a user who runs "scan --llm" there. If it
-// could ignore the budget finding (MOAT-T1-023), it could hide that a server
-// used up its rule time budget, so that the tools after the cut look clean.
-// If it could ignore the tool findings cap (MOAT-T1-024), it could silence the
-// summary row of the findings that scan did not list. So the file never
+// scan reads the .mcpmoat-ignore file only with --use-ignore-file (see
+// loadIgnore). Without the flag, the file gives no entries, and both lists
+// hold only the --ignore entries.
+//
+// With the flag, the file still can come from a cloned repository, and the
+// user did not write it. If it could ignore a pin finding (MOAT-T2-*), a
+// hostile project could silence the rug-pull alarm for the user's own
+// servers. If it could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002),
+// it could silence the classifier for every server of a user who runs
+// "scan --llm" there. If it could ignore the budget finding (MOAT-T1-023), it
+// could hide that a server used up its rule time budget, so that the tools
+// after the cut look clean. If it could ignore the tool findings cap
+// (MOAT-T1-024) or the config findings cap (MOAT-T4-005), it could silence
+// the summary row of the findings that scan did not list. So the file never
 // ignores these rules (see fileCannotIgnore). Only --ignore on the command
 // line does, because the user typed it. A cloned repository cannot hide that
 // findings were left out.
 type scanIgnores struct {
-	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
-	// the findings of the config rules and of the tool rules. It does not drop
-	// the findings of the pin rules, of the LLM rules, of the budget rule
-	// and of the tool findings cap (see ignored).
+	// all holds the entries of .mcpmoat-ignore (only with --use-ignore-file)
+	// and of --ignore. It drops the findings of the config rules and of the
+	// tool rules. It does not drop the findings of the rules in
+	// fileCannotIgnore (see ignored).
 	all rules.IgnoreList
-	// flags holds only the --ignore entries. It drops the findings of the pin
-	// rules, of the LLM rules, of the budget rule and of the tool findings
-	// cap.
+	// flags holds only the --ignore entries. It drops the findings of the
+	// rules in fileCannotIgnore.
 	flags rules.IgnoreList
 	// fileEntries is the number of entries that scan read from the
 	// .mcpmoat-ignore file: the N in the stderr line "using N entries". It
 	// counts the entries that the file cannot apply too (see
-	// fileCannotIgnore), and the ones that match no finding.
+	// fileCannotIgnore), and the ones that match no finding. It is 0 without
+	// --use-ignore-file.
 	fileEntries int
 }
 
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
-// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid,
-// rules.RuleAnalysisBudget or rules.RuleToolFindingCap. Only --ignore drops
-// the findings of these rules (see scanIgnores).
+// cannot ignore, also with --use-ignore-file. These rules are:
+//   - the pin rules (MOAT-T2-*, see pins.IsPinRuleID);
+//   - the LLM rules llm.RuleID (MOAT-LLM-001) and llm.RuleIDInvalid
+//     (MOAT-LLM-002);
+//   - rules.RuleAnalysisBudget (MOAT-T1-023), the rule time budget;
+//   - rules.RuleToolFindingCap (MOAT-T1-024), the tool findings cap;
+//   - rules.RuleConfigFindingCap (MOAT-T4-005), the config findings cap.
+//
+// Only --ignore drops the findings of these rules (see scanIgnores). The
+// other description, schema and cross-server rules (T1 and T3) and the config
+// rules stay in the reach of the file: the user opts in to the file with
+// --use-ignore-file. A step must check its findings with scanIgnores.ignored,
+// not with the all list, or this guard does not apply to them.
 func fileCannotIgnore(id string) bool {
 	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid ||
-		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap
+		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap ||
+		id == rules.RuleConfigFindingCap
 }
 
-// ignored reports whether the user asked to ignore the finding k. For a pin
-// rule, an LLM rule, the budget rule or the tool findings cap (see
-// fileCannotIgnore) only the --ignore list counts.
+// ignored reports whether the user asked to ignore the finding k. For a rule
+// in fileCannotIgnore (a pin rule, an LLM rule, the budget rule, the tool
+// findings cap or the config findings cap) only the --ignore list counts.
 // The second result is true when the .mcpmoat-ignore file has an entry that
 // matches k but is not applied, so that the caller can warn about it (see
-// warnFileCannotIgnore).
+// warnFileCannotIgnore). It can be true only with --use-ignore-file, because
+// without the flag the file gives no entries.
 func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 	if !fileCannotIgnore(k.RuleID) {
 		return s.all.Ignored(k), false
@@ -138,8 +154,10 @@ func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 }
 
 // warnFileCannotIgnore prints the warning that .mcpmoat-ignore has an entry
-// for the rule ruleID that is not applied (see scanIgnores). The pin step, the
-// tool rule step and the LLM step print it once for each rule ID.
+// for the rule ruleID that is not applied (see scanIgnores). ruleID is one of
+// the IDs in fileCannotIgnore. The line names only that rule ID, never a
+// server, a tool or config text. Each step that checks such a rule prints it
+// once for each rule ID.
 func (c *cli) warnFileCannotIgnore(ruleID string) {
 	c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
 		rules.IgnoreFileName, termsafe.Quote(ruleID))
@@ -193,6 +211,9 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 	// pin selects its server among all the servers, also the ones that were
 	// not inspected.
 	setSelectors(p.res.hints, servers)
+	// After the loop: firstPin has now added every first-run server to the
+	// budget, as savePinned adds them before the user can run pin --accept.
+	p.markStoreFull()
 	return p.res
 }
 
@@ -208,7 +229,8 @@ type pinner struct {
 	// real store, to find a server that would make pins.json too large
 	// (pins.ErrStoreFull). The report is printed before the save, so this
 	// must be known before the save. Set on the copy never changes store, and
-	// the copy is never saved.
+	// the copy is never saved. markStoreFull checks the accept hints against
+	// it with CheckSet, which never changes it.
 	budget *pins.Store
 	res    pinReport
 	// handled holds the servers that this run already checked or pinned. Two
@@ -305,7 +327,7 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 
 	tools := o.Result.Tools
 	if stored, found := p.store.Get(id); found {
-		p.compare(ref, id, tools, stored)
+		p.compare(ref, id, tools, stored, discover.NewTextRedactor(o.Result.Secrets))
 		return
 	}
 	p.firstPin(ref, id, tools)
@@ -313,8 +335,14 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 
 // add keeps a row, or counts it when the ignore list drops it. It returns false
 // for a dropped row, so the caller keeps no diff for it.
-func (p *pinner) add(row report.FindingRow) bool {
-	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: row.Key}
+//
+// toolName is the real, full tool name of the row (pins.Change.RawTool), or ""
+// for a row about the whole server. The ignore list matches it, not row.Key:
+// the Key shows each secret value as discover.Mask and pinRow cuts a long name
+// (see pinKey), and an ignore entry names the real tool. An entry for the cut
+// Key must not match. toolName is never printed.
+func (p *pinner) add(toolName string, row report.FindingRow) bool {
+	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: toolName}
 	dropped, blocked := p.ign.ignored(key)
 	if blocked && !p.warned[row.RuleID] {
 		p.warned[row.RuleID] = true
@@ -341,7 +369,7 @@ func (p *pinner) addUnverified(ref report.ServerRef, reason, risk, fix, severity
 	row.Related = reason
 	row.Risk = risk
 	row.Remediation = fix
-	p.add(row)
+	p.add("", row)
 }
 
 // unverifiedSeverity returns the severity of a MOAT-T2-004 row about the server
@@ -377,6 +405,25 @@ func (p *pinner) notInspected(ref report.ServerRef, id pins.Identity, err error)
 	}
 }
 
+// markStoreFull sets full on each accept hint whose new tools (h.snap) do not
+// fit in pins.json, so the hint prints no command that "pin --accept" would
+// refuse. full is shareFull when only the share of the project servers is full
+// (pins.ErrProjectShareFull), so the note of the hint names the project
+// servers, and fileFull for any other pins.ErrStoreFull (see fullKindOf).
+//
+// Each hint is checked alone with CheckSet, because pin --accept saves one
+// server at a time. CheckSet runs the checks of Set but changes nothing, so
+// p.budget stays as it is by construction. Set on p.budget itself would be
+// wrong: the budget must hold only what savePinned will save, and a hint is
+// only a proposal. Any other error from CheckSet leaves the hint as it is:
+// pin --accept reports it.
+func (p *pinner) markStoreFull() {
+	for i := range p.res.hints {
+		h := &p.res.hints[i]
+		h.full = fullKindOf(p.budget.CheckSet(h.id, h.snap))
+	}
+}
+
 // firstPin records the tools of a server that is not in the store yet, so that
 // savePinned can pin them. The store is not changed here. scan prints "pinned N
 // tools for <server>" on stderr only after savePinned saved the server (see
@@ -388,11 +435,12 @@ func (p *pinner) notInspected(ref report.ServerRef, id pins.Identity, err error)
 // firstPin also adds the pins to p.budget, a copy of the store. When the pins
 // would make pins.json larger than its size limit (pins.ErrStoreFull), the
 // server is not recorded either, and it gets the same high MOAT-T2-004 finding
-// with the fixed reason reasonStoreFull. The report is printed before
-// savePinned runs, so firstPin must decide this now: otherwise the server
-// would be refused at the save with no finding in the report. The servers
-// before it stay in the budget, so the servers that fit are still pinned.
-// ref is the server of the row (see pinRow).
+// with the fixed reason reasonStoreFull, or reasonShareFull when only the
+// share of the project servers is full (pins.ErrProjectShareFull). The report
+// is printed before savePinned runs, so firstPin must decide this now:
+// otherwise the server would be refused at the save with no finding in the
+// report. The servers before it stay in the budget, so the servers that fit
+// are still pinned. ref is the server of the row (see pinRow).
 func (p *pinner) firstPin(ref report.ServerRef, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
@@ -405,23 +453,24 @@ func (p *pinner) firstPin(ref report.ServerRef, id pins.Identity, tools []inspec
 	// that Set can give here is pins.ErrStoreFull. Any other error keeps the
 	// server in the list: savePinned calls Set again, which gives the same
 	// error, and reports it there (exit code 2).
-	if err := p.budget.Set(id, snap); errors.Is(err, pins.ErrStoreFull) {
-		p.addUnverified(ref, reasonStoreFull, riskServerUnverified, fixStoreFull, pins.UnverifiedSeverity(true))
+	if kind := fullKindOf(p.budget.Set(id, snap)); kind != notFull {
+		p.addUnverified(ref, kind.reason(), riskServerUnverified, kind.remediation(), pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: ref.Name, tools: len(tools)})
 }
 
-// compare compares the tools of a pinned server with its pins (pins.Compare).
-// Each change is one finding row. The rule ID comes from the change kind and
-// the severity from Change.Severity (a pinned name that cannot be verified is
-// high), not from the rule set, which does not hold the pin rules. A changed or
-// new tool, and a pinned tool whose pin cannot be checked, also gets a diff
-// (see appendDiff). The store is never changed. When at least one row is kept
-// (not ignored), compare also records the digest for the "--expect" hint
-// (see writeAcceptHints). The hint says so when a kept diff was cut, or when
-// the ignore list dropped a row: the digest covers that change, but the report
-// shows no diff for it.
+// compare compares the tools of a pinned server with its pins
+// (pins.CompareMasked). Each change is one finding row. The rule ID comes from
+// the change kind and the severity from Change.Severity (a pinned name that
+// cannot be verified is high), not from the rule set, which does not hold the
+// pin rules. A changed or new tool, and a pinned tool whose pin cannot be
+// checked, also gets a diff (see appendDiff). The store is never changed. When
+// at least one row is kept (not ignored), compare also records the digest for
+// the "--expect" hint (see writeAcceptHints), and the new pins in the hint
+// (acceptHint.snap), so that markStoreFull can check that they fit in pins.json.
+// The hint says so when a kept diff was cut, or when the ignore list dropped a
+// row: the digest covers that change, but the report shows no diff for it.
 //
 // Tools that cannot be pinned (see pinnable) cannot be accepted either, so
 // they get no hint, and every row of the server gets the fix fixNotPinnable:
@@ -434,14 +483,22 @@ func (p *pinner) firstPin(ref report.ServerRef, id pins.Identity, tools []inspec
 //
 // ref is the server. Every row and every diff of the server gets its Index
 // (see pinRow and appendDiff).
-func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
+//
+// redactor holds the secret values of the server (nil when it has none, see
+// compareMask). The compare is pins.CompareMasked with it: the Key of each
+// row, the tool name of each diff and the diff text show each secret value as
+// discover.Mask. The verdicts, the hashes, the digest and the ignore lookup
+// (Change.RawTool) use the real text.
+func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, redactor *discover.TextRedactor) {
 	snap, pinErr := pinnable(id, tools)
 	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
 		p.addUnverified(ref, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
 	}
 	h := acceptHint{name: ref.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
-	for _, ch := range pins.Compare(stored, tools) {
+	for _, ch := range pins.CompareMasked(stored, tools, compareMask(redactor)) {
+		// ch.Tool is the masked name, for the report. ch.RawTool is the real
+		// name, for the ignore lookup only.
 		row := pinRow(ch.Kind, ref, ch.Tool, ch.Severity)
 		if ch.Kind == pins.KindUnverified {
 			// ch.Reason is a fixed text from internal/pins.
@@ -450,7 +507,7 @@ func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect
 		if pinErr != nil {
 			row.Remediation = fixNotPinnable
 		}
-		if !p.add(row) {
+		if !p.add(ch.RawTool, row) {
 			h.ignored = true
 			continue
 		}
@@ -461,6 +518,7 @@ func (p *pinner) compare(ref report.ServerRef, id pins.Identity, tools []inspect
 	}
 	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)
+		h.snap = snap
 		p.res.hints = append(p.res.hints, h)
 	}
 }
@@ -489,6 +547,17 @@ const (
 // pinsFullText is a var, so this is a var too.
 var reasonStoreFull = pinsFullText + ", so this server is not pinned"
 
+// reasonShareFull is the reason for a first-run project server whose pins
+// would make the project servers use more than their share of pins.json
+// (pins.ErrProjectShareFull, see firstPin). It must stay shorter than
+// report.MaxShortCellRunes, like reasonStoreFull. It starts with
+// pinsShareFullText, so the size is written in one place. pinsShareFullText
+// is a var, so this is a var too. It ends with "; this server is not pinned"
+// and not with ", so this server is not pinned" like reasonStoreFull, because
+// the ", so" form has 81 runes, one more than report.MaxShortCellRunes (80),
+// and TestScanReasonsFitShortCell would fail.
+var reasonShareFull = pinsShareFullText + "; this server is not pinned"
+
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
 // addUnverified). They hold no server text.
 const (
@@ -513,6 +582,9 @@ const (
 	fixNotPinnable    = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
 	fixRelativeSource = "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."
 	fixStoreFull      = "Remove servers you no longer use from pins.json, or remove this server from the client config, then run mcpmoat scan again."
+	// fixShareFull goes with reasonShareFull. The share applies only to
+	// project servers, so the servers of the user scope still get pinned.
+	fixShareFull = "Servers of the user scope are not affected: remove project servers you no longer use from pins.json, or remove this server from its project config, then run mcpmoat scan again."
 )
 
 // pinRow returns the report row of one pin change on the server ref. The caller
@@ -524,6 +596,12 @@ const (
 //
 // ref.Index is the position of the server in the scanned list
 // (inspect.Outcome.Index). It becomes server_index in scan --json.
+//
+// tool is the masked tool name (pins.Change.Tool from pins.CompareMasked),
+// never pins.Change.RawTool, or "" for a row about the whole server. The Key is
+// pinKey(tool): a long name is cut, but the mask came first, so the cut cannot
+// leave a part of a secret. The caller gives the full real name to add for the
+// ignore list.
 func pinRow(kind pins.ChangeKind, ref report.ServerRef, tool, severity string) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   ref,
@@ -532,8 +610,21 @@ func pinRow(kind pins.ChangeKind, ref report.ServerRef, tool, severity string) r
 		Risk:        kind.Risk(),
 		Remediation: kind.Remediation(),
 		Field:       rules.FieldTool,
-		Key:         tool,
+		Key:         pinKey(tool),
 	}
+}
+
+// pinKey returns the Key of a pin row for the tool name. An empty name stays
+// empty: a pin row with an empty Key is about the whole server, as the
+// MOAT-T2-004 rows of addUnverified are, so it does not get the noToolNameKey
+// of toolKey. Any other name gets toolKey, the same cut as the tool rule rows
+// and the LLM rows: a hostile server can send a tool name of many KiB, and the
+// text and --json reports would repeat it in full.
+func pinKey(tool string) string {
+	if tool == "" {
+		return ""
+	}
+	return toolKey(tool)
 }
 
 // outcomeSummary returns the summary entry of one outcome. findings is the

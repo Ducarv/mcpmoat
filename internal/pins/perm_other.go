@@ -32,3 +32,11 @@ func checkParentOwnerAndMode(string, fs.FileInfo, int) error {
 func checkSymlinkOwner(string, string, fs.FileInfo, int) error {
 	return nil
 }
+
+// checkLockFile does nothing on systems that are not Unix. Windows reports no
+// Unix owner or permission bits for the pins lock file, and mcpmoat takes no
+// lock there (see lock_other.go). Windows is a non-goal (PRD section 2.2). See
+// the Unix version for the rule.
+func checkLockFile(string, fs.FileInfo, int) error {
+	return nil
+}

@@ -325,14 +325,16 @@ Which fields are required:
 
 - The loader requires only `id`, `title`, `severity`, `target` and `match`. A rule with only these fields
   loads, so the PRD example works unchanged.
-- A built-in rule also needs `risk` (one sentence, no line break, up to 500 characters), `remediation`,
-  at least one reference, at least one `should_match` case and at least one `should_not_match` case.
+- A built-in rule also needs `risk` (one sentence, no line break, up to 500 characters), `remediation`
+  (up to 500 characters, so that the terminal report never cuts its `Fix:` line), at least one
+  reference, at least one `should_match` case and at least one `should_not_match` case.
   The file name must equal the ID.
 
 Limits:
 
 - A rule file is at most 64 KiB.
-- `title` is at most 200 characters, `risk` at most 500 and `remediation` at most 1000.
+- `title` is at most 200 characters, `risk` at most 500 and `remediation` at most 1000 (500 for a
+  built-in rule, see above).
 - `heuristic` is at most 64 bytes.
 - `any_regex`, `all_regex` and `keywords` hold at most 100 items each. One item is at most 4096 bytes.
 - `references` holds at most 20 items. One item is at most 2048 bytes.
@@ -347,11 +349,16 @@ Guidelines:
   such as `<instructions>...</instructions>`, can be unbounded (`[\s\S]+?`): the closing tag
   ends it. Go uses RE2, so there is no catastrophic backtracking.
 - Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
-  tool of each server. `scan` gives the rule analysis of each server a time budget of 5 seconds,
-  for the built-in rules and the rules from `--rules` together. A server that uses it up gets a
-  `MOAT-T1-023` finding, and the rest of its tools are not fully checked. So a slow rule can give a
-  false alarm on a benign server. Prefer a few short patterns. A long alternation with many
-  branches, or a large bounded repeat such as `{0,1000}`, costs time on every form.
+  tool of each server. The time is shared: all servers together have one time limit, for the
+  built-in rules and the rules from `--rules` together (see [Limits](limits.md)). Each server gets
+  a fair share of it: its time budget. A server that uses up its budget gets a `MOAT-T1-023`
+  finding, and the rest of its tools are not checked. A server that `scan` does not reach in time
+  (the limit ended, or its share is under 1 ms) gets the same finding for all its tools. The
+  finding is high, or critical when a description or schema rule from `--rules` is critical. Only
+  `--ignore` drops it, not `.mcpmoat-ignore`. So a slow rule can give a false alarm on a benign
+  server, and on the servers after it. Prefer a few short patterns.
+  A long alternation with many branches, or a large bounded repeat such as `{0,1000}`, costs time
+  on every form.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.
 - Add at least one reference (research, advisory, OWASP MCP Top 10 entry).
 
@@ -453,14 +460,15 @@ What `scan` does with the rules from `--rules`:
 
 - A rule with `target: description` or `target: schema` runs on the tools of each server when
   `scan` connects to the servers, like a built-in rule. Its findings have the severity of the rule,
-  and `--ignore` and `.mcpmoat-ignore` drop them like other rule findings. With `--no-connect`,
-  `scan` gets no tools, so these rules do not run, and `scan` prints a note on stderr.
+  and `--ignore` and `.mcpmoat-ignore` (with `--use-ignore-file`) drop them like other rule
+  findings. With `--no-connect`, `scan` gets no tools, so these rules do not run, and `scan` prints
+  a note on stderr.
 - A rule with `target: config` is loaded and checked, but `scan` does not apply it. `scan` runs only
   its built-in config checks, and prints this note on stderr:
   `mcpmoat scan: rules from --rules with target config are not applied; scan applies only the built-in config checks`.
-- Your rules share the time budget of each server with the built-in rules (see the guideline on
-  rule cost in step 2). A critical description or schema rule changes the severity of the
-  `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)).
+- Your rules share the time limit of the rule analysis with the built-in rules, and all servers
+  share it too (see the guideline on rule cost in step 2). A critical description or schema rule
+  changes the severity of the `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)).
 
 ## See also
 

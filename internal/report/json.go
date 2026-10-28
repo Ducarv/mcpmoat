@@ -65,12 +65,19 @@ type ScanReport struct {
 	SchemaVersion int      `json:"schema_version"`
 	Tool          ToolInfo `json:"tool"`
 	Mode          Mode     `json:"mode"`
-	// Complete is false when the report can miss results, and scan then
-	// exits with 2: a config file has a problem (see Errors), or the
-	// inspection or the pin step failed as a whole (pins.json cannot be read,
-	// for example), or the LLM step did not classify every tool: a provider
-	// failure, an internal error of the LLM step, or more tools than the
-	// --llm cap. The reason is on stderr only.
+	// Complete is true when the report holds every result of the scan steps:
+	// the configs were read, the servers were inspected, the rules ran, and
+	// the LLM step (with --llm) classified every tool. It is false when the
+	// report can miss results, and scan then exits with 2: a config file has
+	// a problem (see Errors), or the inspection or the pin step failed as a
+	// whole (pins.json cannot be read, for example), or the LLM step did not
+	// classify every tool: a provider failure, an internal error of the LLM
+	// step, or more tools than the --llm cap. The reason is on stderr only.
+	//
+	// Complete does not cover the save of new pins. scan saves them after it
+	// writes the report, so that the user sees the report first. A failed
+	// save gives exit code 2 with Complete true. A consumer must read the
+	// exit code too.
 	Complete bool `json:"complete"`
 	// FieldsTruncated is true when WriteJSON cut at least one long text field
 	// (a name or a path) of the report, so that value is not the whole text.
@@ -285,6 +292,9 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // first part of the document. WriteJSON wraps the error of the encoder or of
 // the write. Callers must check it: a failed write has to become exit code 2
 // in cmd/mcpmoat.
+//
+// WriteJSON writes Complete as the caller set it. Complete does not cover the
+// pin save of scan (see ScanReport.Complete).
 func WriteJSON(w io.Writer, r ScanReport) error {
 	// A nil slice would show as null. Use empty slices, so consumers can
 	// always loop over the lists.

@@ -6,18 +6,23 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 )
 
 // Values from the macOS SDK headers <sys/attr.h> and <sys/kauth.h>. The
-// comment after each value gives the header name.
+// comment after each value gives the header name. The values were checked
+// against MacOSX.sdk/usr/include/sys/attr.h and sys/kauth.h of the Command
+// Line Tools.
 const (
 	attrBitMapCount         = 5          // ATTR_BIT_MAP_COUNT
 	attrCmnExtendedSecurity = 0x00400000 // ATTR_CMN_EXTENDED_SECURITY
 	attrCmnReturnedAttrs    = 0x80000000 // ATTR_CMN_RETURNED_ATTRS
+	fsoptNoFollow           = 0x00000001 // FSOPT_NOFOLLOW
 	fsoptReportFullsize     = 0x00000004 // FSOPT_REPORT_FULLSIZE
 
 	kauthFilesecMagic = 0x012cc16d // KAUTH_FILESEC_MAGIC
@@ -25,7 +30,9 @@ const (
 	kauthACEKindMask  = 0xf        // KAUTH_ACE_KINDMASK
 	kauthACEPermit    = 1          // KAUTH_ACE_PERMIT
 
+	kauthVnodeReadData           = 1 << 1  // KAUTH_VNODE_READ_DATA, also KAUTH_VNODE_LIST_DIRECTORY
 	kauthVnodeWriteData          = 1 << 2  // KAUTH_VNODE_WRITE_DATA, also KAUTH_VNODE_ADD_FILE
+	kauthVnodeExecute            = 1 << 3  // KAUTH_VNODE_EXECUTE, also KAUTH_VNODE_SEARCH
 	kauthVnodeDelete             = 1 << 4  // KAUTH_VNODE_DELETE
 	kauthVnodeAppendData         = 1 << 5  // KAUTH_VNODE_APPEND_DATA, also KAUTH_VNODE_ADD_SUBDIRECTORY
 	kauthVnodeDeleteChild        = 1 << 6  // KAUTH_VNODE_DELETE_CHILD
@@ -34,7 +41,9 @@ const (
 	kauthVnodeWriteSecurity      = 1 << 12 // KAUTH_VNODE_WRITE_SECURITY
 	kauthVnodeTakeOwnership      = 1 << 13 // KAUTH_VNODE_TAKE_OWNERSHIP, also KAUTH_VNODE_CHANGE_OWNER
 	kauthACEGenericAll           = 1 << 21 // KAUTH_ACE_GENERIC_ALL
+	kauthACEGenericExecute       = 1 << 22 // KAUTH_ACE_GENERIC_EXECUTE
 	kauthACEGenericWrite         = 1 << 23 // KAUTH_ACE_GENERIC_WRITE
+	kauthACEGenericRead          = 1 << 24 // KAUTH_ACE_GENERIC_READ
 )
 
 // aclWriteRights is the ACE rights that let a principal change the path, its
@@ -44,6 +53,15 @@ const (
 const aclWriteRights = kauthVnodeWriteData | kauthVnodeDelete | kauthVnodeAppendData |
 	kauthVnodeDeleteChild | kauthVnodeWriteAttributes | kauthVnodeWriteExtattributes |
 	kauthVnodeWriteSecurity | kauthVnodeTakeOwnership | kauthACEGenericAll | kauthACEGenericWrite
+
+// lockOpenRights is the ACE rights that let a principal open the pins lock
+// file, and so hold flock(2) on it: flock works on any open descriptor. Read
+// data opens it with O_RDONLY (and O_EVTONLY). Execute opens it with O_EXEC,
+// also when the principal has no read right. The write rights open it for
+// writing or let the principal change its ACL or owner. The generic bits count
+// for the same reason as in aclWriteRights.
+const lockOpenRights = aclWriteRights | kauthVnodeReadData | kauthVnodeExecute |
+	kauthACEGenericRead | kauthACEGenericExecute
 
 // Sizes and offsets of the reply of fgetattrlist(2) and of struct
 // kauth_filesec, from <sys/attr.h> and <sys/kauth.h>.
@@ -111,23 +129,31 @@ type attrList struct {
 // at all (the kernel does not return the attribute) passes, because then no
 // ACL can exist.
 //
-// It checks only f. It does not check the ACLs of the parent directories.
+// It checks only f. checkParentACL checks the parent directories with the
+// same rule, and checkLockFileACL checks the lock file.
 //
 // It reads the ACL with the fgetattrlist(2) system call and
 // ATTR_CMN_EXTENDED_SECURITY, through f.SyscallConn, so the descriptor stays
 // open during the call. Reading the com.apple.system.Security extended
 // attribute fails with EPERM, and golang.org/x/sys/unix has no getattrlist
-// wrapper. On darwin, syscall.Syscall6 is a direct kernel trap (svc or
-// syscall instruction) and does not go through libc. Apple does not promise a
-// stable system call interface. syscall.SYS_FGETATTRLIST (228) is the value
-// in <sys/syscall.h> of the macOS SDK. If a later macOS changes it, the call
+// wrapper.
+//
+// On darwin, the exported syscall.Syscall6 is a direct kernel trap: the
+// assembly in src/syscall/asm_darwin_arm64.s (svc #0x80) and
+// asm_darwin_amd64.s (syscall) of the Go toolchain in go.mod. It does not go
+// through libc. Since Go 1.12, only the internal, lowercase wrappers that the
+// standard library itself uses call libc. Apple does not promise a stable
+// system call interface. syscall.SYS_FGETATTRLIST (228) is the value in
+// <sys/syscall.h> of the macOS SDK. If a later macOS changes it, the call
 // fails or returns a reply that does not parse, and checkACL fails closed.
 func checkACL(path, kind string, f *os.File) error {
 	filesec, err := readFilesec(f)
 	if err != nil {
 		return aclReadError(path, kind, err)
 	}
-	writable, err := aclAllowsWrite(filesec)
+	// The same rule as checkParentACL (firstWriteACE). The index is not
+	// used: the hint chmod -N removes the whole ACL.
+	_, writable, err := firstWriteACE(filesec)
 	if err != nil {
 		return aclReadError(path, kind, err)
 	}
@@ -138,10 +164,90 @@ func checkACL(path, kind string, f *os.File) error {
 		kind, path, shellQuote(path), ErrInsecurePermissions)
 }
 
-// aclReadError is the fail-closed error of checkACL when it cannot read or
-// parse the ACL. It wraps ErrInsecurePermissions.
+// aclReadError is the fail-closed error of checkACL, checkParentACL and
+// checkLockFileACL when they cannot read or parse the ACL. kind is the kind of
+// path in the text, for example kindDir. It wraps ErrInsecurePermissions.
 func aclReadError(path, kind string, err error) error {
 	return fmt.Errorf("cannot read the ACL of the pins %s %s: %w: %w", kind, path, err, ErrInsecurePermissions)
+}
+
+// checkParentACL returns an error that wraps ErrInsecurePermissions when the
+// extended ACL of the parent directory path of the pins directory lets a user
+// or group change it. Such a user could rename or remove the pins directory,
+// and the next run would see a first run and pin the current tools without an
+// alert (T2). The mode bits do not show an ACL, so checkParentOwnerAndMode
+// does not see it.
+//
+// The rule is the rule of checkACL: any ACE of kind KAUTH_ACE_PERMIT with a
+// right in aclWriteRights fails, for every principal, also the current user.
+// So the pins directory and its parents agree. Deny ACEs pass, so a home
+// directory with the default "group:everyone deny delete" entry passes. The
+// fix hint removes only the bad entry, by its index (chmod -a#), never the
+// whole ACL with chmod -N: on a home directory that would also remove the deny
+// entry. ls -led shows the index of each entry.
+//
+// info is the os.Lstat result of path, and uid is the current user. Both
+// choose the words of the hint only (askOwnerPrefix): only the owner of path
+// or root can change its ACL. A nil info, or one with no Unix owner, gives the
+// "ask the owner or root to run" wording.
+//
+// It reads the ACL by path (readFilesecPath), because the walk of
+// checkParentsAs is by path too. It fails closed: when it cannot read or parse
+// the ACL, it returns an error that wraps ErrInsecurePermissions. A directory
+// with no ACL passes.
+func checkParentACL(path string, info fs.FileInfo, uid int) error {
+	filesec, err := readFilesecPath(path)
+	if err != nil {
+		return aclReadError(path, kindParent, err)
+	}
+	index, found, err := firstWriteACE(filesec)
+	if err != nil {
+		return aclReadError(path, kindParent, err)
+	}
+	if !found {
+		return nil
+	}
+
+	// No "--" in the chmod hint: macOS chmod reads the word after -a# as the
+	// index, so in "chmod -a# 1 -- path" it takes "--" for a file name. path
+	// is absolute (checkParentsAs walks an absolute path), so it cannot start
+	// with "-".
+	fix := askOwnerPrefix(info, uid) + fmt.Sprintf("chmod -a# %d %s", index, shellQuote(path))
+	return fmt.Errorf("%s %s is not safe: its ACL entry %d lets a user or group change it (fix: %s, %s; ls -led %s shows the entries): %w",
+		labelParent, path, index, fix, privateConfigHint, shellQuote(path), ErrInsecurePermissions)
+}
+
+// checkLockFileACL returns an error that wraps ErrInsecurePermissions when
+// the extended ACL of the open pins lock file f lets a user or group open it.
+// flock(2) works on any open descriptor, so such a user could hold the lock
+// and block every save of the pins. path is for the error text only.
+//
+// Any ACE of kind KAUTH_ACE_PERMIT with a right in lockOpenRights fails, for
+// every principal: read data, execute (an open with O_EXEC needs only that),
+// a write right, or a generic read, execute, write or all right. Deny ACEs
+// pass. It fails closed, as checkACL does, and a file with no ACL passes.
+//
+// The fix hint is rm, not chmod (see lockFileFix): mcpmoat makes a new lock
+// file with mode 0o600, and a chmod does not close a descriptor that another
+// user already has open. When the new file gets the entry again, the entry is
+// inherited from the pins directory, so the hint also names the chmod -N of
+// that directory (the same fix as checkACL gives for a directory ACL).
+func checkLockFileACL(path string, f *os.File) error {
+	filesec, err := readFilesec(f)
+	if err != nil {
+		return aclReadError(path, kindLock, err)
+	}
+	index, found, err := firstPermitACE(filesec, lockOpenRights)
+	if err != nil {
+		return aclReadError(path, kindLock, err)
+	}
+	if !found {
+		return nil
+	}
+	// The lock file is a regular file here (checkLockFile ran first), so the
+	// hint is rm (lockFileFix with no file info).
+	return fmt.Errorf("%s %s is not safe: its ACL entry %d lets a user or group open it (fix: %s; if the entry comes back, it is inherited from the pins directory, so also run chmod -N -- %s): %w",
+		labelLock, path, index, lockFileFix(path, nil), shellQuote(filepath.Dir(path)), ErrInsecurePermissions)
 }
 
 // readFilesec returns the struct kauth_filesec of the open file f, as
@@ -152,6 +258,32 @@ func readFilesec(f *os.File) ([]byte, error) {
 	if f == nil {
 		return nil, errors.New("no open file")
 	}
+	return readFilesecWith(func(al *attrList, buf []byte) error {
+		return fgetattrlist(f, al, buf)
+	})
+}
+
+// readFilesecPath is readFilesec for the path path, with no open file. It
+// calls getattrlist(2) with FSOPT_NOFOLLOW, so when path is a symlink it reads
+// the ACL of the symlink, not of its target. A read by path needs only search
+// permission on the directories above path. An open with O_RDONLY would also
+// need read permission on path itself, so a parent with mode 0o711 would fail.
+func readFilesecPath(path string) ([]byte, error) {
+	// The kernel wants a C string: the bytes of path and a NUL byte. It
+	// returns EINVAL when path holds a NUL byte.
+	cpath, err := syscall.BytePtrFromString(path)
+	if err != nil {
+		return nil, fmt.Errorf("getattrlist: %w", err)
+	}
+	return readFilesecWith(func(al *attrList, buf []byte) error {
+		return getattrlist(cpath, al, buf)
+	})
+}
+
+// readFilesecWith is the shared part of readFilesec and readFilesecPath. call
+// does one getattrlist(2) or fgetattrlist(2) call with the request al and the
+// reply buffer buf, with the option FSOPT_REPORT_FULLSIZE.
+func readFilesecWith(call func(al *attrList, buf []byte) error) ([]byte, error) {
 	al := attrList{
 		bitmapCount: attrBitMapCount,
 		commonAttr:  attrCmnReturnedAttrs | attrCmnExtendedSecurity,
@@ -162,7 +294,7 @@ func readFilesec(f *os.File) ([]byte, error) {
 	// calls, fail closed.
 	for range 2 {
 		buf := make([]byte, size)
-		if err := fgetattrlist(f, &al, buf); err != nil {
+		if err := call(&al, buf); err != nil {
 			return nil, err
 		}
 		// FSOPT_REPORT_FULLSIZE: the first u_int32_t is the size that the
@@ -209,6 +341,36 @@ func fgetattrlist(f *os.File, al *attrList, buf []byte) error {
 	return nil
 }
 
+// getattrlist calls getattrlist(2) on the C string path (see
+// syscall.BytePtrFromString) with the request al and the reply buffer buf,
+// with the options FSOPT_NOFOLLOW and FSOPT_REPORT_FULLSIZE. buf must not be
+// empty. It retries on EINTR.
+//
+// syscall.SYS_GETATTRLIST (220) is the value in <sys/syscall.h> of the macOS
+// SDK, on amd64 and arm64. As for fgetattrlist, the exported syscall.Syscall6
+// is a direct kernel trap, not a libc call (see checkACL), and a changed
+// number makes the call fail or the reply not parse, so the check fails
+// closed.
+func getattrlist(path *byte, al *attrList, buf []byte) error {
+	for {
+		// The pointer conversions must stay in the call expression, so the
+		// compiler keeps path, al and buf alive during the call.
+		_, _, errno := syscall.Syscall6(syscall.SYS_GETATTRLIST,
+			uintptr(unsafe.Pointer(path)),    //nolint:gosec // G103: getattrlist(2) reads the NUL-terminated path; BytePtrFromString made it.
+			uintptr(unsafe.Pointer(al)),      //nolint:gosec // G103: getattrlist(2) reads struct attrlist; attrList has the same layout.
+			uintptr(unsafe.Pointer(&buf[0])), //nolint:gosec // G103: the kernel writes at most len(buf) bytes; the reply is parsed with bounds checks.
+			uintptr(len(buf)), fsoptNoFollow|fsoptReportFullsize, 0)
+		switch errno {
+		case 0:
+			return nil
+		case syscall.EINTR:
+			continue
+		default:
+			return fmt.Errorf("getattrlist: %w", errno)
+		}
+	}
+}
+
 // parseAttrReply returns the attribute data of ATTR_CMN_EXTENDED_SECURITY in
 // the fgetattrlist(2) reply buf, which is cut to the reported length. It
 // returns nil and no error when the kernel did not return the attribute or
@@ -244,20 +406,31 @@ func parseAttrReply(buf []byte) ([]byte, error) {
 	return buf[start:end], nil
 }
 
-// aclAllowsWrite reports whether the struct kauth_filesec in filesec has a
-// KAUTH_ACE_PERMIT entry with a right in aclWriteRights, for any principal.
+// firstWriteACE returns the index of the first KAUTH_ACE_PERMIT entry in the
+// struct kauth_filesec filesec with a right in aclWriteRights, for any
+// principal. found is false when there is no such entry. The index counts
+// from 0, in the order of the entries in the ACL, which is the index that
+// ls -le shows and that chmod -a# takes. See firstPermitACE for the errors.
+func firstWriteACE(filesec []byte) (index int, found bool, err error) {
+	return firstPermitACE(filesec, aclWriteRights)
+}
+
+// firstPermitACE returns the index of the first KAUTH_ACE_PERMIT entry in the
+// struct kauth_filesec filesec with a right in rights, for any principal.
+// found is false when there is no such entry. Deny entries never match.
+//
 // A nil or empty filesec, and an ACL with the entry count KAUTH_FILESEC_NOACL,
 // mean no ACL. It returns an error for a filesec that is short, has the wrong
 // magic number, or whose size does not match its entry count.
-func aclAllowsWrite(filesec []byte) (bool, error) {
+func firstPermitACE(filesec []byte, rights uint32) (index int, found bool, err error) {
 	if len(filesec) == 0 {
-		return false, nil
+		return 0, false, nil
 	}
 	if len(filesec) < filesecHeaderSize {
-		return false, fmt.Errorf("the ACL data has %d bytes, too short", len(filesec))
+		return 0, false, fmt.Errorf("the ACL data has %d bytes, too short", len(filesec))
 	}
 	if magic := binary.NativeEndian.Uint32(filesec); magic != kauthFilesecMagic {
-		return false, fmt.Errorf("the ACL data has the magic number %#x, not %#x", magic, kauthFilesecMagic)
+		return 0, false, fmt.Errorf("the ACL data has the magic number %#x, not %#x", magic, kauthFilesecMagic)
 	}
 	count := binary.NativeEndian.Uint32(filesec[filesecEntryCountOff:])
 	if count == kauthFilesecNoACL {
@@ -267,14 +440,16 @@ func aclAllowsWrite(filesec []byte) (bool, error) {
 	// match exactly: other bytes would mean a layout that this code does not
 	// know.
 	if want := uint64(filesecHeaderSize) + uint64(count)*aceSize; uint64(len(filesec)) != want {
-		return false, fmt.Errorf("the ACL data has %d bytes, but %d entries need %d", len(filesec), count, want)
+		return 0, false, fmt.Errorf("the ACL data has %d bytes, but %d entries need %d", len(filesec), count, want)
 	}
+	i := 0
 	for ace := filesec[filesecHeaderSize:]; len(ace) >= aceSize; ace = ace[aceSize:] {
 		flags := binary.NativeEndian.Uint32(ace[aceFlagsOff:])
-		rights := binary.NativeEndian.Uint32(ace[aceRightsOff:])
-		if flags&kauthACEKindMask == kauthACEPermit && rights&aclWriteRights != 0 {
-			return true, nil
+		aceRights := binary.NativeEndian.Uint32(ace[aceRightsOff:])
+		if flags&kauthACEKindMask == kauthACEPermit && aceRights&rights != 0 {
+			return i, true, nil
 		}
+		i++
 	}
-	return false, nil
+	return 0, false, nil
 }

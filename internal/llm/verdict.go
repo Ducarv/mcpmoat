@@ -148,10 +148,10 @@ const TruncatedText = "The tool description is too long to classify in full. " +
 	"The part after the cut was not rated and can hold hidden instructions for the AI agent."
 
 // RedactedText is the fixed risk text of a RuleID finding for a tool whose
-// text had a configured value removed (see Verdict.Redacted), and that the
-// model rated none or low, or gave no usable rating (ErrInvalidOutput). The
-// caller rates such a tool medium whatever the model answered, because a
-// hostile config can choose which text to remove.
+// text had a credential removed (a value of inspect.Result.Credentials, see
+// Verdict.Redacted), and that the model rated none or low, or gave no usable
+// rating (ErrInvalidOutput). The caller rates such a tool medium whatever the
+// model answered, because a hostile config can choose which text to remove.
 const RedactedText = "A value from your config, such as an env or header value, was removed from the tool text before it was sent to the model. " +
 	"The removed text was not rated and can hold hidden instructions for the AI agent."
 
@@ -169,13 +169,14 @@ type Verdict struct {
 	// tool message was built. It never comes from the model output:
 	// parseVerdict never sets it.
 	Truncated bool
-	// Redacted is true when toolMessage replaced one or more configured
-	// secret values in the tool name or description with discover.Mask,
-	// before the request. It is the same flag as the "redacted" field of
-	// the message (see toolMessage). Classify sets it, also with an error
-	// after the message was built. It never comes from the model output:
-	// parseVerdict never sets it. The removed text was not rated, so the
-	// caller rates such a tool medium (see RedactedText).
+	// Redacted is true when toolMessage replaced one or more credentials
+	// (the values of Input.Credentials, the subset inspect.Result.Credentials)
+	// in the tool name or description with discover.Mask, before the
+	// request. It is the same flag as the "redacted" field of the message
+	// (see toolMessage). Classify sets it, also with an error after the
+	// message was built. It never comes from the model output: parseVerdict
+	// never sets it. The removed text was not rated, so the caller rates
+	// such a tool medium (see RedactedText).
 	Redacted bool
 }
 

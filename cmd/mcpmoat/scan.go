@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -63,7 +65,7 @@ func (c *cli) runScan(opts options, args []string) int {
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
 	// does not reach them: only this context stops them.
-	return c.scanConfigs(c.ctxOrBackground(), a.configPath, a.ignoreIDs, setup)
+	return c.scanConfigs(c.ctxOrBackground(), a.configPath, a.ignoreIDs, a.useIgnoreFile, setup)
 }
 
 // scanArgs holds the checked flags of "scan".
@@ -71,6 +73,11 @@ type scanArgs struct {
 	noConnect bool // --no-connect: static analysis only
 	noColor   bool // --no-color after "scan"
 	jsonOut   bool // --json
+	// useIgnoreFile is true with --use-ignore-file. Only then does scan read
+	// .mcpmoat-ignore from the working directory. The working directory can
+	// be a cloned repository or a pull request checkout, so the file is
+	// untrusted, and it can hide findings and change the exit code.
+	useIgnoreFile bool
 	// configPath is the --config value, or empty for auto-discovery.
 	configPath string
 	// rulesDir is the --rules folder, or empty.
@@ -97,6 +104,7 @@ func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 	fs.BoolVar(&a.noConnect, "no-connect", false, "")
 	fs.BoolVar(&a.noColor, "no-color", false, "")
 	fs.BoolVar(&a.jsonOut, "json", false, "")
+	fs.BoolVar(&a.useIgnoreFile, flagUseIgnoreFile, false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -202,22 +210,26 @@ func (c *cli) buildScanSetup(opts options, a scanArgs, loaded loadedRules, class
 	// --no-color (after "scan") is read here, so both positions work.
 	style := report.Style{Color: !opts.noColor && !a.noColor && c.stdoutIsTTY}
 	return scanSetup{
-		checks:      configChecks{set: loaded.set, typo: typo},
-		analyzer:    loaded.analyzer,
-		toolBudget:  c.toolBudgetOrDefault(),
-		maxToolRows: c.maxToolRowsOrDefault(),
-		connect:     connect,
-		style:       style,
-		failOn:      a.failOn,
-		jsonOut:     a.jsonOut,
-		classifier:  classifier,
+		// A zero perServer gives configRowsPerServer, and the zero total
+		// gives configRowsTotal (see configCaps.orDefault).
+		checks:         configChecks{set: loaded.set, typo: typo, caps: configCaps{perServer: c.maxConfigRows}.orDefault()},
+		analyzer:       loaded.analyzer,
+		toolBudget:     c.toolBudgetOrDefault(),
+		toolStepBudget: c.toolStepBudgetOrDefault(),
+		maxToolRows:    c.maxToolRowsOrDefault(),
+		connect:        connect,
+		style:          style,
+		failOn:         a.failOn,
+		jsonOut:        a.jsonOut,
+		classifier:     classifier,
 	}, true
 }
 
 // scanSetup holds what scan has built before it reads the config files.
 type scanSetup struct {
-	// checks are the config rules (T4 and T5). Its rule set also gives the
-	// severity and the texts of the tool rule findings (see toolRulesStep).
+	// checks are the config rules (T4 and T5) and the caps of their rows. Its
+	// rule set also gives the severity and the texts of the tool rule
+	// findings (see toolRulesStep).
 	checks configChecks
 	// analyzer applies the description and schema rules (T1 and T3) to the
 	// tools of the inspected servers (see toolRulesStep).
@@ -225,6 +237,10 @@ type scanSetup struct {
 	// toolBudget is the time that the tool rule step can use for the tools
 	// of one server (toolRulesBudget in a real scan).
 	toolBudget time.Duration
+	// toolStepBudget is the time limit of the whole tool rule step, for all
+	// the servers together (toolRulesStepBudget in a real scan). Each server
+	// gets a share of it, up to toolBudget (see serverShare).
+	toolStepBudget time.Duration
 	// maxToolRows is the largest number of tool rows that the tool rule step
 	// keeps for one server (maxToolRowsPerServer in a real scan).
 	maxToolRows int
@@ -252,6 +268,16 @@ func (c *cli) toolBudgetOrDefault() time.Duration {
 		return toolRulesBudget
 	}
 	return c.toolBudget
+}
+
+// toolStepBudgetOrDefault returns c.toolStepBudget, or toolRulesStepBudget
+// when the field is zero (a real scan). Like toolBudget, a negative value is
+// kept: the step limit is then used up at once.
+func (c *cli) toolStepBudgetOrDefault() time.Duration {
+	if c.toolStepBudget == 0 {
+		return toolRulesStepBudget
+	}
+	return c.toolStepBudget
 }
 
 // maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
@@ -383,19 +409,23 @@ func isFlagOf(fs *flag.FlagSet, value string) bool {
 
 // scanConfigs loads the config files (see loadConfigs), builds the ignore
 // list and runs the scan (see reportScan). configPath is the --config value, or
-// empty for auto-discovery.
+// empty for auto-discovery. useIgnoreFile is the --use-ignore-file flag.
 //
-// The working directory is where .mcpmoat-ignore is. With --config, an unknown
-// working directory is a warning, and scan reads no ignore file.
-func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []string, setup scanSetup) int {
+// The working directory is where .mcpmoat-ignore is. scan reads the file only
+// with --use-ignore-file. Then an unknown working directory is a warning, and
+// scan reads no ignore file. Without the flag, scan never opens the file: it
+// only prints a note when the file is there (see noteIgnoreFile).
+func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []string, useIgnoreFile bool, setup scanSetup) int {
 	res, wd, ok := c.loadConfigs(ctx, "scan", configPath)
 	if !ok {
 		return exitError
 	}
-	if wd == "" {
+	if !useIgnoreFile {
+		c.noteIgnoreFile(wd)
+	} else if wd == "" {
 		c.scanWarnf("cannot read the working directory; %s is not read", rules.IgnoreFileName)
 	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
+	ignore := c.loadIgnore(wd, ignoreIDs, useIgnoreFile)
 
 	// A file that failed to load and gave no servers is a plain error. The
 	// "No MCP servers found." line would be wrong and misleading here, so we
@@ -412,14 +442,43 @@ func (c *cli) scanWarnf(format string, a ...any) {
 	c.warnf("scan", format, a...)
 }
 
+// flagUseIgnoreFile is the name of the --use-ignore-file flag of scan, without
+// the dashes.
+const flagUseIgnoreFile = "use-ignore-file"
+
+// ignoreFileNote is the line that noteIgnoreFile prints on stderr when
+// .mcpmoat-ignore is in the working directory but --use-ignore-file is not
+// given. It is fixed text: it holds no path and no file content.
+const ignoreFileNote = "mcpmoat scan: note: " + rules.IgnoreFileName + " is not read; it can hide findings. Add --" + flagUseIgnoreFile + " only if you trust it"
+
+// noteIgnoreFile prints ignoreFileNote on stderr when the working directory wd
+// has an entry named .mcpmoat-ignore of any type. It runs only without
+// --use-ignore-file. It uses os.Lstat, so it never opens or reads the file
+// and never follows a symlink. An empty wd (the working directory is not
+// known) or any Lstat error gives no line: the file is not read anyway.
+func (c *cli) noteIgnoreFile(wd string) {
+	if wd == "" {
+		return
+	}
+	if _, err := os.Lstat(filepath.Join(wd, rules.IgnoreFileName)); err != nil {
+		return
+	}
+	fprintf(c.stderr, "%s\n", ignoreFileNote)
+}
+
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
-// config rules holds the entries of .mcpmoat-ignore in the directory wd, then
-// one entry for each --ignore ID in ids. The list for the pin rules, the LLM
-// rules, the budget rule (MOAT-T1-023) and the tool findings cap rule
-// (MOAT-T1-024) holds only the --ignore entries, because the file is untrusted
-// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
-// them. An empty wd means that the working directory is not known, so
-// loadIgnore reads no file.
+// config rules holds the entries of .mcpmoat-ignore in the directory wd (only
+// when useIgnoreFile is true, see below), then one entry for each --ignore ID
+// in ids. The list for the pin rules, the LLM rules, the budget rule
+// (MOAT-T1-023), the tool findings cap rule (MOAT-T1-024) and the config
+// findings cap rule (MOAT-T4-005) holds only the --ignore entries, because the
+// file is untrusted (see scanIgnores). ids holds only valid rule IDs: the
+// --ignore flag checks them.
+//
+// useIgnoreFile is the --use-ignore-file flag. When it is false, loadIgnore
+// never opens or reads the file, and the lists hold only the --ignore entries.
+// An empty wd means that the working directory is not known, so loadIgnore
+// reads no file either.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -429,13 +488,14 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // findings. The --ignore IDs come from the user, so they give no notice.
 //
 // An entry of the file for a pin rule (MOAT-T2-*), an LLM rule
-// (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023) or the tool
-// findings cap rule (MOAT-T1-024) is not applied (see fileCannotIgnore): scan
-// warns when such an entry matches a finding (see pinOutcomes, toolRulesStep
-// and llmStep).
-func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
+// (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023), the tool
+// findings cap rule (MOAT-T1-024) or the config findings cap rule
+// (MOAT-T4-005) is not applied (see fileCannotIgnore): scan warns when such
+// an entry matches a finding (see configChecks.findings, pinOutcomes,
+// toolRulesStep and llmStep).
+func (c *cli) loadIgnore(wd string, ids []string, useIgnoreFile bool) *scanIgnores {
 	var ign scanIgnores
-	if wd != "" {
+	if useIgnoreFile && wd != "" {
 		fromFile, warnings, err := rules.ReadIgnoreFile(wd)
 		if err != nil {
 			// The error text already starts with "read ignore file <path>",
@@ -475,6 +535,15 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // of the findings that the ignore list dropped (see printIgnored), and saves
 // the new pins (see savePinned). A save error never hides the report. The
 // "pinned N tools" notices come after a successful save.
+//
+// The save comes after the report on purpose: the user must see the report
+// before the pins are saved. So the "complete" field of the --json document
+// (see writeScanOutput) cannot cover the save. A document with
+// "complete": true and exit code 2 means that the pin save failed, for
+// example: another process held the pins lock, the pins file was removed
+// during the run, a server no longer fit, the pins directory was unsafe or
+// changed, or a signal stopped the run before the save. The reason is on
+// stderr.
 //
 // The exit code comes from scanExitCode (docs/exit-codes.md is the contract,
 // and the usage text in cli.go summarises it). A config file problem, a pin
@@ -536,16 +605,17 @@ type scanStepsResult struct {
 }
 
 // runScanSteps runs the steps of a scan on the servers of res: the config
-// rules, then, when setup.connect is not nil, the pin step (see inspectAndPin),
-// the tool rule step (see toolRulesStep) and the LLM step (see llmStep). It
-// merges their rows, ignored counts and per-server counts. When ok is false, the
-// scan must exit with 2 and print no report: the user stopped the scan, or the
-// guard of a step caught an error. The step already wrote the line on stderr.
+// rules (see configStep), then, when setup.connect is not nil, the pin step
+// (see inspectAndPin), the tool rule step (see toolRulesStep) and the LLM step
+// (see llmStep). It merges their rows, ignored counts and per-server counts.
+// When ok is false, the scan must exit with 2 and print no report: the user
+// stopped the scan, or the guard of a step caught an error. The step already
+// wrote the line on stderr.
 func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanSetup, ignore *scanIgnores) (steps scanStepsResult, ok bool) {
 	// counts holds the findings of each server for the summary. It starts
 	// with the config findings, and the tool rule step and the LLM step add
 	// their own.
-	rows, ignored, counts := setup.checks.findings(&ignore.all, res.Servers)
+	rows, ignored, counts := c.configStep(setup.checks, ignore, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
@@ -624,14 +694,21 @@ func (c *cli) runToolAndLLMSteps(ctx context.Context, setup scanSetup, outcomes 
 // writeScanOutput writes the report on c.stdout: the JSON document with --json,
 // or the terminal report (see writeScanReport). It returns the first write
 // error. fileEntries is the number of entries that scan read from
-// .mcpmoat-ignore: the JSON report holds it. configPath is the --config value,
-// or empty. configProblem is true when a config file has a problem.
+// .mcpmoat-ignore (0 without --use-ignore-file): the JSON report holds it.
+// configPath is the --config value, or empty. configProblem is true when a
+// config file has a problem.
+//
+// The JSON document has a "complete" field. It is true when the report holds
+// every result of the scan steps: no config file problem, no failed pin step
+// and no incomplete LLM step. It does not cover the pin save (see
+// report.ScanReport.Complete).
 func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, fileEntries int, configPath string, configProblem bool) error {
 	if setup.jsonOut {
 		mode := report.ModeNoConnect
 		if setup.connect != nil {
 			mode = report.ModeConnect
 		}
+		// Only the scan steps count here (see report.ScanReport.Complete).
 		complete := !steps.pinFailed && !configProblem && !steps.llmIncomplete
 		return c.writeScanJSON(scanJSONInput{
 			version:       c.build.version,
@@ -692,7 +769,7 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 //
 // The scan took a long time since it read pins.json first (it connected to the
 // servers), and another scan or "pin --accept" may have changed the file. So
-// savePinned reads the file again, with the lock on the pins directory (see
+// savePinned reads the file again, with the pins lock (see
 // readPinsLocked), and holds the lock until the save is done. No other run
 // that locks can read or save between this read and this save, so no update is
 // lost. Only a file system that cannot lock leaves that window open, and
@@ -701,11 +778,12 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 // run wrote, and it prints no notice for it.
 //
 // savePinned writes nothing on stdout or stderr while it holds the lock, so a
-// blocked stdout or stderr never holds the lock. While it holds the lock, it
-// collects the warnings in a list of lines and keeps the error of Set or
-// Save. It releases the lock right after the Save, or right after the step
-// that failed, and only then prints, in this order: the warnings, the error,
-// and on success the new pins file notice and the "pinned" lines.
+// blocked stdout or stderr never holds the lock. The locked work is in
+// setNewPins: it collects the warnings in a list of lines and keeps the error
+// of Set or Save. savePinned releases the lock right after it, or right after
+// the step that failed, and only then prints with printPinSave, in this order:
+// the warnings, the error, and on success the new pins file notice and the
+// "pinned" lines.
 //
 // When the first read found pins.json (pr.storeExisted) but the locked read
 // does not, the file was removed while scan ran. A save would drop every older
@@ -713,8 +791,9 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 // and returns false (see pinsRemovedWhileRunning).
 //
 // Another run can also have made the file larger after the report, so a
-// server that fitted then may not fit now (pins.ErrStoreFull from Set). That
-// server is not pinned and gets a warning on stderr. The other servers are
+// server that fitted then may not fit now (pins.ErrStoreFull from Set, or
+// pins.ErrProjectShareFull for a project server). That server is not pinned
+// and gets a warning on stderr (see fullKind.text). The other servers are
 // still saved, and savePinned returns false, so scan exits with 2 and the
 // refusal is never silent.
 func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
@@ -740,65 +819,85 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		c.cmdPrintf("scan", "%s", pinsRemovedText)
 		return false
 	}
+	res := setNewPins(store, pr.pinned)
+	// The last step that needs the lock is done. Free the lock before the
+	// output: a blocked pipe must not keep other runs from the pins file.
+	release()
+	return c.printPinSave(store, res)
+}
 
-	// warnings holds the text of each warning, without the prefix. scanWarnf
-	// prints them after the release.
-	var warnings []string
-	var saved []pinnedServer
-	full := false // true when Set refused at least one server with ErrStoreFull
-	// failWhat and failErr hold an error of Set or Save. failErr is nil when
-	// there is no error.
-	var failWhat string
-	var failErr error
-	for _, ps := range pr.pinned {
+// pinSave is what setNewPins did while it held the lock. printPinSave prints
+// it after the release.
+type pinSave struct {
+	// saved are the servers that the save pinned, in the order of the scan.
+	saved []pinnedServer
+	// warnings holds the text of each warning, without the prefix.
+	warnings []string
+	// full is true when Set refused at least one server with
+	// pins.ErrStoreFull (also for a project share refusal, which wraps it).
+	full bool
+	// fail is the error of Set or Save, if any.
+	fail saveFailure
+}
+
+// setNewPins adds each server of pinned to store, unless store already has an
+// entry for it, and saves store when it added at least one server. It does not
+// print: savePinned calls it with the lock held.
+func setNewPins(store *pins.Store, pinned []pinnedServer) pinSave {
+	var res pinSave
+	for _, ps := range pinned {
 		if other, found := store.Get(ps.id); found {
 			// Another run pinned the server meanwhile. Its pins stay, but
 			// this scan did not compare them with the tools that it saw.
 			if !maps.Equal(other, ps.snap) {
-				warnings = append(warnings, fmt.Sprintf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name)))
+				res.warnings = append(res.warnings, fmt.Sprintf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name)))
 			}
 			continue
 		}
 		err := store.Set(ps.id, ps.snap)
-		if errors.Is(err, pins.ErrStoreFull) {
+		if kind := fullKindOf(err); kind != notFull {
 			// The store did not change, so the other servers can still be
-			// saved. This one is not pinned: say so, and exit with 2.
-			warnings = append(warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), pinsFullText))
-			full = true
+			// saved. This one is not pinned: say so, and exit with 2. kind
+			// names the share when a project server was refused for it.
+			res.warnings = append(res.warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), kind.text()))
+			res.full = true
 			continue
 		}
 		// pinOutcomes checked the pins with the same rules, so any other error
 		// is not expected. Stop the loop and save nothing.
 		if err != nil {
-			failWhat, failErr = "cannot set the pins of a server", err
+			res.fail = saveFailure{what: "cannot set the pins of a server", err: err}
 			break
 		}
-		saved = append(saved, ps)
+		res.saved = append(res.saved, ps)
 	}
-	if failErr == nil && len(saved) > 0 {
+	if !res.fail.failed() && len(res.saved) > 0 {
 		if err := store.Save(); err != nil {
-			failWhat, failErr = "cannot save the pins file", err
+			res.fail = saveFailure{what: "cannot save the pins file", err: err}
 		}
 	}
-	// The last step that needs the lock is done. Free the lock before the
-	// output: a blocked pipe must not keep other runs from the pins file.
-	release()
+	return res
+}
 
-	for _, w := range warnings {
+// printPinSave prints the result of setNewPins after the release of the lock:
+// the warnings, the error, and on success the new pins file notice and the
+// "pinned" lines. It returns the result of savePinned.
+func (c *cli) printPinSave(store *pins.Store, res pinSave) bool {
+	for _, w := range res.warnings {
 		c.scanWarnf("%s", w)
 	}
-	if failErr != nil {
-		c.cmdErr("scan", failWhat, failErr)
+	if res.fail.failed() {
+		c.cmdErr("scan", res.fail.what, res.fail.err)
 		return false
 	}
-	if len(saved) == 0 {
-		return !full
+	if len(res.saved) == 0 {
+		return !res.full
 	}
 	if !store.Existed() {
 		c.printNewPinsFile("scan", store.Path())
 	}
-	c.printPinned(saved)
-	return !full
+	c.printPinned(res.saved)
+	return !res.full
 }
 
 // inspectAndPin reads the pins store, inspects the servers with c.inspector,

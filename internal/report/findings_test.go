@@ -527,3 +527,29 @@ func TestSeverityWordsMatchRules(t *testing.T) {
 		t.Errorf("report severityOrder = %q, want the rules words %q", report.SeverityOrder, want)
 	}
 }
+
+// TestBuiltinRuleTextFitsReport checks that the report shows the risk and the
+// remediation of every built-in rule in full. rules.CheckDocumented limits a
+// built-in remediation to the length at which the report cuts rule text (see
+// maxRuleTextRunes). The two limits live in two packages, so this test fails
+// when one of them changes and the other does not.
+func TestBuiltinRuleTextFitsReport(t *testing.T) {
+	t.Parallel()
+	builtin, errs := rules.Builtin()
+	if len(errs) > 0 {
+		t.Fatalf("rules.Builtin() returned %d errors, first: %v", len(errs), errs[0])
+	}
+	for _, r := range builtin {
+		row := report.FindingRow{
+			ServerRef: globalRef("s"), RuleID: r.ID, Severity: "low",
+			Title: r.Title, Risk: r.Risk, Remediation: r.Remediation,
+		}
+		out := writeFindings(t, plain, row)
+		// A rule text may hold the marker as plain text, so compare the
+		// count: a cut adds one marker that the text does not hold.
+		want := strings.Count(r.Title+r.Risk+r.Remediation, termsafe.CutMarker)
+		if got := strings.Count(out, termsafe.CutMarker); got != want {
+			t.Errorf("%s: the report holds %d cut markers, want %d: it cut a rule text", r.ID, got, want)
+		}
+	}
+}

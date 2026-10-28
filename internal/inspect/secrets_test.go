@@ -103,7 +103,7 @@ func TestResultSecrets(t *testing.T) {
 				before[i] = slices.Clone(l)
 			}
 
-			got := resultSecrets(tt.lists...)
+			got := resultSecrets(slices.Concat(tt.lists...))
 
 			checkSecrets(t, got, tt.want)
 			if !reflect.DeepEqual(tt.lists, before) {
@@ -183,7 +183,7 @@ func TestRemoteResultSecrets(t *testing.T) {
 		// url builds the configured URL. nil means fixtureURL.
 		url     func(ts *httptest.Server) string
 		wrap    func(http.Handler) http.Handler
-		secrets []string // RemoteOptions.secrets, the expanded values
+		secrets []string // RemoteOptions.lookedUp.long, the expanded values
 		want    []string
 	}{
 		{name: "no secrets", want: nil},
@@ -238,6 +238,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			want: []string{
 				rmBasic("user-name", "userinfo-pw-1"),
 				strings.TrimPrefix(rmBasic("user-name", "userinfo-pw-1"), "Basic "),
+				// The whole user info, from urlCredentials.
+				"user-name:userinfo-pw-1",
 				"userinfo-pw-1",
 			},
 		},
@@ -249,6 +251,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			want: []string{
 				rmBasic("ghp_userinfo1", "x-oauth-basic"),
 				strings.TrimPrefix(rmBasic("ghp_userinfo1", "x-oauth-basic"), "Basic "),
+				// The whole user info, from urlCredentials.
+				"ghp_userinfo1:x-oauth-basic",
 				"ghp_userinfo1",
 				"x-oauth-basic",
 			},
@@ -271,7 +275,8 @@ func TestRemoteResultSecrets(t *testing.T) {
 			name: "secret path segment",
 			url:  func(ts *httptest.Server) string { return ts.URL + "/" + pathSecret + "/mcp" },
 			wrap: func(next http.Handler) http.Handler { return http.StripPrefix("/"+pathSecret, next) },
-			want: []string{pathSecret},
+			// The value of the key=value segment, from urlCredentials.
+			want: []string{pathSecret, "path-secret-1"},
 		},
 		{
 			name:    "expanded values",
@@ -322,7 +327,7 @@ func TestRemoteResultSecrets(t *testing.T) {
 			}
 			srv := rmServer(discover.TransportHTTP, rawURL, tt.headers)
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: tt.secrets})
+			got, err := Remote(t.Context(), srv, RemoteOptions{lookedUp: secretLists{long: tt.secrets}})
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
@@ -360,7 +365,9 @@ func TestRemoteResultSecretsShortScrub(t *testing.T) {
 			t.Fatalf("Remote() error = %v", err)
 		}
 		basic := rmBasic("short-user", shortPassword)
-		rmCheckResult(t, got, basic, strings.TrimPrefix(basic, "Basic "), longHeader)
+		// The whole user info has more than 8 bytes, so it is in the list
+		// (from urlCredentials). The short password alone is not.
+		rmCheckResult(t, got, basic, strings.TrimPrefix(basic, "Basic "), userinfo, longHeader)
 	})
 
 	t.Run("failure echoes the values", func(t *testing.T) {
@@ -421,7 +428,7 @@ func TestRemoteResultSecretsNilOnFailure(t *testing.T) {
 			srv := rmServer(discover.TransportHTTP, tt.url(t), rmHeaders())
 			srv.Untrusted = tt.untrusted
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: []string{"expanded-value-1"}})
+			got, err := Remote(t.Context(), srv, RemoteOptions{lookedUp: secretLists{long: []string{"expanded-value-1"}}})
 			if err == nil {
 				t.Fatal("Remote() error = nil, want an error")
 			}
@@ -433,6 +440,436 @@ func TestRemoteResultSecretsNilOnFailure(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, Result{}) {
 				t.Errorf("Remote() Result = %+v on failure, want the zero Result", got)
+			}
+		})
+	}
+}
+
+// The tests below cover Result.Credentials (issues #229 and #235): the
+// subset of Result.Secrets that looks like a credential. resultCredentials
+// is the filter, and isCredential, envCredentials, argCredentials and
+// lookupRecorder find the credential values of a stdio config. The remote
+// side is in remote_test.go and the stdio Inspect side in
+// sdk_secrets_test.go. All values are fake.
+
+// credTok is a fake token: 21 bytes with letters and digits, so
+// discover.TokenLike reports true for it whatever its name.
+const credTok = "FAKE-TOKEN-0123456789"
+
+// credDSN is a fake connection URL with a password. Its words are not
+// token-like, so only discover.ArgCredentials, which finds the password,
+// makes it a credential.
+const credDSN = "postgres://app:hunter2pw@db/prod" //nolint:gosec // G101: fake test credential
+
+// credDSNPort is a fake connection URL with a port and a password of 14
+// bytes. Its inner pieces "app:S3cretPassw0rd" and "S3cretPassw0rd" are long
+// enough for Result.Secrets.
+const credDSNPort = "postgres://app:S3cretPassw0rd@db:5432/app" //nolint:gosec // G101: fake test credential
+
+// credDSNShortPW is a fake connection URL with a password of 2 bytes. Its
+// inner pieces are too short for Result.Secrets: they go to the whole-word
+// list of the error scrub only. The whole URL is long enough.
+const credDSNShortPW = "postgres://app:pw@db/app" //nolint:gosec // G101: fake test credential
+
+// checkCredentials fails the test when the revealed values of r.Credentials
+// are not want, in the same order, or when want is empty and r.Credentials is
+// not nil. It also checks the subset rule: each value of r.Credentials is in
+// r.Secrets, in the order of r.Secrets. The values are fake test secrets, so
+// the messages show them.
+func checkCredentials(t *testing.T, r Result, want []string) {
+	t.Helper()
+	got := revealSecrets(r.Credentials)
+	if !slices.Equal(got, want) {
+		t.Errorf("Result.Credentials = %q, want %q", got, want)
+	}
+	if len(want) == 0 && r.Credentials != nil {
+		t.Errorf("Result.Credentials = %#v, want nil", r.Credentials)
+	}
+	// A subsequence check: walk Secrets one time and find each credential
+	// after the one before it.
+	secrets := revealSecrets(r.Secrets)
+	i := 0
+	for _, c := range got {
+		for i < len(secrets) && secrets[i] != c {
+			i++
+		}
+		if i == len(secrets) {
+			t.Errorf("Result.Credentials = %q is not a subset of Result.Secrets = %q in its order", got, secrets)
+			return
+		}
+		i++
+	}
+}
+
+// TestResultCredentials checks the filter of resultCredentials: it keeps
+// the values of secrets that are in a list, in the order of secrets, each
+// one time, and it is nil when no value is kept.
+func TestResultCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// secrets go through resultSecrets first, as in Inspect and Remote.
+		secrets []string
+		lists   [][]string
+		want    []string // nil means a nil result
+	}{
+		{name: "no secrets", secrets: nil, lists: [][]string{{"some-value-1"}}, want: nil},
+		{name: "no lists", secrets: []string{"some-value-1"}, lists: nil, want: nil},
+		{name: "empty lists", secrets: []string{"some-value-1"}, lists: [][]string{nil, {}}, want: nil},
+		{
+			// A value that only the lists hold is never added.
+			name:    "value not in secrets",
+			secrets: []string{"some-value-1"},
+			lists:   [][]string{{"other-value-2", credTok}},
+			want:    nil,
+		},
+		{
+			// resultSecrets drops the 7-byte value, so it cannot be a
+			// credential either; the 8-byte one stays.
+			name:    "8-byte minimum",
+			secrets: []string{"SEVEN77", "EIGHT888"},
+			lists:   [][]string{{"SEVEN77", "EIGHT888"}},
+			want:    []string{"EIGHT888"},
+		},
+		{
+			name:    "subset keeps the order of secrets",
+			secrets: []string{"bbbbbbbb", "aaaaaaaaaa", "plain-value", "cccccccccc"},
+			lists:   [][]string{{"bbbbbbbb", "cccccccccc"}, {"aaaaaaaaaa"}},
+			want:    []string{"aaaaaaaaaa", "cccccccccc", "bbbbbbbb"},
+		},
+		{
+			name:    "duplicates once",
+			secrets: []string{credTok, "plain-value"},
+			lists:   [][]string{{credTok, credTok}, {credTok}},
+			want:    []string{credTok},
+		},
+		{
+			name:    "every value is a credential",
+			secrets: []string{credTok, credDSN},
+			lists:   [][]string{{credDSN}, {credTok}},
+			want:    []string{credDSN, credTok},
+		},
+		{
+			// The plain words of issue #235 are in Secrets and not in the
+			// lists, so only the token is kept.
+			name:    "plain words dropped",
+			secrets: []string{"production", "information", "application/json", credTok},
+			lists:   [][]string{{credTok}},
+			want:    []string{credTok},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			secrets := resultSecrets(tt.secrets)
+			before := revealSecrets(secrets)
+
+			got := resultCredentials(secrets, slices.Concat(tt.lists...))
+
+			checkCredentials(t, Result{Secrets: secrets, Credentials: got}, tt.want)
+			if after := revealSecrets(secrets); !slices.Equal(after, before) {
+				t.Errorf("resultCredentials changed secrets: %q, want %q", after, before)
+			}
+		})
+	}
+}
+
+// TestIsCredential checks the name and value rules of isCredential, with the
+// plain config words of issue #235 as cases that must not match.
+func TestIsCredential(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		varName  string
+		value    string
+		want     bool
+		describe string
+	}{
+		// Must match.
+		{varName: "API_KEY", value: "production", want: true, describe: "secret-like name, plain value"},
+		{varName: "MCPMOAT_TEST_TOKEN", value: "production", want: true, describe: "token in the name"},
+		{varName: "X_HMAC", value: "deadbeefdeadbeef", want: true, describe: "hmac in the name, short hex value"},
+		{varName: "NODE_ENV", value: credTok, want: true, describe: "plain name, token-like value"},
+		{varName: "", value: credTok, want: true, describe: "no name, token-like value"},
+		{varName: "DATABASE_URL", value: credDSN, want: true, describe: "URL with a password"},
+		{varName: "PGOPTS", value: "host=db password=hunter2pw", want: true, describe: "connection string with a password"},
+		{varName: "X", value: "Bearer " + credTok, want: true, describe: "auth scheme and token"},
+		{varName: "X", value: "ghp_FAKE0123", want: true, describe: "token prefix"},
+		{varName: "X", value: "0f8fad5b-d9cb-469f-a165-70867728950e", want: true, describe: "UUID"},
+		// Must not match.
+		{varName: "NODE_ENV", value: "production", want: false, describe: "plain name, plain value"},
+		{varName: "LOG_LEVEL", value: "information", want: false, describe: "log level"},
+		{varName: "PGOPTS", value: "host=localhost dbname=production user=postgres", want: false, describe: "connection string with no password"},
+		{varName: "Content-Type", value: "application/json", want: false, describe: "media type"},
+		{varName: "User-Agent", value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", want: false, describe: "browser User-Agent"},
+		{varName: "User-Agent", value: "my-client/1.2.3", want: false, describe: "client User-Agent"},
+		{varName: "X-Title", value: "My Documents", want: false, describe: "title of two words"},
+		{varName: "Accept", value: "text/event-stream, application/json", want: false, describe: "media type list"},
+		{varName: "", value: "", want: false, describe: "empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.describe, func(t *testing.T) {
+			t.Parallel()
+			if got := isCredential(tt.varName, tt.value); got != tt.want {
+				t.Errorf("isCredential(%q, %q) = %v, want %v", tt.varName, tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnvCredentials checks envCredentials: the env values of 8 bytes or
+// more whose key is secret-like or that look like a credential, in the order
+// of the sorted keys.
+func TestEnvCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want []string // nil means a nil result
+	}{
+		{name: "no env", env: nil, want: nil},
+		{name: "plain values", env: map[string]string{"NODE_ENV": "production", "LOG_LEVEL": "information"}, want: nil},
+		{name: "secret-like key", env: map[string]string{"API_KEY": "production"}, want: []string{"production"}},
+		{name: "token-like value", env: map[string]string{"REGION": credTok}, want: []string{credTok}},
+		// After the value, the credentials inside it (see valueCredentials).
+		{name: "URL with a password", env: map[string]string{"DATABASE_URL": credDSN}, want: []string{credDSN, "app:hunter2pw", "hunter2pw"}},
+		{
+			name: "connection string with no password",
+			env:  map[string]string{"PGOPTS": "host=localhost dbname=production user=postgres"},
+			want: nil,
+		},
+		{
+			// The value has 7 bytes: under discover.MinSecretBytes, though
+			// the key is secret-like.
+			name: "short value",
+			env:  map[string]string{"API_KEY": "SEVEN77", "TOKEN": ""},
+			want: nil,
+		},
+		{
+			// The keys sort as A_TOKEN, B_PLAIN, C_URL, NODE_ENV.
+			name: "mixed in key order",
+			env:  map[string]string{"NODE_ENV": "production", "C_URL": credDSN, "B_PLAIN": "plain-value", "A_TOKEN": "EIGHT888"},
+			want: []string{"EIGHT888", credDSN, "app:hunter2pw", "hunter2pw"},
+		},
+		{
+			// resultCredentials removes the duplicate later.
+			name: "same value twice",
+			env:  map[string]string{"A_TOKEN": credTok, "B": credTok},
+			want: []string{credTok, credTok},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := make(discover.SecretMap, len(tt.env))
+			for k, v := range tt.env {
+				env[k] = discover.NewSecret(v)
+			}
+			got := envCredentials(env)
+			if !slices.Equal(got, tt.want) || (tt.want == nil && got != nil) {
+				t.Errorf("envCredentials() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInnerCredentialsEverySource checks that the credentials inside one
+// config value (see valueCredentials) reach the same lists whether the value
+// is an env value (envSecrets, envCredentials), the value of an expanded
+// variable (lookupRecorder) or a header value (headerSecretValues,
+// headerCredentials, headerShortSecrets). A server can echo the password of a
+// connection URL alone, so a long piece goes to Secrets and Credentials and a
+// short piece to the whole-word list only. A value with no credential in it
+// gets no inner piece.
+func TestInnerCredentialsEverySource(t *testing.T) {
+	t.Parallel()
+
+	// lists are the lists of one source for one config value: the long list
+	// for Result.Secrets, the credentials and the short whole-word list.
+	type lists struct{ secrets, creds, short []string }
+	// The env key, the variable name and the header key are plain, so only
+	// the value can make it a credential.
+	sources := map[string]func(value string) lists{
+		"env value": func(value string) lists {
+			env := discover.SecretMap{"MCPMOAT_TEST_VALUE": discover.NewSecret(value)}
+			secrets, short := envSecrets(env)
+			return lists{secrets, envCredentials(env), short}
+		},
+		"expanded variable": func(value string) lists {
+			rec := &lookupRecorder{lookup: func(string) (string, bool) { return value, true }}
+			rec.Lookup("MCPMOAT_TEST_VALUE")
+			return lists{rec.long, rec.credentials, rec.short}
+		},
+		"header value": func(value string) lists {
+			cfg := discover.SecretMap{"X-Db": discover.NewSecret(value)}
+			secrets := headerSecretValues(cfg)
+			return lists{secrets, headerCredentials(cfg), headerShortSecrets(cfg)}
+		},
+	}
+	tests := []struct {
+		name        string
+		value       string
+		wantSecrets []string // in the order of Result.Secrets
+		wantCreds   []string // in the order of Result.Secrets
+		wantShort   []string // sorted, each value one time
+	}{
+		{
+			name:        "long password",
+			value:       credDSNPort,
+			wantSecrets: []string{credDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+			wantCreds:   []string{credDSNPort, "app:S3cretPassw0rd", "S3cretPassw0rd"},
+		},
+		{
+			name:        "short password",
+			value:       credDSNShortPW,
+			wantSecrets: []string{credDSNShortPW},
+			wantCreds:   []string{credDSNShortPW},
+			wantShort:   []string{"app:pw", "pw"},
+		},
+		// Must not match: a media type has no credential in it.
+		{
+			name:        "media type",
+			value:       "application/json",
+			wantSecrets: []string{"application/json"},
+		},
+	}
+	for _, tt := range tests {
+		for name, source := range sources {
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				got := source(tt.value)
+				// The same filters as Inspect and Remote.
+				r := Result{Secrets: resultSecrets(got.secrets)}
+				r.Credentials = resultCredentials(r.Secrets, got.creds)
+
+				checkSecrets(t, r.Secrets, tt.wantSecrets)
+				checkCredentials(t, r, tt.wantCreds)
+				// slices.Sorted reads the values from the iterator that
+				// slices.Values gives and returns them in a new sorted slice.
+				if short := slices.Compact(slices.Sorted(slices.Values(got.short))); !slices.Equal(short, tt.wantShort) {
+					t.Errorf("short list = %q, want %q", short, tt.wantShort)
+				}
+			})
+		}
+	}
+}
+
+// TestArgCredentials checks argCredentials: the pieces of the command line
+// that discover.ArgCredentials finds, of 8 bytes or more. The command is part
+// of the line.
+func TestArgCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    []string // nil means a nil result
+	}{
+		{name: "no args", command: "server", want: nil},
+		{name: "plain args", command: "npx", args: []string{"-y", "@modelcontextprotocol/server-filesystem", "/home/me/proj", "--port", "8080"}, want: nil},
+		{name: "secret flag, plain value", command: "server", args: []string{"--api-key", "plainvalue1"}, want: []string{"plainvalue1"}},
+		{name: "token after equals", command: "server", args: []string{"--token=" + credTok}, want: []string{credTok}},
+		{
+			name:    "connection string with no password",
+			command: "server",
+			args:    []string{"--dsn", "host=localhost dbname=production"},
+			want:    nil,
+		},
+		{name: "URL with a password", command: "server", args: []string{credDSN}, want: []string{"app:hunter2pw", "hunter2pw"}},
+		{
+			name:    "header line",
+			command: "curl",
+			args:    []string{"-H", "Authorization: Bearer " + credTok},
+			want:    []string{"Authorization: Bearer " + credTok, "Bearer " + credTok, credTok},
+		},
+		{
+			// "SEVEN77" has 7 bytes, under discover.MinSecretBytes.
+			name:    "short value dropped",
+			command: "server",
+			args:    []string{"--token", "SEVEN77", "--api-key=EIGHT888"},
+			want:    []string{"EIGHT888"},
+		},
+		{name: "token segment in the command", command: "/opt/ghp_FAKEcmd0123456/server", want: []string{"ghp_FAKEcmd0123456"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := discover.Server{Command: tt.command, Args: discover.NewArgs(tt.args)}
+			got := argCredentials(s)
+			if !slices.Equal(got, tt.want) || (tt.want == nil && got != nil) {
+				t.Errorf("argCredentials() = %q, want %q", got, tt.want)
+			}
+			// Each credential is also an argv secret, so resultCredentials
+			// can find it in Result.Secrets.
+			long, _ := argSecrets(s)
+			for _, c := range got {
+				if !slices.Contains(long, c) {
+					t.Errorf("argCredentials() value %q is not in argSecrets() %q", c, long)
+				}
+			}
+		})
+	}
+}
+
+// TestLookupRecorderCredentials checks the credentials that lookupRecorder
+// keeps for the values of expanded variables: a value is a credential when
+// one of the names it was looked up under is secret-like, whatever the order
+// of the lookups, or when it looks like a credential.
+func TestLookupRecorderCredentials(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{
+		"REGION":   "production",
+		"API_KEY":  "production",
+		"PLAIN":    credTok,
+		"SHORT":    "SEVEN77",
+		"PASSWORD": "SEVEN77",
+		"OTHER":    "plain-value",
+		"EMPTY":    "",
+	}
+	tests := []struct {
+		name    string
+		lookups []string
+		want    []string // nil means no credential
+	}{
+		{name: "plain name, plain value", lookups: []string{"REGION"}, want: nil},
+		{name: "secret-like name", lookups: []string{"API_KEY"}, want: []string{"production"}},
+		{name: "token-like value", lookups: []string{"PLAIN"}, want: []string{credTok}},
+		{name: "plain name first, then secret-like", lookups: []string{"REGION", "API_KEY"}, want: []string{"production"}},
+		{name: "secret-like name first, then plain", lookups: []string{"API_KEY", "REGION"}, want: []string{"production"}},
+		{name: "repeated lookups once", lookups: []string{"API_KEY", "API_KEY", "REGION", "PLAIN", "PLAIN"}, want: []string{"production", credTok}},
+		{name: "plain name twice", lookups: []string{"REGION", "REGION", "OTHER"}, want: nil},
+		{
+			// A value under discover.MinSecretBytes never goes to Secrets,
+			// so it is no credential, also under a secret-like name.
+			name:    "short value",
+			lookups: []string{"SHORT", "PASSWORD"},
+			want:    nil,
+		},
+		{name: "missing and empty", lookups: []string{"MISSING", "EMPTY"}, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &lookupRecorder{lookup: func(name string) (string, bool) {
+				v, ok := env[name]
+				return v, ok
+			}}
+			for _, name := range tt.lookups {
+				rec.Lookup(name)
+			}
+			if !slices.Equal(rec.credentials, tt.want) {
+				t.Errorf("credentials = %q, want %q", rec.credentials, tt.want)
+			}
+			// Each credential is also a long value, so resultCredentials can
+			// find it in Result.Secrets.
+			for _, c := range rec.credentials {
+				if !slices.Contains(rec.long, c) {
+					t.Errorf("credential %q is not in values %q", c, rec.long)
+				}
 			}
 		})
 	}

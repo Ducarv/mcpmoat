@@ -372,7 +372,8 @@
 // no number before it, "2 " + U+03BC + "ser" and "5" + U+03BC + "pdate" are
 // flagged. Math notation is also flagged: U+0394 (capital Delta) + "t" gives
 // a known false positive. To accept such a word, ignore the rule
-// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
+// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore, and run
+// scan with --use-ignore-file so that the entry applies.
 //
 // The mixed_script heuristic does not flag:
 //
@@ -475,7 +476,8 @@
 // Rules MOAT-T1-010 and MOAT-T1-011 have severity medium, so with the
 // default --fail-on high they do not change the exit code. To accept such a
 // word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for that one tool in
-// .mcpmoat-ignore.
+// .mcpmoat-ignore, and run scan with --use-ignore-file so that the entry
+// applies.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -568,6 +570,21 @@
 // a comment. See [ParseIgnore] for the full format.
 //
 // The file is untrusted, because a cloned repository can ship one. So
-// [ParseIgnore] never fails: it skips a malformed line with a warning, caps
-// what it keeps, and its warnings never show content of the file.
+// mcpmoat scan reads it only with the flag --use-ignore-file. Without the
+// flag, scan does not read it. And [ParseIgnore] never fails: it skips a
+// malformed line with a warning, caps what it keeps, and its warnings never
+// show content of the file.
+//
+// The file cannot drop these findings, even with --use-ignore-file:
+//
+//   - the pin rules, every ID that starts with "MOAT-T2-" (MOAT-T2-001 to
+//     MOAT-T2-004);
+//   - the LLM rules, MOAT-LLM-001 and MOAT-LLM-002;
+//   - [RuleAnalysisBudget] (MOAT-T1-023), the rule analysis budget finding;
+//   - [RuleToolFindingCap] (MOAT-T1-024), the tool findings cap finding;
+//   - [RuleConfigFindingCap] (MOAT-T4-005), the config findings cap finding.
+//
+// Only --ignore on the command line drops them. With --use-ignore-file, the
+// file can drop the other rules, such as the description and schema rules
+// (T1 and T3).
 package rules

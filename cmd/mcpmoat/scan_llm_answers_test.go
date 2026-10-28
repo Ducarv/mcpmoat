@@ -30,15 +30,15 @@ type llmReply struct {
 
 // llmByTool returns an answer function for llmFake that gives each tool the
 // reply in replies, by tool name. A tool that replies does not name gets
-// risk none.
-func llmByTool(replies map[string]llmReply) func(llm.Input) (llm.Verdict, error) {
-	return func(in llm.Input) (llm.Verdict, error) {
+// risk none. A call whose context has ended gets a stop error.
+func llmByTool(replies map[string]llmReply) llmAnswerFunc {
+	return llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
 		r, ok := replies[in.ToolName]
 		if !ok {
 			return llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}, nil
 		}
 		return r.v, r.err
-	}
+	})
 }
 
 // TestScanLLMErrorSorting checks how scan sorts the errors of the classifier
@@ -460,10 +460,13 @@ func TestScanLLMNoToolName(t *testing.T) {
 		t.Run("ignore/"+tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := llmEnv(t, tools)
+			args := append([]string{"--llm", "--json"}, tt.args...)
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ignoreFile)
+				// scan reads the file only with --use-ignore-file.
+				args = append(args, useIgnoreFileFlag)
 			}
-			r := llmScan(t, e, tools, &llmFake{}, append([]string{"--llm", "--json"}, tt.args...)...)
+			r := llmScan(t, e, tools, &llmFake{}, args...)
 
 			if r.code != exitFindings {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
@@ -502,14 +505,14 @@ func TestScanLLMInterruptedAfterLastAnswer(t *testing.T) {
 			defer cancel()
 			var answered atomic.Int32
 			fake := &llmFake{}
-			fake.answer = func(in llm.Input) (llm.Verdict, error) {
-				// The fake checks the context before it calls answer, so
-				// this call returns its verdict after the cancel.
+			fake.answer = llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
+				// llmUnlessStopped checks the context before this function,
+				// so this call returns its verdict after the cancel.
 				if answered.Add(1) == nTools {
 					cancel()
 				}
 				return llmAnswerFor(in)
-			}
+			})
 			f := &llmFactory{t: t, cl: fake}
 			c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
 			c.ctx = ctx
@@ -797,15 +800,6 @@ func TestLLMRowUnrated(t *testing.T) {
 	}
 }
 
-// verdictClassifier is a toolClassifier that returns its own verdict, with no
-// error, for every tool.
-type verdictClassifier llm.Verdict
-
-// Classify implements toolClassifier.
-func (v verdictClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error) {
-	return llm.Verdict(v), nil
-}
-
 // TestClassifyToolsInvalidVerdict checks that a verdict with a risk or a
 // category that is not valid fails closed, like an answer that cannot be
 // used: a MOAT-LLM-002 row, or the MOAT-LLM-001 floor row for a cut tool
@@ -842,7 +836,8 @@ func TestClassifyToolsInvalidVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			res, err := classifyTools(t.Context(), outcomes, verdictClassifier(tt.verdict), &scanIgnores{})
+			cl := &llmFake{answer: func(context.Context, llm.Input) (llm.Verdict, error) { return tt.verdict, nil }}
+			res, err := classifyTools(t.Context(), outcomes, cl, &scanIgnores{})
 			if err != nil {
 				t.Fatalf("classifyTools() error = %v", err)
 			}

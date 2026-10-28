@@ -157,9 +157,14 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
 - A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
   that the model rates `none` or `low`, or whose answer is unusable.
 - A config that chooses which text is removed: the same rule gives a `medium` finding for a tool
-  from whose text mcpmoat removed a configured value (the redacted-text rule of FR-17).
+  from whose text mcpmoat removed a credential from the config (the redacted-text rule of FR-17).
+  Only values that look like a credential are removed, so a phrase that a config puts under a key
+  that does not look secret stays in the text, and the model reads it.
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
-- A hostile config that hides the LLM findings or the rule time budget finding: only `--ignore` hides them, not `.mcpmoat-ignore`.
+- A hostile ignore file that hides findings: `scan` reads `.mcpmoat-ignore` only with
+  `--use-ignore-file`, and even then the file cannot hide the LLM findings, the rule time budget
+  finding (`MOAT-T1-023`) or the cap findings (`MOAT-T1-024`, `MOAT-T4-005`). Only `--ignore`
+  hides them (FR-10).
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
   environment or a placeholder, and docs/llm.md advises a key made for `--llm` with a low spend
   limit.
@@ -445,20 +450,42 @@ references:
 - Every threat T1 to T5 has at least one rule or native check.
 - Every rule has at least one `should_match` and one `should_not_match` test case (see NFR-05).
 
-**FR-10: Ignore findings.** Ignore a specific finding via `.mcpmoat-ignore` or `--ignore <id>`.
+**FR-10: Ignore findings.** Ignore a specific finding via `--ignore <id>` or, with the opt-in flag
+`--use-ignore-file`, via `.mcpmoat-ignore`.
 
-- `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat.
-- `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
-  entries scoped to a rule ID, optionally limited to a server and tool.
+- `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat. It works with or
+  without `--use-ignore-file`.
+- `scan` reads `.mcpmoat-ignore` from the working directory only with `--use-ignore-file`, which is
+  off by default. Without the flag, `scan` never opens the file. When the file exists, `scan`
+  prints one note on stderr:
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; it can hide findings. Add --use-ignore-file only if you trust it`.
+  There is no `--no-ignore-file` flag: the default is already fail-closed, so CI needs no extra
+  flag.
+- Why the file is opt-in: the working directory can be a cloned, untrusted repository or a pull
+  request checkout. When `scan` always read the file, a hostile file could turn exit code 1 into 0
+  (#138, for example a plaintext token in `.mcp.json` plus an entry with its rule ID), hide a
+  poisoned tool (#208) and hide config findings in CI (#172). A user who opts in uses only a file
+  that they trust. In CI, the file is guarded, for example with `CODEOWNERS`.
+- The file supports one entry per line, comments with `#`, and entries scoped to a rule ID,
+  optionally limited to a server and tool.
 - Ignored findings do not affect the exit code and are counted as "ignored" in the summary. With
-  `--json` the count is in the `ignored` object (FR-15).
-- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`), the LLM rules
-  (`MOAT-LLM-001` and `MOAT-LLM-002`), the budget rule (`MOAT-T1-023`) or the cap rule
-  (`MOAT-T1-024`). The file can come from a cloned repository, and it must not silence the rug-pull
-  alarm, the LLM classifier (FR-17), the sign that a server used up its rule time budget or the sign
-  that tool findings were left out for every server of the user. Only `--ignore` on the command line
-  ignores these rules. `scan` keeps the finding and prints a warning when a file entry for such a
-  rule matches a finding.
+  `--json` the count is in the `ignored` object (FR-15). Without `--use-ignore-file`,
+  `ignored.file_entries` is 0.
+- With `--use-ignore-file`, the file can drop the config rule findings and the T1 and T3
+  description and schema rule findings (#208 decision). Five built-in remediations (`MOAT-T1-004`,
+  `MOAT-T1-007`, `MOAT-T1-010`, `MOAT-T1-011` and `MOAT-T1-012`) advise a scoped
+  `RULE server/tool` entry, which `--ignore` cannot express.
+- Also with `--use-ignore-file`, the file cannot ignore the pin rules (`MOAT-T2-001` to
+  `MOAT-T2-004`), the LLM rules (`MOAT-LLM-001` and `MOAT-LLM-002`), `MOAT-T1-023` (the finding
+  that the rule analysis stopped early), `MOAT-T1-024` (the finding that tool findings were left
+  out) or `MOAT-T4-005` (the finding that config findings were left out). The file can come from a
+  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17), the
+  sign that the rule analysis of a server stopped early or the sign that findings were left out.
+  Only `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a
+  warning when a file entry for such a rule matches a finding.
+- So a hostile file cannot silence a poisoned tool without a visible signal. Without the flag, the
+  file drops nothing. With the flag, `--json` shows `ignored.rules` and `ignored.file_entries`, and
+  stderr shows the `using N entries from .mcpmoat-ignore` and `N findings ignored` lines.
 
 ### 6.4 Pins (rug-pull detection)
 
@@ -487,13 +514,12 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   others. On macOS, their ACL must not give a write right to any user or group. `pins.json` must
   not be a symlink. mcpmoat checks the directory and the file that it reads, not only their paths.
   Each parent directory of the pins directory must belong to the user or to root, and must not be
-  writable by group or others unless the sticky bit is set. A symlink on the path to the pins
-  directory must belong to the user or to root, also a symlink that is reached only through the
-  target of another symlink. A pins path where no part exists is an error, not a first run.
-  Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
-  [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so on
-  macOS an allow entry for another user on `~/.config` or `~` is not detected (see
-  [docs/limits.md](limits.md)).
+  writable by group or others unless the sticky bit is set. On macOS, its ACL must not have an
+  allow entry with a write right for any user or group (a deny entry passes). A symlink on the path
+  to the pins directory must belong to the user or to root, also a symlink that is reached only
+  through the target of another symlink. A pins path where no part exists is an error, not a first
+  run. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
+  [docs/pins.md](pins.md).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).
@@ -553,7 +579,9 @@ text diff.
   pinned. It is a `high` `MOAT-T2-004` with a reason that says that the pins file is full, and the
   other servers are still pinned. If the server no longer fits at save time (another run made the
   file larger after the report), `scan` prints a warning on stderr, saves the other servers and
-  exits with code 2.
+  exits with code 2. The project-scope servers (from a project config) share at most 16 MiB of the
+  file, so the user-scope servers always keep the other half. A project-scope server past that
+  share gets the same treatment, with a reason that says that the project share is full.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
   (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
@@ -564,7 +592,9 @@ text diff.
   another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold
   yet, and prints `pinned N tools for <server>` only for those, after the save. `pin --accept`
   changes only the entry of its server. For that read and the save, they hold an advisory lock on
-  the pins directory, so two parallel runs keep each other's changes. A run waits up to 10 seconds
+  the file `pins.json.lock` in the pins directory, so two parallel runs keep each other's changes.
+  mcpmoat creates the lock file with mode 0600 and refuses a lock file that another user owns or
+  can open, so another user cannot hold the lock. A run waits up to 10 seconds
   for the lock, then exits with code 2. A file system that cannot lock runs without the lock, after
   one warning on stderr. When a save creates a new `pins.json`, `scan` and `pin --accept` print one
   notice on stderr, because a removed file makes every server look new (see
@@ -602,13 +632,20 @@ text diff.
   every shell, also `cmd.exe` and PowerShell, reads as plain text. Else the line says what to run
   and gives the digest, with no command. The line has no command either when the user did not see
   every change (a cut diff, a change that `--ignore` hid, or a diff that is only a note), when the
-  name cannot select the server, or when a config file has a problem. The line ends with
+  name cannot select the server, when a config file has a problem, or when `pins.json` or its
+  project share has no room for the new tools (then `pin --accept` would fail). The line ends with
   ` (the diff was cut: review the full tool first)`, ` (--ignore hid some changes: run scan without
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
-  change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
-  could not be inspected, an ignored finding, or tools that cannot be pinned.
+  change that the user did not see: the digest covers those changes too. A line for a server whose
+  new tools do not fit then ends with ` (pins.json has no room for these tools: pin --accept fails
+  until you remove servers you no longer use from pins.json)`. When only the project share has no
+  room, it ends with ` (the project share of pins.json has no room for these tools: pin --accept
+  fails until you remove project servers you no longer use from pins.json)`. There is no line for
+  a server pinned for the first time, a server that could not be inspected, an ignored finding, or
+  tools that cannot be pinned.
 - `scan` shows the inspection warnings in the summary of the server on stdout (on stderr with
-  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names
+  only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
   `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the
@@ -624,6 +661,16 @@ with `--no-color`).
 - Findings are grouped and ordered by severity (critical first).
 - `--no-color` and the `NO_COLOR` environment variable disable ANSI codes; output to a non-terminal
   has no colour.
+- A server gets the configured env values, header values and args, and it can echo one of them,
+  or a credential piece inside one, in its tool text. The report (terminal and `--json`, `scan`
+  and `pin`) shows each such value or piece of 8 bytes or more as `********` in every tool name and
+  pin diff that it prints, before any cut. `.mcpmoat-ignore` and `--ignore` still match the real
+  tool name, and the hashes and `pins.json` keep the raw text. [Scan output](scan-output.md) holds
+  the rule and [Limits](limits.md) the limits.
+- When a server fails, mcpmoat removes the same values from the failure text. A value shorter than
+  8 bytes goes only where it stands as a whole word. The accepted trade-off: a common word that is
+  also a short configured value is masked too, and a hostile server can still glue a letter to a
+  short value. [Placeholders](stdio-servers.md#placeholders) holds the rule.
 
 **FR-15: `--json`.** Output with a stable, versioned schema.
 
@@ -633,7 +680,8 @@ with `--no-color`).
 - Field names do not change without a schema version bump.
 - The output holds the count of findings that an ignore entry dropped: `ignored` has `total`, the
   count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries read
-  (`file_entries`). It holds rule IDs only, never text of the ignore file.
+  (`file_entries`, 0 without `--use-ignore-file`). It holds rule IDs only, never text of the
+  ignore file.
 - The output holds the data to accept the changes of a pinned server: `accept` has the digest of the
   terminal hint (FR-13) and, only when the hint prints a command, that command.
 - The size of the text fields and of the tool findings is bounded. Names are cut to 512 characters
@@ -642,10 +690,23 @@ with `--no-color`).
   `MOAT-T1-024`: the 1000 most severe are listed, and the rest is counted, not listed. Its severity is the highest severity among the
   applied rules and never lower than high. The scan stays complete, and the exit code follows
   `--fail-on`.
-- The whole document is not bounded. The config findings, the pin findings and the LLM findings are
-  not part of the cap of 1000, and the number of servers multiplies the bound. The number of config
-  findings is limited only by the size of the config file.
-  A cap for them is planned as a follow-up (issue #213).
+- The config findings (`MOAT-T4-*` and `MOAT-T5-*`) are capped at 100 for each server and 10,000
+  for the whole scan, counted after the ignore list (#213). Each cut keeps the most severe
+  findings: severity first, then servers from a user file before servers from a project file, then
+  server order, then finding order, and an unknown severity counts as critical. A server that lost findings gets one summary finding, `MOAT-T4-005`
+  (`N more config findings are not listed; limit M`). It is high, or higher when a finding that it
+  left out is higher. It does not count toward the caps, so a scan has at most 10,000 config
+  findings plus one `MOAT-T4-005` finding for each cut server. Only `--ignore` drops it (FR-10).
+  The scan stays complete, and the exit code follows `--fail-on`. The caps bound the rows and the
+  output, not the memory that `scan` uses before the cut.
+- The pin findings and the LLM findings are not part of these caps. The number of tools (at most
+  10,000 for each server) and the LLM tool cap bound them, and the number of servers multiplies
+  that bound.
+- `complete` stays `true` when the rule analysis stops at its time limit (#210, owner decision).
+  The `MOAT-T1-023` finding of each server that was cut or not analysed marks the incomplete rule
+  analysis. `complete` `false` would force exit 2, so hostile input could turn a finding into an
+  execution error, against the meaning of FR-16. There is no schema change and no new field. A CI
+  consumer checks the findings for `MOAT-T1-023`, not only `complete`.
 
 **FR-16: Exit codes.** 0 no findings, 1 findings at or above `--fail-on` (default `high`),
 2 execution error.
@@ -682,19 +743,19 @@ the machine**.
   also with `--json`.
 - What is sent: for each tool of each server that was inspected, only the tool name and the tool
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
-  message with a fixed system prompt. Secret values are removed from the name and the description
-  first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs, schemas or
-  pins into a request. A cap on the number of tools per scan (500), shared fairly between the
-  servers: a server with few tools keeps all of them, and the part that it does not use goes to the
-  larger servers. Tools over the share of their server are not sent and give exit code 2. Before
+  message with a fixed system prompt. Credentials from the config are removed from the name and the
+  description first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs,
+  schemas or pins into a request. A cap on the number of tools per scan (500), shared fairly between
+  the servers: a server with few tools keeps all of them, and the part that it does not use goes to
+  the larger servers. Tools over the share of their server are not sent and give exit code 2. Before
   the first request, stderr says how many tools are sent and about how much text (numbers only),
-  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does
-  not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
+  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does not stop a
+  tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
   rule.
-- A tool from whose name or description mcpmoat removed a configured value (see the next item) gets
+- A tool from whose name or description mcpmoat removed a credential (see the next item) gets
   the same floor: never below `medium`, and an unusable model answer or a refusal of the provider
   does not hide it. The finding is `MOAT-LLM-001`, with category `other` and a fixed risk text.
   A model rating of `medium` or `high` is kept. A text that was also cut keeps the cut-text
@@ -702,43 +763,31 @@ the machine**.
   text it removes, so a part of a malicious description would never reach the model. The rule
   engine still reads the full text, and a `medium` finding is below the default `--fail-on high`.
   The [LLM page](llm.md) holds the full rule.
-- Secret values are removed before the cut. A server that got a token through its env, headers or
-  args can put that token into a tool name or description. So mcpmoat replaces each secret value
-  that it gave to that server with `********` in the name and the description of the tools of that
-  server, before it cuts them. The values are the configured env values, the header values, the
-  credential parts of a header, the URL user info and the secret URL parts, the expanded
-  placeholder values and, for a stdio server, the parts of the expanded command and args that the
-  report masks. The user message then has the field `redacted: true`, and the system prompt tells
-  the model that `********` is removed text and not an instruction. The limits:
-  - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
-  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed.
-  - A header value that is not secret but has 8 bytes or more (for example `application/json`) is
-    replaced too, and so is arg text that the report masks but that is not secret (for example a
-    UUID or a random-looking path segment). Some secrets in args are not found (for example
-    `--db mypassword`), so they are not removed.
-  - A server can write `********` itself.
-  - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
-    secret that a server puts in a tool name can show on stdout. Only the LLM rows show the name
-    as the request had it, with each removed value as `********` (`Input.RedactedName`). Issue
-    #228 tracks the other rows.
-
-  docs/llm.md holds the user text of this rule.
+- Credentials are removed before the cut. A server that got a token through its env, headers or
+  args can put that token into a tool name or description. So mcpmoat replaces each configured
+  value of that server that looks like a credential, and each credential piece inside it
+  (`inspect.Result.Credentials`), with `********` in the name and the description of the tools of
+  that server, before it cuts them. The user message then has `redacted: true`, and the system
+  prompt tells the model that `********` is removed text and not an instruction. The accepted
+  trade-off: a plain config value (`NODE_ENV=production`) that a server echoes reaches the
+  provider, so a plain config word no longer hides a part of a benign description. The
+  [LLM page](llm.md) holds the rule, and [Limits](limits.md) the limits.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
   `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal of the model, or a tool
   that the provider refused (HTTP 400, 413 or 422), with a fixed text for each case. Only these
-  cases, for a tool that was not cut and had no value removed, give `MOAT-LLM-002`.
+  cases, for a tool that was not cut and had no credential removed, give `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (since schema version 2). They only add to the rule findings and never remove or
   change them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does
-  not (FR-10).
+  not, also with `--use-ignore-file` (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
 - An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
   content filter or a context limit). The tool is not classified and gets a `medium` finding:
   `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut or had a
-  value removed. The
+  credential removed. The
   other requests go on, and the scan can still be complete. That finding is below the default
   `--fail-on high`, so a hostile server that makes the provider refuse its own tool description
   can keep its LLM rating from reaching `high`, as with an unusable answer. The rule findings still
@@ -800,6 +849,10 @@ on macOS always link the system libraries dynamically.
 for servers to start. Analysis itself under 1 s.
 
 - Benchmark: rule analysis of 10 servers with 20 tools each runs in under 1 s.
+- A hostile server or `--rules` folder cannot stretch the rule analysis without limit: the step
+  has a 30 s limit for all servers (at most 5 s for each), plus one regex and one form build that
+  cannot stop at the deadline (#210). A server that it cuts or does not reach in time gets
+  `MOAT-T1-023`. A share under 1 ms counts as not reached, for that server and the ones after it.
 - Integration: scanning 10 fixture servers concurrently finishes in under 15 s.
 
 **NFR-04: Project's own security.** stdio servers run without inheriting extra secrets and with

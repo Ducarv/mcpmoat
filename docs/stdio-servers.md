@@ -148,9 +148,27 @@ Rules:
   most 1 MiB. Over a limit, mcpmoat does not start the server.
 - A Cursor workspace placeholder (`${workspaceFolder}` or `${workspaceFolderBasename}`) in a
   global Cursor server gives an error, because that server has no project.
-- The server list shows the config as written, not the expanded values. mcpmoat removes the
-  expanded values of 8 bytes or more from its error messages. A shorter value is not removed, so it
-  can show in an error message that the server sends back.
+- The server list shows the config as written, not the expanded values. When a server fails,
+  mcpmoat removes the values that the server got from the error text: the env values and the
+  secrets in the args of a stdio server, the header values and the secret parts of the URL of a
+  remote server (the user info, the query values, the secret path segments, and the value inside
+  a `key=value` segment or a matrix parameter), and the expanded values of both. It also removes
+  the credential pieces inside these values that the arg check finds, such as the password `pw`
+  of `postgres://app:pw@db/app`, and one cookie (each pair and value of a `Cookie` header, the
+  first pair of a `Set-Cookie` header). This covers the reason in the summary on stdout, the
+  error of `pin` and the stderr warning of `--json`. A value of 8 bytes or more, a header value and
+  a URL password are removed wherever they stand. Another value of 1 to 7 bytes, also a short
+  query value or path part of a remote URL, is removed only where it stands as a whole word: the
+  byte before it and the byte after it are not a letter, a digit or `_`, or are the edge of the
+  text. This also applies to the quoted form of the value, and an escape such as `\n` before the
+  value counts as an edge. The longest value wins, and a cut of the text never leaves a short
+  value at its end. Notes:
+  - A short expanded port, such as `${PORT}` with the value `8080`, is masked in a dial error. The
+    URL as discovered (with the placeholder) stays in the reason.
+  - mcpmoat discards the stderr of a stdio server, so its echo can come only in a JSON-RPC error
+    message or in invalid output on stdout.
+  - The whole-word rule masks some common words and stops an accidental echo only. See [What
+    mcpmoat does not do](limits.md) for these limits.
 
 ## npx and package installs
 

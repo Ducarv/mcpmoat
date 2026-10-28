@@ -22,16 +22,6 @@ func encodePayload(encode encodeFunc, name, desc string, truncated bool) ([]byte
 	return encodeToolPayload(encode, toolPayload{ToolName: name, ToolDescription: desc, Truncated: truncated})
 }
 
-// redactSecrets is the reference redaction for the tests: redactWindow over
-// all of s with no stop (a negative limit). redactPrefix must give a prefix of
-// its result.
-func redactSecrets(s string, values []string) (string, bool) {
-	if len(values) == 0 || s == "" {
-		return s, false
-	}
-	return redactWindow(s, values, len(s), -1)
-}
-
 // decodeMessage checks that msg is one JSON object with exactly the keys
 // tool_description, tool_name and truncated (no "redacted" key), and returns
 // it.
@@ -375,7 +365,7 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 
 	// The secret is in the text, so the full message is redacted. An error
 	// return must still report redacted false.
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100), Secrets: newSecrets(canary)}
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100), Credentials: newSecrets(canary)}
 	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +408,7 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 func TestBuildToolMessageTooLarge(t *testing.T) {
 	t.Parallel()
 
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000), Secrets: newSecrets(canary)}
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000), Credentials: newSecrets(canary)}
 	// The secret is removed, so the empty message has "redacted": true.
 	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
@@ -587,50 +577,50 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 	}{
 		{
 			name:     "in description",
-			in:       Input{ToolName: "read_file", Description: "Use the key " + secretCanary + " now.", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "read_file", Description: "Use the key " + secretCanary + " now.", Credentials: newSecrets(secretCanary)},
 			wantName: "read_file", wantDesc: "Use the key " + m + " now.", wantRedacted: true,
 		},
 		{
 			name:     "in name",
-			in:       Input{ToolName: "get_" + secretCanary, Description: "Reads a file.", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "get_" + secretCanary, Description: "Reads a file.", Credentials: newSecrets(secretCanary)},
 			wantName: "get_" + m, wantDesc: "Reads a file.", wantRedacted: true,
 		},
 		{
 			name:     "in name and description",
-			in:       Input{ToolName: secretCanary + "_tool", Description: "key=" + secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: secretCanary + "_tool", Description: "key=" + secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: m + "_tool", wantDesc: "key=" + m, wantRedacted: true,
 		},
 		{
 			// The mask comes first and the description is cut after it, so
 			// both flags are true.
 			name:     "redacted and truncated",
-			in:       Input{ToolName: "t", Description: secretCanary + " " + strings.Repeat("d", MaxDescriptionBytes), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary + " " + strings.Repeat("d", MaxDescriptionBytes), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m + " " + strings.Repeat("d", MaxDescriptionBytes-len(m)-1), wantRedacted: true, wantCut: true,
 		},
 		{
 			// A cut with no secret in the text is not a redaction.
 			name:     "truncated without a secret",
-			in:       Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: strings.Repeat("d", MaxDescriptionBytes), wantCut: true,
 		},
 		{
 			name:     "7 bytes is not removed",
-			in:       Input{ToolName: "t", Description: "x abcdefg y", Secrets: newSecrets("abcdefg")},
+			in:       Input{ToolName: "t", Description: "x abcdefg y", Credentials: newSecrets("abcdefg")},
 			wantName: "t", wantDesc: "x abcdefg y",
 		},
 		{
 			name:     "8 bytes is removed",
-			in:       Input{ToolName: "t", Description: "x abcdefgh y", Secrets: newSecrets("abcdefgh")},
+			in:       Input{ToolName: "t", Description: "x abcdefgh y", Credentials: newSecrets("abcdefgh")},
 			wantName: "t", wantDesc: "x " + m + " y", wantRedacted: true,
 		},
 		{
 			name:     "empty and zero secrets",
-			in:       Input{ToolName: "t", Description: "plain text", Secrets: []discover.Secret{discover.NewSecret(""), {}}},
+			in:       Input{ToolName: "t", Description: "plain text", Credentials: []discover.Secret{discover.NewSecret(""), {}}},
 			wantName: "t", wantDesc: "plain text",
 		},
 		{
 			name:     "secret not in the text",
-			in:       Input{ToolName: "t", Description: "plain text", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: "plain text", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: "plain text",
 		},
 		{
@@ -638,71 +628,71 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			// and "yy" of the longer one. The test also runs with the
 			// secrets in the other order.
 			name:     "secret inside another secret",
-			in:       Input{ToolName: "t", Description: "a xxCANARY12yy b CANARY12 c", Secrets: newSecrets("CANARY12", "xxCANARY12yy")},
+			in:       Input{ToolName: "t", Description: "a xxCANARY12yy b CANARY12 c", Credentials: newSecrets("CANARY12", "xxCANARY12yy")},
 			wantName: "t", wantDesc: "a " + m + " b " + m + " c", wantRedacted: true,
 		},
 		{
 			// A leftmost replacer removes "abcdefgh" and leaves the 9 bytes
 			// "XXXXXXXXX" of the second secret.
 			name:     "overlapping secrets",
-			in:       Input{ToolName: "t", Description: "abcdefghXXXXXXXXX", Secrets: newSecrets("abcdefgh", "hXXXXXXXXX")},
+			in:       Input{ToolName: "t", Description: "abcdefghXXXXXXXXX", Credentials: newSecrets("abcdefgh", "hXXXXXXXXX")},
 			wantName: "t", wantDesc: m, wantRedacted: true,
 		},
 		{
 			name:     "overlapping secrets inside text",
-			in:       Input{ToolName: "t", Description: "<abcdefghXXXXXXXXX>", Secrets: newSecrets("abcdefgh", "hXXXXXXXXX")},
+			in:       Input{ToolName: "t", Description: "<abcdefghXXXXXXXXX>", Credentials: newSecrets("abcdefgh", "hXXXXXXXXX")},
 			wantName: "t", wantDesc: "<" + m + ">", wantRedacted: true,
 		},
 		{
 			// A search that skips past a match leaves the last "ab".
 			name:     "overlapping occurrences of one secret",
-			in:       Input{ToolName: "t", Description: "xababababab y", Secrets: newSecrets("abababab")},
+			in:       Input{ToolName: "t", Description: "xababababab y", Credentials: newSecrets("abababab")},
 			wantName: "t", wantDesc: "x" + m + " y", wantRedacted: true,
 		},
 		{
 			name:     "secret is the whole description",
-			in:       Input{ToolName: "t", Description: secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m, wantRedacted: true,
 		},
 		{
 			name:     "same secret many times",
-			in:       Input{ToolName: "t", Description: secretCanary + " and " + secretCanary + ", " + secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary + " and " + secretCanary + ", " + secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m + " and " + m + ", " + m, wantRedacted: true,
 		},
 		{
 			// Each run of removed bytes becomes one mask.
 			name:     "same secret twice in a row",
-			in:       Input{ToolName: "t", Description: "<" + secretCanary + secretCanary + ">", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: "<" + secretCanary + secretCanary + ">", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: "<" + m + ">", wantRedacted: true,
 		},
 		{
 			name:     "JSON special and non-ASCII characters",
-			in:       Input{ToolName: "t" + jsonSpecial, Description: "a " + jsonSpecial + " b", Secrets: newSecrets(jsonSpecial)},
+			in:       Input{ToolName: "t" + jsonSpecial, Description: "a " + jsonSpecial + " b", Credentials: newSecrets(jsonSpecial)},
 			wantName: "t" + m, wantDesc: "a " + m + " b", wantRedacted: true,
 		},
 		{
 			name:     "invalid UTF-8 outside the secret",
-			in:       Input{ToolName: "\xfe", Description: "\xff" + secretCanary + "\xc3", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "\xfe", Description: "\xff" + secretCanary + "\xc3", Credentials: newSecrets(secretCanary)},
 			wantName: "�", wantDesc: "�" + m + "�", wantRedacted: true,
 		},
 		{
 			name:     "invalid UTF-8 inside the secret",
-			in:       Input{ToolName: "t", Description: "a\xffCANARY\xfe\xfdb", Secrets: newSecrets("\xffCANARY\xfe\xfd")},
+			in:       Input{ToolName: "t", Description: "a\xffCANARY\xfe\xfdb", Credentials: newSecrets("\xffCANARY\xfe\xfd")},
 			wantName: "t", wantDesc: "a" + m + "b", wantRedacted: true,
 		},
 		{
 			name:     "description cut through the secret",
-			in:       Input{ToolName: "t", Description: cutDesc + secretCanary + " tail", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: cutDesc + secretCanary + " tail", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: cutDesc + m[:5], wantRedacted: true, wantCut: true,
 		},
 		{
 			name:     "name cut through the secret",
-			in:       Input{ToolName: cutName + secretCanary, Description: "d", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: cutName + secretCanary, Description: "d", Credentials: newSecrets(secretCanary)},
 			wantName: cutName + m[:3], wantDesc: "d", wantRedacted: true, wantCut: true,
 		},
 		{
 			name:     "escapes cut through the secret",
-			in:       Input{ToolName: "t", Description: quotes + secretCanary + strings.Repeat(`"`, 5000), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: quotes + secretCanary + strings.Repeat(`"`, 5000), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: quotes + m[:room], wantRedacted: true, wantCut: true,
 		},
 	}
@@ -735,12 +725,12 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			if len(msg) > MaxToolMessageBytes {
 				t.Errorf("len(toolMessage()) = %d, want <= %d", len(msg), MaxToolMessageBytes)
 			}
-			checkNoSecret(t, msg, p, tt.in.Secrets)
+			checkNoSecret(t, msg, p, tt.in.Credentials)
 
 			// The order of the secrets does not change the message.
 			rev := tt.in
-			rev.Secrets = slices.Clone(tt.in.Secrets)
-			slices.Reverse(rev.Secrets)
+			rev.Credentials = slices.Clone(tt.in.Credentials)
+			slices.Reverse(rev.Credentials)
 			rMsg, rTruncated, _, rErr := toolMessage(rev)
 			if rErr != nil || rMsg != msg || rTruncated != truncated {
 				t.Errorf("toolMessage() with the secrets reversed = (%d bytes, %v, %v), want (%d bytes, %v, nil)", len(rMsg), rTruncated, rErr, len(msg), truncated)
@@ -749,7 +739,7 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 	}
 }
 
-// TestToolMessageSecretsNotEncoded checks that Input.Secrets never reaches the
+// TestToolMessageSecretsNotEncoded checks that Input.Credentials never reaches the
 // message. toolPayload has only the four known keys, and secrets that are not
 // in the text leave the message byte for byte the same as no secrets.
 func TestToolMessageSecretsNotEncoded(t *testing.T) {
@@ -799,7 +789,7 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 			}
 			for name, secrets := range secretLists {
 				in := tt.in
-				in.Secrets = secrets
+				in.Credentials = secrets
 				msg, cut, _, err := toolMessage(in)
 				if err != nil || msg != base || cut != baseCut {
 					t.Errorf("%s: toolMessage() = (%d bytes, %v, %v), want the message without secrets (%d bytes, %v, nil)", name, len(msg), cut, err, len(base), baseCut)
@@ -813,60 +803,19 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 	}
 }
 
-// redactOracle is a slow, plain form of redactSecrets for the tests. It tries
-// each value at each start position, marks the bytes of each occurrence, and
-// writes one Mask for each run of marked bytes.
-func redactOracle(s string, values []string) (string, bool) {
-	out, starts := redactOracleStarts(s, values)
-	return out, len(starts) > 0
-}
-
-// redactOracleStarts is redactOracle that also returns the byte offset in the
-// result of each Mask that it wrote. A Mask in the text or a value with "*"
-// makes a search for Mask in the result give other offsets, so the tests use
-// these.
-func redactOracleStarts(s string, values []string) (string, []int) {
-	marked := make([]bool, len(s))
-	for i := range len(s) {
-		for _, v := range values {
-			if v != "" && strings.HasPrefix(s[i:], v) {
-				for j := i; j < i+len(v); j++ {
-					marked[j] = true
-				}
-			}
-		}
-	}
-	var b strings.Builder
-	var starts []int
-	for i := range len(s) {
-		switch {
-		case !marked[i]:
-			b.WriteByte(s[i])
-		case i == 0 || !marked[i-1]:
-			starts = append(starts, b.Len())
-			b.WriteString(discover.Mask)
-		}
-	}
-	return b.String(), starts
-}
-
-// wantRedactedFlag is the redacted rule of redactPrefix: true when a Mask of
-// the whole result starts in its first limit+1 bytes.
-func wantRedactedFlag(starts []int, limit int) bool {
-	return slices.ContainsFunc(starts, func(at int) bool { return at <= limit })
-}
-
 // TestToolMessageRedactsRandomText builds random descriptions from a small
 // alphabet and the secrets themselves, so occurrences often overlap and touch.
-// The message must match redactOracle and never hold a secret. The seed is
-// fixed, so a failure repeats.
+// The message must match discover.TextRedactor.Text (which the discover tests
+// check against a plain oracle) and never hold a secret. The seed is fixed, so
+// a failure repeats.
 func TestToolMessageRedactsRandomText(t *testing.T) {
 	t.Parallel()
 
-	// The 7-byte value is too short to remove. The oracle gets only the
-	// values of 8 bytes or more (the contract), not secretValues.
+	// The 7-byte value is too short to remove. The reference redactor gets
+	// only the values of 8 bytes or more (the contract), so the 7-byte value
+	// is not part of it.
 	secrets := newSecrets("abcabcab", "cabbacab", "bcabcab")
-	values := []string{"abcabcab", "cabbacab"}
+	ref := discover.NewTextRedactor(newSecrets("abcabcab", "cabbacab"))
 	pieces := []string{"a", "b", "c", "*", `"`, "é", " ", "abcabcab", "cabbacab", "bcabcab"}
 
 	rng := rand.New(rand.NewPCG(185, 2026)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
@@ -880,12 +829,15 @@ func TestToolMessageRedactsRandomText(t *testing.T) {
 		shuffled := slices.Clone(secrets)
 		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 
-		msg, _, gotRedacted, err := toolMessage(Input{ToolName: "t", Description: desc, Secrets: shuffled})
+		msg, _, gotRedacted, err := toolMessage(Input{ToolName: "t", Description: desc, Credentials: shuffled})
 		if err != nil {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
 		p, hasRedacted := decodeRedactedMessage(t, msg)
-		want, wantRedacted := redactOracle(desc, values)
+		// The values hold no "*", so a Mask always changes the text: the
+		// reference text differs from desc exactly when a Mask was written.
+		want := ref.Text(desc)
+		wantRedacted := want != desc
 		if p.ToolDescription != want || hasRedacted != wantRedacted || gotRedacted != wantRedacted {
 			t.Fatalf("case %d: toolMessage(%q) = (%q, redacted %v, returned %v), want (%q, %v)", i, desc, p.ToolDescription, hasRedacted, gotRedacted, want, wantRedacted)
 		}
@@ -899,52 +851,6 @@ func TestToolMessageRedactsRandomText(t *testing.T) {
 	if redactions < 1000 {
 		t.Errorf("only %d of 3000 random descriptions hold a secret", redactions)
 	}
-}
-
-// FuzzRedactSecrets compares redactSecrets with redactOracle. The result also
-// never holds a value with no "*" byte: such a value cannot cross a Mask, and
-// every unmarked run is free of occurrences.
-func FuzzRedactSecrets(f *testing.F) {
-	f.Add("abcdefghXXXXXXXXX", "abcdefgh", "hXXXXXXXXX")
-	f.Add("a xxCANARY12yy b CANARY12", "CANARY12", "xxCANARY12yy")
-	f.Add("ababababab", "abababab", "")
-	f.Add("\xff"+secretCanary+"\xc3", secretCanary, "1234567")
-	f.Add("x abcdefg y", "abcdefg", "abcdefg")
-	f.Add("x abc\uFFFD\uFFFDdefgh y", "abc\xff\xfedefgh", "")
-	f.Add("\uFFFD\uFFFD\uFFFD", "\xff\xfe\xfd", "")
-	f.Fuzz(func(t *testing.T, s, v1, v2 string) {
-		// The contract: values of 8 bytes or more and, for such a value that
-		// is not valid UTF-8, its form after a JSON decode (one U+FFFD for
-		// each invalid byte). The minimum applies to the raw value only, so a
-		// value of 7 bytes or less gives no decoded form either.
-		var values []string
-		for _, v := range []string{v1, v2} {
-			if len(v) < 8 {
-				continue
-			}
-			values = append(values, v)
-			if utf8.ValidString(v) {
-				continue
-			}
-			var b strings.Builder
-			for i := 0; i < len(v); {
-				r, size := utf8.DecodeRuneInString(v[i:])
-				b.WriteRune(r) // RuneError, size 1, for each invalid byte
-				i += size
-			}
-			values = append(values, b.String())
-		}
-		got, ok := redactSecrets(s, secretValues(newSecrets(v1, v2)))
-		want, wantOK := redactOracle(s, values)
-		if got != want || ok != wantOK {
-			t.Fatalf("redactSecrets(%q, %q, %q) = (%q, %v), want (%q, %v)", s, v1, v2, got, ok, want, wantOK)
-		}
-		for _, v := range values {
-			if !strings.Contains(v, "*") && strings.Contains(got, v) {
-				t.Errorf("redactSecrets(%q) = %q holds %q", s, got, v)
-			}
-		}
-	})
 }
 
 func TestCutUTF8(t *testing.T) {
@@ -1041,220 +947,6 @@ func TestVerdictSchema(t *testing.T) {
 // valid UTF-8.
 const ffd = string(utf8.RuneError)
 
-// TestDecodedPerByte checks that decodedPerByte gives one U+FFFD for each
-// invalid byte, and the same text as encoding/json gives when it decodes the
-// bytes in a JSON string.
-func TestDecodedPerByte(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{in: "", want: ""},
-		{in: "abc", want: "abc"},
-		{in: "é€😀", want: "é€😀"},
-		{in: ffd, want: ffd},
-		{in: "\xff", want: ffd},
-		{in: "a\xff\xfeb", want: "a" + ffd + ffd + "b"},
-		{in: "\xff\xfe\xfd", want: ffd + ffd + ffd},
-		{in: "\xe2\x82", want: ffd + ffd},           // a 3-byte rune without its last byte
-		{in: "\xed\xa0\x80", want: ffd + ffd + ffd}, // a UTF-16 surrogate
-	}
-	for _, tt := range tests {
-		got := decodedPerByte(tt.in)
-		if got != tt.want {
-			t.Errorf("decodedPerByte(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-		var decoded string
-		if err := json.Unmarshal([]byte(`"`+tt.in+`"`), &decoded); err != nil || decoded != got {
-			t.Errorf("json.Unmarshal(%q) = %q, %v; want decodedPerByte() = %q", tt.in, decoded, err, got)
-		}
-	}
-}
-
-// TestSecretValues pins which values secretValues gives: each value of at
-// least discover.MinSecretBytes bytes and, for a value that is not valid UTF-8, its
-// decoded form. discover.MinSecretBytes applies to the raw value only, so a short
-// value gives no decoded form, even when that form has 8 bytes or more.
-func TestSecretValues(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		secrets []string
-		want    []string
-	}{
-		{name: "no secrets", secrets: nil, want: nil},
-		{name: "short value", secrets: []string{"abcdefg"}, want: nil},
-		{name: "valid UTF-8 has no decoded form", secrets: []string{"abcdéfgh"}, want: []string{"abcdéfgh"}},
-		{name: "same value twice", secrets: []string{"abcdefgh", "abcdefgh"}, want: []string{"abcdefgh"}},
-		{name: "one invalid byte", secrets: []string{"abcd\xffefgh"}, want: []string{"abcd\xffefgh", "abcd" + ffd + "efgh"}},
-		{name: "run of three invalid bytes", secrets: []string{"ab\xff\xfe\xfdcdefgh"}, want: []string{"ab\xff\xfe\xfdcdefgh", "ab" + ffd + ffd + ffd + "cdefgh"}},
-		// 7 raw bytes are too short, so the decoded form of 9 is not added.
-		{name: "7 bytes with a decoded form of 9", secrets: []string{"abcdef\xff"}, want: nil},
-		// 3 raw bytes are too short. The decoded form (three U+FFFD, 9 bytes)
-		// would hide any run of three U+FFFD in the tool text.
-		{name: "3 invalid bytes", secrets: []string{"\xff\xfe\xfd"}, want: nil},
-		{name: "8 bytes with an invalid byte", secrets: []string{"abcdefg\xff"}, want: []string{"abcdefg\xff", "abcdefg" + ffd}},
-		{name: "7 bytes with two invalid bytes", secrets: []string{"abcde\xff\xfe"}, want: nil},
-		{name: "5 bytes with a decoded form of 7", secrets: []string{"ab\xffcd"}, want: nil},
-		{name: "decoded form is another secret", secrets: []string{"abc\xffdefgh", "abc" + ffd + "defgh"}, want: []string{"abc\xffdefgh", "abc" + ffd + "defgh"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := secretValues(newSecrets(tt.secrets...)); !slices.Equal(got, tt.want) {
-				t.Errorf("secretValues(%q) = %q, want %q", tt.secrets, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestSecretValuesLarge checks secretValues with many secrets: 50,000 unique
-// values of 16 bytes (some not valid UTF-8), then each of them again and the
-// decoded forms as secrets of their own. The result must hold each value and
-// decoded form once, in the order of the first occurrence. The time bound is
-// very loose: it only catches a dedupe that is quadratic (seconds for this
-// list). The count and the order are the real check.
-func TestSecretValuesLarge(t *testing.T) {
-	t.Parallel()
-
-	const count = 50000
-	var raw, want []string
-	for i := range count {
-		v := fmt.Sprintf("value-%010d", i) // 16 bytes
-		if i%7 == 0 {
-			v = fmt.Sprintf("value\xff%010d", i) // 16 bytes, not valid UTF-8
-		}
-		raw = append(raw, v)
-		want = append(want, v)
-		if i%7 == 0 {
-			want = append(want, decodedPerByte(v))
-		}
-	}
-	// Duplicates: every value again in reverse order, then each decoded form
-	// as a secret. None of them may change the result or its order.
-	secrets := slices.Clone(raw)
-	for _, v := range slices.Backward(raw) {
-		secrets = append(secrets, v)
-	}
-	for _, v := range raw {
-		if !utf8.ValidString(v) {
-			secrets = append(secrets, decodedPerByte(v))
-		}
-	}
-
-	start := time.Now()
-	got := secretValues(newSecrets(secrets...))
-	elapsed := time.Since(start)
-
-	// The failure messages give counts and indexes only: the list is long.
-	if wantLen := count + (count+6)/7; len(want) != wantLen {
-		t.Fatalf("test setup: %d wanted values, want %d", len(want), wantLen)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("secretValues() gives %d values, want %d", len(got), len(want))
-	}
-	seen := make(map[string]int, len(got))
-	for i, v := range got {
-		if j, ok := seen[v]; ok {
-			t.Fatalf("secretValues() value %d is the same as value %d", i, j)
-		}
-		seen[v] = i
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("secretValues() value %d is not in first-occurrence order", i)
-		}
-	}
-	if elapsed > 2*time.Second {
-		t.Errorf("secretValues() took %v for %d secrets, want less than 2s (a quadratic dedupe?)", elapsed, len(secrets))
-	}
-}
-
-// secretValuesReference is a plain reference for secretValues: the same
-// rules, with a linear search for the dedupe. It is slow for many values, so
-// use it only with short lists.
-func secretValuesReference(secrets []discover.Secret) []string {
-	var values []string
-	add := func(v string) {
-		if !slices.Contains(values, v) {
-			values = append(values, v)
-		}
-	}
-	for _, s := range secrets {
-		v := s.Reveal()
-		if len(v) < discover.MinSecretBytes {
-			continue
-		}
-		add(v)
-		if !utf8.ValidString(v) {
-			add(decodedPerByte(v))
-		}
-	}
-	return values
-}
-
-// TestSecretValuesMatchesReference compares secretValues with
-// secretValuesReference for random lists of secrets. A small set of pieces
-// makes duplicates, values near discover.MinSecretBytes and invalid UTF-8 frequent.
-// Some secrets repeat an earlier secret or its decoded form. The seed is
-// fixed, so a failure repeats.
-func TestSecretValuesMatchesReference(t *testing.T) {
-	t.Parallel()
-
-	pieces := []string{"a", "b", "ab", "\xff", "\xfe", ffd, "é"}
-	rng := rand.New(rand.NewPCG(211, 2026)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
-	var dups, decoded int
-	for range 3000 {
-		var values []string
-		for n := rng.IntN(20); n > 0; n-- {
-			switch k := rng.IntN(10); {
-			case k == 0 && len(values) > 0:
-				values = append(values, values[rng.IntN(len(values))])
-			case k == 1 && len(values) > 0:
-				values = append(values, decodedPerByte(values[rng.IntN(len(values))]))
-			default:
-				var b strings.Builder
-				for m := 4 + rng.IntN(6); m > 0; m-- {
-					b.WriteString(pieces[rng.IntN(len(pieces))])
-				}
-				values = append(values, b.String())
-			}
-		}
-		secrets := newSecrets(values...)
-		got, want := secretValues(secrets), secretValuesReference(secrets)
-		if !slices.Equal(got, want) {
-			t.Fatalf("secretValues(%q) = %q, want %q", values, got, want)
-		}
-
-		// Count the paths that the lists reach.
-		long := 0
-		for _, v := range values {
-			if len(v) >= discover.MinSecretBytes {
-				long++
-				if !utf8.ValidString(v) {
-					long++
-				}
-			}
-		}
-		if len(want) < long {
-			dups++
-		}
-		for _, v := range want {
-			if strings.Contains(v, ffd) {
-				decoded++
-				break
-			}
-		}
-	}
-	// The generator must reach each path often, or the test checks little.
-	if dups < 500 || decoded < 1000 {
-		t.Errorf("lists with a duplicate %d, with a U+FFFD value %d of 3000: too few", dups, decoded)
-	}
-}
-
 // TestToolMessageRedactsInvalidUTF8Secret checks a secret value that is not
 // valid UTF-8. A server that echoes it in JSON sends the decoded form (one
 // U+FFFD for each invalid byte), and toolMessage must remove that form too.
@@ -1273,7 +965,7 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 		{name: "two invalid bytes, raw form", secret: "abc\xff\xfedefgh", desc: "x abc\xff\xfedefgh y", wantDesc: "x " + m + " y", wantRedacted: true},
 		{name: "one invalid byte", secret: "abcd\xffefgh", desc: "x abcd" + ffd + "efgh y", wantDesc: "x " + m + " y", wantRedacted: true},
 		{name: "run of three invalid bytes", secret: "ab\xff\xfe\xfdcdefgh", desc: "x ab" + ffd + ffd + ffd + "cdefgh y", wantDesc: "x " + m + " y", wantRedacted: true},
-		// Known limit (see secretValues): one U+FFFD for a whole run is another
+		// Known limit (see discover.NewTextRedactor): one U+FFFD for a whole run is another
 		// encoded form, and it is not matched.
 		{name: "one U+FFFD for the run", secret: "abc\xff\xfedefgh", desc: "x abc" + ffd + "defgh y", wantDesc: "x abc" + ffd + "defgh y"},
 		{name: "valid UTF-8 secret", secret: "abcdéfgh", desc: "x abcdéfgh y", wantDesc: "x " + m + " y", wantRedacted: true},
@@ -1289,7 +981,7 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(tt.secret)
-			msg, truncated, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Credentials: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -1301,186 +993,14 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 				return
 			}
 			checkNoSecret(t, msg, p, secrets)
-			if d := decodedPerByte(tt.secret); strings.Contains(p.ToolDescription, d) || strings.Contains(msg, d) {
-				t.Error("toolMessage() holds the decoded form of the secret")
+			// The raw value and, for invalid UTF-8, its decoded form: one
+			// U+FFFD for each invalid byte, as []rune gives it.
+			for _, v := range []string{tt.secret, string([]rune(tt.secret))} {
+				if strings.Contains(p.ToolDescription, v) || strings.Contains(msg, v) {
+					t.Error("toolMessage() holds the secret or its decoded form")
+				}
 			}
 		})
-	}
-}
-
-// checkPrefixIdentity checks the contract of redactPrefix for one input
-// against the reference redaction of all of s (redactSecrets and
-// redactOracleStarts): the result is a prefix of the reference, it is the
-// whole reference or longer than limit, the cut gives the same text and flag,
-// and redacted follows the rule of wantRedactedFlag. It returns the reference
-// and the Mask offsets for counts.
-func checkPrefixIdentity(t *testing.T, s string, values []string, limit int) (string, []int) {
-	t.Helper()
-
-	out, redacted := redactPrefix(s, values, limit)
-	ref, _ := redactSecrets(s, values)
-	oracle, starts := redactOracleStarts(s, values)
-	if ref != oracle {
-		t.Fatalf("redactSecrets(%q) = %q, want the oracle %q", s, ref, oracle)
-	}
-	if !strings.HasPrefix(ref, out) {
-		t.Fatalf("redactPrefix(%q, %d) = %q, not a prefix of %q", s, limit, out, ref)
-	}
-	if len(out) <= max(limit, 0) && out != ref {
-		t.Fatalf("redactPrefix(%q, %d) = %q, want more than %d bytes or all of %q", s, limit, out, limit, ref)
-	}
-	got, gotCut := cutUTF8(out, limit)
-	want, wantCut := cutUTF8(ref, limit)
-	if got != want || gotCut != wantCut {
-		t.Fatalf("cut of redactPrefix(%q, %d) = (%q, %v), want (%q, %v)", s, limit, got, gotCut, want, wantCut)
-	}
-	if wantFlag := wantRedactedFlag(starts, max(limit, 0)); redacted != wantFlag {
-		t.Fatalf("redactPrefix(%q, %d) redacted = %v, want %v (Masks at %v)", s, limit, redacted, wantFlag, starts)
-	}
-	return ref, starts
-}
-
-// TestRedactPrefix pins the result and the redacted flag of redactPrefix with
-// a small limit, at the window end and around it.
-func TestRedactPrefix(t *testing.T) {
-	t.Parallel()
-
-	m := discover.Mask
-	const sec = "SECRETxy" // 8 bytes
-	one := []string{sec}
-	a := strings.Repeat
-	tests := []struct {
-		name     string
-		s        string
-		values   []string
-		limit    int
-		want     string
-		wantFlag bool
-	}{
-		{name: "empty text", s: "", values: one, limit: 10, want: ""},
-		{name: "no values", s: a("a", 30), values: nil, limit: 10, want: a("a", 30)},
-		{name: "short text, no secret", s: "short", values: one, limit: 10, want: "short"},
-		{name: "long text, no secret", s: a("a", 30), values: one, limit: 10, want: a("a", 11)},
-		{name: "secret far after the window", s: a("a", 20) + sec, values: one, limit: 10, want: a("a", 11)},
-		// The window is the first limit+1 bytes: a Mask at offset 11 is not
-		// written and does not set the flag.
-		{name: "secret starts at limit+1", s: a("a", 11) + sec, values: one, limit: 10, want: a("a", 11)},
-		// A Mask at offset 10 starts in the window: the flag is true, also
-		// when the cut to 10 bytes then removes the Mask.
-		{name: "secret starts at limit", s: a("a", 10) + sec, values: one, limit: 10, want: a("a", 10) + m, wantFlag: true},
-		{name: "secret crosses the window end", s: a("a", 6) + sec + "zz", values: one, limit: 10, want: a("a", 6) + m, wantFlag: true},
-		// Masks make the result shorter than the window, so the window grows
-		// to all of s.
-		{name: "copies of the secret, then a short tail", s: a(sec, 20) + " t", values: one, limit: 10, want: m + " t", wantFlag: true},
-		{name: "copies of the secret, then a long tail", s: a(sec, 20) + " 0123456789", values: one, limit: 10, want: m + " 01", wantFlag: true},
-		{name: "limit 0, secret first", s: sec + "x", values: one, limit: 0, want: m, wantFlag: true},
-		{name: "limit 0, text first", s: "x" + sec, values: one, limit: 0, want: "x"},
-		{name: "negative limit is 0", s: "x" + sec, values: one, limit: -5, want: "x"},
-		{name: "empty value is skipped", s: a("a", 30), values: []string{""}, limit: 10, want: a("a", 11)},
-		{name: "empty value next to a secret", s: "aa" + sec, values: []string{"", sec}, limit: 10, want: "aa" + m, wantFlag: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, flag := redactPrefix(tt.s, tt.values, tt.limit)
-			if got != tt.want || flag != tt.wantFlag {
-				t.Errorf("redactPrefix(%q, %d) = (%q, %v), want (%q, %v)", tt.s, tt.limit, got, flag, tt.want, tt.wantFlag)
-			}
-			if strings.Contains(got, "SEC") {
-				t.Errorf("redactPrefix(%q, %d) = %q holds a part of the secret", tt.s, tt.limit, got)
-			}
-			checkPrefixIdentity(t, tt.s, tt.values, tt.limit)
-		})
-	}
-}
-
-// TestRedactWindowEmptyValue checks that redactWindow skips an empty value: no
-// Mask, no flag and no panic, alone or next to a real value.
-func TestRedactWindowEmptyValue(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		values   []string
-		want     string
-		wantFlag bool
-	}{
-		{values: []string{""}, want: "abcdefghij"},
-		{values: []string{"", ""}, want: "abcdefghij"},
-		{values: []string{"", "cdefghij"}, want: "ab" + discover.Mask, wantFlag: true},
-	}
-	for _, tt := range tests {
-		// With no stop (-1) the result is all of it; with a stop after 5
-		// bytes it is a prefix that still holds the Mask at offset 2.
-		for _, limit := range []int{-1, 5} {
-			got, flag := redactWindow("abcdefghij", tt.values, 10, limit)
-			if (limit < 0 && got != tt.want) || !strings.HasPrefix(tt.want, got) || flag != tt.wantFlag {
-				t.Errorf("redactWindow(%q, %d) = (%q, %v), want a prefix of %q and %v", tt.values, limit, got, flag, tt.want, tt.wantFlag)
-			}
-		}
-	}
-}
-
-// TestRedactSecretsMaskEdge pins the known limit in the doc of redactWindow: a
-// value that ends with "*" can come back across a Mask, when the text holds
-// the rest of the value just before another secret. The bytes next to the
-// Mask are text that the server wrote itself.
-func TestRedactSecretsMaskEdge(t *testing.T) {
-	t.Parallel()
-
-	values := []string{"abcdefg*", "SECRETxy"}
-	got, flag := redactSecrets("abcdefgSECRETxy", values)
-	if want := "abcdefg" + discover.Mask; got != want || !flag {
-		t.Fatalf("redactSecrets() = (%q, %v), want (%q, true)", got, flag, want)
-	}
-	if !strings.Contains(got, "abcdefg*") {
-		t.Error("the known limit is gone: update the doc of redactWindow and this test")
-	}
-	if pGot, _ := redactPrefix("abcdefgSECRETxy", values, 100); pGot != got {
-		t.Errorf("redactPrefix() = %q, want %q", pGot, got)
-	}
-}
-
-// TestRedactPrefixRandomText compares redactPrefix with the reference
-// redaction of the whole text, for random text from a small alphabet, the
-// secrets and their decoded forms, and random small limits. The seed is fixed,
-// so a failure repeats.
-func TestRedactPrefixRandomText(t *testing.T) {
-	t.Parallel()
-
-	values := secretValues(newSecrets("abcabcab", "cabbacab", "ab\xffcabca"))
-	if len(values) != 4 {
-		t.Fatalf("secretValues() gives %d values, want 4 (with a decoded form)", len(values))
-	}
-	m := discover.Mask
-	pieces := []string{"a", "b", "c", "*", "\xff", ffd, "é", " ", m, "abcabcab", "cabbacab", "ab\xffcabca", "ab" + ffd + "cabca"}
-
-	rng := rand.New(rand.NewPCG(186, 2026)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
-	var beyond, inWindow, cut int
-	for range 3000 {
-		var b strings.Builder
-		for n := rng.IntN(50); n > 0; n-- {
-			b.WriteString(pieces[rng.IntN(len(pieces))])
-		}
-		s := b.String()
-		limit := rng.IntN(40) - 2 // a few negative limits too
-
-		ref, starts := checkPrefixIdentity(t, s, values, limit)
-		if t.Failed() {
-			return
-		}
-		switch {
-		case wantRedactedFlag(starts, max(limit, 0)):
-			inWindow++
-		case len(starts) > 0:
-			beyond++
-		}
-		if len(ref) > max(limit, 0) {
-			cut++
-		}
-	}
-	// The generator must reach each path often, or the test checks little.
-	if beyond < 200 || inWindow < 500 || cut < 1000 {
-		t.Errorf("Masks only after the window %d, in the window %d, cut %d of 3000: too few", beyond, inWindow, cut)
 	}
 }
 
@@ -1518,7 +1038,7 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(secretCanary)
-			msg, truncated, _, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Credentials: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -1534,14 +1054,18 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 			checkNoSecret(t, msg, p, secrets)
 
 			// The reference: redact all of the text, cut, apply the flag rule.
-			values := secretValues(secrets)
-			refName, nameStarts := redactOracleStarts(tt.toolName, values)
-			refDesc, descStarts := redactOracleStarts(tt.desc, values)
+			// The discover tests check TextRedactor.Text and the flag of
+			// TextRedactor.Prefix against a plain oracle.
+			ref := discover.NewTextRedactor(secrets)
+			refName := ref.Text(tt.toolName)
+			refDesc := ref.Text(tt.desc)
+			_, nameFlag := ref.Prefix(tt.toolName, n)
+			_, descFlag := ref.Prefix(tt.desc, d)
 			wantName, nameCut := cutUTF8(refName, n)
 			wantDesc, descCut := cutUTF8(refDesc, d)
 			want, err := encodeToolPayload(encodeJSON, toolPayload{
 				ToolName: wantName, ToolDescription: wantDesc, Truncated: nameCut || descCut,
-				Redacted: wantRedactedFlag(nameStarts, n) || wantRedactedFlag(descStarts, d),
+				Redacted: nameFlag || descFlag,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1554,7 +1078,7 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 }
 
 // TestToolMessageLargeText checks that a description of 4 MiB with a secret
-// of 4 KiB stays fast: with no match in the first window, redactPrefix reads
+// of 4 KiB stays fast: with no match in the first window, TextRedactor.Prefix reads
 // only that window. The bound is generous on purpose; it catches only a
 // quadratic search.
 func TestToolMessageLargeText(t *testing.T) {
@@ -1575,7 +1099,7 @@ func TestToolMessageLargeText(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			start := time.Now()
-			msg, _, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: newSecrets(secret)})
+			msg, _, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Credentials: newSecrets(secret)})
 			if elapsed := time.Since(start); elapsed > 20*time.Second {
 				t.Errorf("toolMessage() took %v, want well under 20s", elapsed)
 			}
@@ -1587,43 +1111,5 @@ func TestToolMessageLargeText(t *testing.T) {
 				t.Errorf("toolMessage() = (%d bytes, redacted %v), want (%d bytes, %v)", len(p.ToolDescription), hasRedacted, len(tt.wantDesc), tt.wantRedacted)
 			}
 		})
-	}
-}
-
-func TestInputRedactedName(t *testing.T) {
-	t.Parallel()
-	const token = "tok-0123456789"
-	secrets := []discover.Secret{discover.NewSecret(token), discover.NewSecret("short")}
-	tests := []struct {
-		name string
-		in   Input
-		want string
-	}{
-		{"no secret", Input{ToolName: "fetch", Secrets: secrets}, "fetch"},
-		{"no secrets given", Input{ToolName: "fetch_" + token}, "fetch_" + token},
-		{"secret in the name", Input{ToolName: "fetch_" + token, Secrets: secrets}, "fetch_" + discover.Mask},
-		{"whole name is the secret", Input{ToolName: token, Secrets: secrets}, discover.Mask},
-		{"two occurrences", Input{ToolName: token + "-" + token, Secrets: secrets}, discover.Mask + "-" + discover.Mask},
-		{"value under the minimum length stays", Input{ToolName: "a_short_b", Secrets: secrets}, "a_short_b"},
-		{"empty name", Input{Secrets: secrets}, ""},
-		{"the description is not part of it", Input{ToolName: "fetch", Description: token, Secrets: secrets}, "fetch"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tt.in.RedactedName(1 << 10); got != tt.want {
-				t.Errorf("RedactedName() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-	// A long name: the result keeps the start of the whole redaction, with
-	// more than limit bytes, and a value that crosses the window is removed
-	// whole.
-	const limit = 64
-	long := Input{ToolName: strings.Repeat("a", limit-4) + token + strings.Repeat("b", 4*limit), Secrets: secrets}
-	want := strings.Repeat("a", limit-4) + discover.Mask + strings.Repeat("b", 4*limit)
-	got := long.RedactedName(limit)
-	if len(got) <= limit || !strings.HasPrefix(want, got) || strings.Contains(got, "tok-") {
-		t.Errorf("RedactedName(%d) of a long name = %q, want more than %d bytes and a prefix of %q", limit, got, limit, want)
 	}
 }

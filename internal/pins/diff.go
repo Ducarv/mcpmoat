@@ -52,14 +52,18 @@ var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(,\d+)? \+(\d+)(,\d+)? @@$`)
 // rendered texts. The truncated result is true when a text was cut. This
 // function returns an error when a canonical form does not parse.
 //
-// The diff keeps the bytes of the server text. The caller must escape it
-// before it writes it to a terminal.
-func unifiedDiff(oldCanonical, newCanonical string) (diff string, truncated bool, err error) {
-	before, err := render(oldCanonical)
+// mask, when it is not nil, hides secret values. render applies it to both
+// texts before the trim, the wrap and the caps (capText), so a cut can never
+// leave a part of a secret. A nil mask changes nothing.
+//
+// Apart from the mask, the diff keeps the bytes of the server text. The caller
+// must escape it before it writes it to a terminal.
+func unifiedDiff(oldCanonical, newCanonical string, mask func(string) string) (diff string, truncated bool, err error) {
+	before, err := render(oldCanonical, mask)
 	if err != nil {
 		return "", false, fmt.Errorf("render pinned tool: %w", err)
 	}
-	after, err := render(newCanonical)
+	after, err := render(newCanonical, mask)
 	if err != nil {
 		return "", false, fmt.Errorf("render current tool: %w", err)
 	}
@@ -69,10 +73,11 @@ func unifiedDiff(oldCanonical, newCanonical string) (diff string, truncated bool
 // newToolDiff returns the unified diff from no text to the current tool: every
 // content line is an added line. It is the diff of a tool that the pin does
 // not have yet. The labels, the caps and the truncated result are those of
-// unifiedDiff. The diff is never empty, because a rendered tool always has
-// lines. newToolDiff returns an error when newCanonical does not parse.
-func newToolDiff(newCanonical string) (diff string, truncated bool, err error) {
-	after, err := render(newCanonical)
+// unifiedDiff, and so is mask. The diff is never empty, because a rendered
+// tool always has lines. newToolDiff returns an error when newCanonical does
+// not parse.
+func newToolDiff(newCanonical string, mask func(string) string) (diff string, truncated bool, err error) {
+	after, err := render(newCanonical, mask)
 	if err != nil {
 		return "", false, fmt.Errorf("render current tool: %w", err)
 	}
@@ -81,7 +86,9 @@ func newToolDiff(newCanonical string) (diff string, truncated bool, err error) {
 
 // diffRendered returns the unified diff of two rendered texts, with the window
 // and the caps that the unifiedDiff comment describes. It is the empty string
-// only when the texts are equal.
+// only when the texts are equal. The texts must be masked already (see
+// render): diffRendered does not mask, and it must not mask its output,
+// because the trim and the caps can cut a secret in two.
 func diffRendered(before, after string) (diff string, truncated bool, err error) {
 	if before == after {
 		return "", false, nil

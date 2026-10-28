@@ -730,12 +730,17 @@ func TestScanPinsIgnore(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, oneServer("srv"))
+			flags := slices.Clone(tt.flags)
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, rules.IgnoreFileName, tt.ignoreFile)
+				// scan reads the file only with --use-ignore-file. Without
+				// the flag the test would not show that the file cannot drop
+				// a pin finding.
+				flags = append(flags, useIgnoreFileFlag)
 			}
 			firstScan(t, e, pinned...)
 
-			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), tt.flags...)
+			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), flags...)
 
 			assertScanRun(t, got, scanWant{code: tt.wantCode, stderr: tt.wantStderr})
 			out := splitPinOutput(t, got.stdout)
@@ -1080,7 +1085,7 @@ func TestScanPinsIgnoreFileWarningPerRule(t *testing.T) {
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {
 		mkTool("a", "Add. X."), mkTool("b", "Echo. Y."), mkTool("d", "New."), mkTool("e", "New too."),
-	}}))
+	}}), useIgnoreFileFlag)
 
 	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{
 		"mcpmoat scan: warning: .mcpmoat-ignore cannot ignore MOAT-T2-001; use --ignore on the command line\n",

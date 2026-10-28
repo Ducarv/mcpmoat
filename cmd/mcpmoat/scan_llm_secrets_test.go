@@ -2,15 +2,9 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
-	"io"
 	"maps"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -18,155 +12,42 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/llm"
 )
 
-// This file tests that "mcpmoat scan --llm" removes the secret values of a
-// server from its tool text before the text goes to the LLM provider (FR-17,
-// issue #185). A server gets its env and header values, so a malicious server
-// can echo a token in a tool name or description. The tests give the fake
-// inspector a Result with Secrets, run the real LLM client (llm.New) against
-// a fake provider on a loopback httptest server, and read the raw request
-// bodies that the provider got.
+// This file tests that "mcpmoat scan --llm" removes the credential values of
+// a server from its tool text before the text goes to the LLM provider
+// (FR-17, issues #185, #229 and #235). A server gets its env and header
+// values, so a malicious server can echo a token in a tool name or
+// description. The tests give the fake inspector a Result with Secrets and
+// Credentials, run the real LLM client (llm.New) against a fake provider on a
+// loopback httptest server, and read the raw request bodies that the
+// provider got.
+//
+// The request hides only inspect.Result.Credentials. A value that is in the
+// wide list Result.Secrets but is no credential (a plain word such as
+// "production") goes to the provider as it is, sets no "redacted" flag and
+// gives no floor row. The local report still hides every value of Secrets in
+// the Key of a row.
 
 // llmEchoCanary is the secret value of the tests, which a server echoes in
 // its tool text. It is long enough for llm (8 bytes or more) and holds no
 // word, so no part of it shows by chance.
 const llmEchoCanary = "mcpmoat-llm-secret-Vb6Lr9QzT3"
 
-// llmSecretPayload is the user message of a request, with every key that the
-// client may send, "redacted" too. It is comparable, so a test can compare
-// maps of it.
-type llmSecretPayload struct {
-	ToolName        string `json:"tool_name"`
-	ToolDescription string `json:"tool_description"`
-	Truncated       bool   `json:"truncated"`
-	Redacted        bool   `json:"redacted"`
-}
-
-// llmSecretRequest is one request that llmSecretAPI got.
-type llmSecretRequest struct {
-	path string
-	// body is the raw request body.
-	body []byte
-	// content is the user message of the body, decoded from its JSON
-	// string. It is "" when the body has no single user message.
-	content string
-}
-
-// llmSecretAPI is a fake LLM provider on a loopback httptest server. It
-// speaks the Anthropic Messages API or the OpenAI Chat Completions API, as
-// the provider says. It answers each request with the verdict of llmAnswerFor
-// for the tool in the request, and records each request.
-type llmSecretAPI struct {
-	srv      *httptest.Server
-	provider llm.Provider
-
-	mu       sync.Mutex
-	requests []llmSecretRequest
-}
-
-// newLLMSecretAPI starts a fake provider of the given flavour.
-func newLLMSecretAPI(t *testing.T, provider llm.Provider) *llmSecretAPI {
-	t.Helper()
-	a := &llmSecretAPI{provider: provider}
-	a.srv = httptest.NewServer(http.HandlerFunc(a.handle))
-	t.Cleanup(a.srv.Close)
-	return a
-}
-
-// handle answers one request.
-func (a *llmSecretAPI) handle(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	req := llmSecretRequest{path: r.URL.Path, body: body}
-	var p llmSecretPayload
-	if err == nil {
-		req.content, err = llmSecretUserMessage(body)
-	}
-	if err == nil {
-		p, err = llmSecretDecodePayload(req.content)
-	}
-	a.mu.Lock()
-	a.requests = append(a.requests, req)
-	a.mu.Unlock()
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	v, verr := llmAnswerFor(llm.Input{ToolName: p.ToolName, Description: p.ToolDescription})
-	if verr != nil {
-		http.Error(w, "test: no verdict", http.StatusBadRequest)
-		return
-	}
-	if a.provider == llm.ProviderOpenAI {
-		content, _ := json.Marshal(map[string]string{"risk": string(v.Risk), "category": string(v.Category)})
-		writeLLMJSON(w, map[string]any{
-			"id":     "chatcmpl-test",
-			"object": "chat.completion",
-			"model":  "m1",
-			"choices": []any{map[string]any{
-				"index":         0,
-				"finish_reason": "stop",
-				"message":       map[string]any{"role": "assistant", "content": string(content)},
-			}},
-		})
-		return
-	}
-	writeLLMVerdict(w, v)
-}
-
-// snapshot returns a copy of the recorded requests.
-func (a *llmSecretAPI) snapshot() []llmSecretRequest {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.requests)
-}
-
-// llmSecretUserMessage returns the content of the one user message of a
-// request body. Both APIs put the messages in "messages"; the OpenAI request
-// also has a system message there.
-func llmSecretUserMessage(body []byte) (string, error) {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return "", err
-	}
-	var user []string
-	for _, m := range req.Messages {
-		if m.Role == "user" {
-			user = append(user, m.Content)
-		}
-	}
-	if len(user) != 1 {
-		return "", errors.New("want one user message")
-	}
-	return user[0], nil
-}
-
-// llmSecretDecodePayload decodes a user message. It must have only the keys
-// of llmSecretPayload.
-func llmSecretDecodePayload(content string) (llmSecretPayload, error) {
-	dec := json.NewDecoder(strings.NewReader(content))
-	dec.DisallowUnknownFields()
-	var p llmSecretPayload
-	if err := dec.Decode(&p); err != nil {
-		return llmSecretPayload{}, err
-	}
-	return p, nil
-}
-
-// llmSecretServer is one server of a test: its tools, and the secret values
-// that Inspect gave it (inspect.Result.Secrets).
+// llmSecretServer is one server of a test: its tools, and the values that
+// Inspect gave it. credentials go to both inspect.Result.Secrets and
+// inspect.Result.Credentials. secrets go to Result.Secrets only (see
+// setFakeSecrets).
 type llmSecretServer struct {
-	name    string
-	secrets []string
-	tools   []inspect.Tool
+	name        string
+	credentials []string
+	secrets     []string
+	tools       []inspect.Tool
 }
 
-// TestScanLLMRedactsSecrets checks that scan --llm replaces each secret value
-// of a server with discover.Mask in the tool name and the tool description
-// before the request, and marks the message with "redacted": true. The
+// TestScanLLMRedactsSecrets checks that scan --llm replaces each credential
+// value of a server with discover.Mask in the tool name and the tool
+// description before the request, and marks the message with "redacted":
+// true. The canaries are token-like, so Inspect puts them in both
+// Result.Secrets and Result.Credentials, and so do the cases here. The
 // secret value must be in no request body, and in neither stdout nor stderr,
 // for the terminal report and for --json, with both provider flavours.
 //
@@ -188,7 +69,7 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 	// A tool that the provider rates high, so every scan has a normal LLM
 	// row and exits with exitFindings.
 	highTool := mkTool("keys", "Read keys. "+llmMarkHigh)
-	highSent := llmSecretPayload{ToolName: "keys", ToolDescription: "Read keys. " + llmMarkHigh}
+	highSent := providerPayload{ToolName: "keys", ToolDescription: "Read keys. " + llmMarkHigh}
 	highRow := func(server string) llmHit { return llmHit{llm.RuleID, "high", server, "keys"} }
 	// floorRow is the row of a tool whose text had a configured value
 	// removed: the model rating is not trusted below medium (see llmRow).
@@ -210,15 +91,15 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 		servers []llmSecretServer
 		// want is the payload of each request, keyed by the tool name that
 		// the provider gets.
-		want map[string]llmSecretPayload
+		want map[string]providerPayload
 		rows []llmHit
 	}{
 		{
 			name:   "description",
 			canary: canary,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{canary},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{canary},
 				tools: []inspect.Tool{mkTool("fetch", descText), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"fetch": {ToolName: "fetch", ToolDescription: descMasked, Redacted: true},
 				"keys":  highSent,
 			},
@@ -233,9 +114,9 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 			// request only.
 			name:   "tool name",
 			canary: canary,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{canary},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{canary},
 				tools: []inspect.Tool{mkTool("fetch_"+canary, "Fetch a page."), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"fetch_" + mask: {ToolName: "fetch_" + mask, ToolDescription: "Fetch a page.", Redacted: true},
 				"keys":          highSent,
 			},
@@ -246,9 +127,9 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 		{
 			name:   "tool name and description",
 			canary: canary,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{canary},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{canary},
 				tools: []inspect.Tool{mkTool(canary+"_fetch", descText), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				mask + "_fetch": {ToolName: mask + "_fetch", ToolDescription: descMasked, Redacted: true},
 				"keys":          highSent,
 			},
@@ -261,12 +142,12 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 			name:   "two servers, secret on the first only",
 			canary: canary,
 			servers: []llmSecretServer{
-				{name: "alpha", secrets: []string{canary},
+				{name: "alpha", credentials: []string{canary},
 					tools: []inspect.Tool{mkTool("a1", "Token "+canary+" here."), highTool}},
 				{name: "beta",
 					tools: []inspect.Tool{mkTool("b1", "Token "+canary+" here.")}},
 			},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"a1":   {ToolName: "a1", ToolDescription: "Token " + mask + " here.", Redacted: true},
 				"b1":   {ToolName: "b1", ToolDescription: "Token " + canary + " here."},
 				"keys": highSent,
@@ -279,9 +160,9 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 			// it again.
 			name:   "secret of 7 bytes is sent",
 			canary: short7,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{short7},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{short7},
 				tools: []inspect.Tool{mkTool("fetch", "Code "+short7+" here."), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"fetch": {ToolName: "fetch", ToolDescription: "Code " + short7 + " here."},
 				"keys":  highSent,
 			},
@@ -290,9 +171,9 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 		{
 			name:   "secret of 8 bytes is removed",
 			canary: short8,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{short8},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{short8},
 				tools: []inspect.Tool{mkTool("fetch", "Code "+short8+" here."), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"fetch": {ToolName: "fetch", ToolDescription: "Code " + mask + " here.", Redacted: true},
 				"keys":  highSent,
 			},
@@ -304,9 +185,9 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 			// truncated floor (medium).
 			name:   "100 KiB description with the secret across the cut",
 			canary: canary,
-			servers: []llmSecretServer{{name: "alpha", secrets: []string{canary},
+			servers: []llmSecretServer{{name: "alpha", credentials: []string{canary},
 				tools: []inspect.Tool{mkTool("big", long), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"big":  {ToolName: "big", ToolDescription: longSent, Truncated: true, Redacted: true},
 				"keys": highSent,
 			},
@@ -321,7 +202,7 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 			canary: canary,
 			servers: []llmSecretServer{{name: "alpha",
 				tools: []inspect.Tool{mkTool("fetch", descText), highTool}}},
-			want: map[string]llmSecretPayload{
+			want: map[string]providerPayload{
 				"fetch": {ToolName: "fetch", ToolDescription: descText},
 				"keys":  highSent,
 			},
@@ -338,7 +219,7 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
-					api := newLLMSecretAPI(t, provider)
+					api := newFakeProvider(t, provider)
 
 					r := llmSecretScan(t, api, tt.servers, jsonOut)
 
@@ -371,7 +252,7 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 					llmSecretAssertAbsent(t, tt.canary, "stderr", r.stderr)
 					assertNoLeakBoth(t, r.stdout, r.stderr)
 
-					llmSecretAssertRequests(t, api, provider, tt.canary, tt.want)
+					llmSecretAssertRequests(t, api, tt.canary, tt.want)
 				})
 			}
 		}
@@ -380,8 +261,8 @@ func TestScanLLMRedactsSecrets(t *testing.T) {
 
 // llmSecretScan runs "mcpmoat scan --llm" on one stdio server for each entry
 // of servers, with the real LLM client against api. The fake inspector gives
-// each server its tools and its Secrets.
-func llmSecretScan(t *testing.T, api *llmSecretAPI, servers []llmSecretServer, jsonOut bool) pinRunResult {
+// each server its tools, its Secrets and its Credentials (see setFakeSecrets).
+func llmSecretScan(t *testing.T, api *fakeProvider, servers []llmSecretServer, jsonOut bool) pinRunResult {
 	t.Helper()
 	tools := make(map[string][]inspect.Tool, len(servers))
 	for _, s := range servers {
@@ -389,32 +270,9 @@ func llmSecretScan(t *testing.T, api *llmSecretAPI, servers []llmSecretServer, j
 	}
 	insp := fakeServers(tools)
 	for _, s := range servers {
-		res := insp.Results[s.name]
-		for _, v := range s.secrets {
-			res.Secrets = append(res.Secrets, discover.NewSecret(v))
-		}
-		insp.Results[s.name] = res
+		setFakeSecrets(insp, s.name, s.credentials, s.secrets)
 	}
-	return llmSecretRun(t, api, llmEnv(t, tools), insp, jsonOut)
-}
-
-// llmSecretRun runs "mcpmoat scan --llm" on the config of e with the fake
-// inspector insp, with the real LLM client against api.
-func llmSecretRun(t *testing.T, api *llmSecretAPI, e *pinEnv, insp inspect.Inspector, jsonOut bool) pinRunResult {
-	t.Helper()
-	// A factory with no classifier fails the test when it is called, so
-	// the scan must use the real client below.
-	c, stdout, stderr := llmCLI(e, insp, &llmFactory{t: t})
-	c.newClassifier = newLLMClassifier
-
-	args := []string{"--llm", "--llm-base-url", api.srv.URL}
-	if api.provider == llm.ProviderOpenAI {
-		args = append(args, "--llm-provider", "openai", "--llm-model", "m1")
-	}
-	if jsonOut {
-		args = append(args, "--json")
-	}
-	return llmRun(t, e, c, stdout, stderr, args...)
+	return llmRealScan(t, api, llmEnv(t, tools), insp, 0, jsonOut)
 }
 
 // The secret values of the argv of TestScanLLMRedactsArgSecrets. Like
@@ -436,8 +294,11 @@ const (
 // server, inspect puts in Result.Secrets the text of the args that
 // discover.RedactArgs masks (discover.ArgSecrets: the value after
 // "--api-key", the header line after "-H", and the parts of that line), with
-// at least 8 bytes. The fake inspector gets the same values: the test calls
-// the real discover.ArgSecrets on the command line of the config.
+// at least 8 bytes. It puts in Result.Credentials the subset that
+// discover.ArgCredentials returns: the request hides only these values. The
+// fake inspector gets the same values, as literal lists. TestArgCredentials
+// and TestResultSecrets in internal/inspect test the real lists of such a
+// command line.
 //
 // Each tool echoes a part of the args. The provider must get discover.Mask
 // and "redacted": true for each echoed secret, never a canary, and the
@@ -463,14 +324,14 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 		mkTool("pkg", pkgDesc),
 	}
 	// sent is the payload of each tool without a redaction.
-	sent := make(map[string]llmSecretPayload, len(tools))
+	sent := make(map[string]providerPayload, len(tools))
 	for _, tl := range tools {
-		sent[tl.Name] = llmSecretPayload{ToolName: tl.Name, ToolDescription: tl.Description}
+		sent[tl.Name] = providerPayload{ToolName: tl.Name, ToolDescription: tl.Description}
 	}
 	// masked is the payload of each tool after the redaction. A run of text
 	// that more than one value covers gets one Mask: the header line, the
 	// value "Bearer <value>" and the credential alone overlap.
-	masked := map[string]llmSecretPayload{
+	masked := map[string]providerPayload{
 		"flags":  {ToolName: "flags", ToolDescription: "Started with --api-key " + mask + " today.", Redacted: true},
 		"header": {ToolName: "header", ToolDescription: "Send the header " + mask + " now.", Redacted: true},
 		"bearer": {ToolName: "bearer", ToolDescription: "Use " + mask + " for each call.", Redacted: true},
@@ -478,26 +339,20 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 		"pkg":    sent["pkg"],
 	}
 
-	// argSecrets is what inspect gives a stdio server: the values of
-	// discover.ArgSecrets of the command line (the command first), with at
-	// least 8 bytes.
-	// The values are raw secrets: the test compares them in memory only,
-	// and never prints them.
-	var argSecrets []discover.Secret
-	var withPackage int
-	for _, v := range discover.ArgSecrets(append([]string{command}, args...)) {
-		if strings.Contains(v, llmArgPackage) {
-			withPackage++
-		}
-		if len(v) >= 8 {
-			argSecrets = append(argSecrets, discover.NewSecret(v))
-		}
+	// argSecrets and argCredentials are what inspect gives this stdio server:
+	// the values of discover.ArgSecrets and discover.ArgCredentials of the
+	// command line (the command first), with at least 8 bytes. Each value is
+	// a credential, so the two lists are equal. No value holds the package
+	// name, so the redaction does not mask it. Both canaries are
+	// credentials: the request hides only those. The values are raw
+	// secrets: the test compares them in memory only, and never prints them.
+	argCredentials := []string{
+		"Authorization: Bearer " + llmArgHeaderCanary,
+		"Bearer " + llmArgHeaderCanary,
+		llmArgFlagCanary,
+		llmArgHeaderCanary,
 	}
-	// The package name is no secret, so no value may hold it: else the
-	// redaction would mask it, and the test would check the wrong thing.
-	if withPackage != 0 {
-		t.Fatalf("discover.ArgSecrets gave %d values with the package name, want 0", withPackage)
-	}
+	argSecrets := slices.Clone(argCredentials)
 
 	// The tools with a secret in their text get the floor row (MOAT-LLM-001,
 	// medium): their text had a value removed, so the model rating is not
@@ -505,12 +360,15 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 	floor := func(tool string) llmHit { return llmHit{llm.RuleID, "medium", "srv", tool} }
 	pkgHigh := llmHit{llm.RuleID, "high", "srv", "pkg"}
 	tests := []struct {
-		name    string
-		secrets []discover.Secret
-		want    map[string]llmSecretPayload
-		rows    []llmHit
+		name string
+		// credentials go to Result.Secrets and Result.Credentials, secrets
+		// to Result.Secrets only (see setFakeSecrets).
+		credentials []string
+		secrets     []string
+		want        map[string]providerPayload
+		rows        []llmHit
 	}{
-		{name: "argv secrets", secrets: argSecrets, want: masked,
+		{name: "argv secrets", credentials: argCredentials, secrets: argSecrets, want: masked,
 			rows: []llmHit{floor("flags"), floor("header"), floor("bearer"), floor("bare"), pkgHigh}},
 		{name: "no secrets", want: sent, rows: []llmHit{pkgHigh}},
 	}
@@ -519,14 +377,12 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 			for _, out := range llmOutputs {
 				t.Run(tt.name+"/"+string(provider)+"/"+out.name, func(t *testing.T) {
 					t.Parallel()
-					api := newLLMSecretAPI(t, provider)
+					api := newFakeProvider(t, provider)
 					e := newPinEnv(t, map[string]any{"srv": map[string]any{"command": command, "args": args}})
 					insp := fakeServers(map[string][]inspect.Tool{"srv": tools})
-					res := insp.Results["srv"]
-					res.Secrets = tt.secrets
-					insp.Results["srv"] = res
+					setFakeSecrets(insp, "srv", tt.credentials, tt.secrets)
 
-					r := llmSecretRun(t, api, e, insp, out.json)
+					r := llmRealScan(t, api, e, insp, 0, out.json)
 
 					if r.code != exitFindings {
 						t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, exitFindings, r.stdout, r.stderr)
@@ -544,7 +400,7 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 					for _, canary := range []string{llmArgFlagCanary, llmArgHeaderCanary} {
 						llmSecretAssertAbsent(t, canary, "stdout", r.stdout)
 						llmSecretAssertAbsent(t, canary, "stderr", r.stderr)
-						llmSecretAssertRequests(t, api, provider, canary, tt.want)
+						llmSecretAssertRequests(t, api, canary, tt.want)
 					}
 					// llmSecretAssertRequests compared each payload, so the
 					// package name in the text of pkg went out unchanged, with
@@ -560,13 +416,10 @@ func TestScanLLMRedactsArgSecrets(t *testing.T) {
 // tool, at the path of the provider, each with the payload of want. A body
 // holds canary only when its payload in want holds it. A body with a redacted
 // payload holds discover.Mask and "redacted":true in its user message.
-func llmSecretAssertRequests(t *testing.T, api *llmSecretAPI, provider llm.Provider, canary string, want map[string]llmSecretPayload) {
+func llmSecretAssertRequests(t *testing.T, api *fakeProvider, canary string, want map[string]providerPayload) {
 	t.Helper()
-	wantPath := "/v1/messages"
-	if provider == llm.ProviderOpenAI {
-		wantPath = "/chat/completions"
-	}
-	got := map[string]llmSecretPayload{}
+	wantPath := api.path()
+	got := map[string]providerPayload{}
 	reqs := api.snapshot()
 	if len(reqs) != len(want) {
 		t.Errorf("the provider got %d requests, want %d (one for each tool)", len(reqs), len(want))
@@ -575,11 +428,11 @@ func llmSecretAssertRequests(t *testing.T, api *llmSecretAPI, provider llm.Provi
 		if req.path != wantPath {
 			t.Errorf("request %d path = %q, want %q", i, req.path, wantPath)
 		}
-		p, err := llmSecretDecodePayload(req.content)
-		if err != nil {
-			t.Errorf("request %d: %v", i, err)
+		if req.err != nil {
+			t.Errorf("request %d: %v", i, req.err)
 			continue
 		}
+		p := req.payload
 		got[p.ToolName] = p
 
 		w, ok := want[p.ToolName]
@@ -641,8 +494,12 @@ func llmSecretAssertAbsent(t *testing.T, secret, what, out string) {
 // TestScanLLMHostileEnv checks the floor row of a tool whose text held a
 // configured value. A hostile config can put a whole phrase in an env value,
 // and the server can echo it after <IMPORTANT> in a tool description, so the
-// model does not see the text. The fake inspector gives the phrase as a
-// secret of the server, as it gives an env value. The tool "fetch" gets one
+// model does not see the text. The config puts the phrase under a
+// secret-like env key (API_KEY), so Inspect gives it in Result.Secrets and in
+// Result.Credentials, and the request hides it. Every case has the same
+// config, so the cases share one literal pair of lists for the fake
+// inspector. TestIsCredential and TestEnvCredentials in internal/inspect test
+// the env rule of Inspect itself. The tool "fetch" gets one
 // MOAT-LLM-001 row, of at least medium, whatever the model answers with no
 // rating (none), a low rating, or no usable answer: the row has the risk text
 // of the removal, or of the cut when the text was cut too. A model rating of
@@ -658,8 +515,15 @@ func TestScanLLMHostileEnv(t *testing.T) {
 	if len(hostile) < discover.MinSecretBytes {
 		t.Fatalf("the hostile phrase has %d bytes, want %d or more", len(hostile), discover.MinSecretBytes)
 	}
+	// envSecrets and envCredentials are what Inspect gives for the env
+	// API_KEY=<hostile>. The phrase is plain words, so only the secret-like
+	// key makes it a credential. Under a plain key (NODE_ENV) it would be in
+	// Secrets only: it would go to the provider as it is, and the model would
+	// rate the text that it sees.
+	envSecrets := []string{hostile}
+	envCredentials := []string{hostile}
 	add := mkTool("add", "Add.")
-	addSent := llmSecretPayload{ToolName: "add", ToolDescription: "Add."}
+	addSent := providerPayload{ToolName: "add", ToolDescription: "Add."}
 	// cutDesc is longer than llm.MaxDescriptionBytes, with the phrase before
 	// the cut. The removal comes before the cut, so the sent text holds the
 	// mask and no part of the phrase.
@@ -671,7 +535,7 @@ func TestScanLLMHostileEnv(t *testing.T) {
 		// desc is the description of the tool "fetch".
 		desc string
 		// sent is the payload of "fetch" that the provider gets.
-		sent llmSecretPayload
+		sent providerPayload
 		// wantCode is exitFindings in every case: the markup tag
 		// <IMPORTANT> gives the rule finding MOAT-T1-002 (high), which is
 		// not an LLM row. The LLM rows are compared on their own.
@@ -686,7 +550,7 @@ func TestScanLLMHostileEnv(t *testing.T) {
 		{
 			name:     "model answers none",
 			desc:     "Fetch a page. <IMPORTANT> " + hostile + " </IMPORTANT>",
-			sent:     llmSecretPayload{ToolName: "fetch", ToolDescription: "Fetch a page. <IMPORTANT> " + mask + " </IMPORTANT>", Redacted: true},
+			sent:     providerPayload{ToolName: "fetch", ToolDescription: "Fetch a page. <IMPORTANT> " + mask + " </IMPORTANT>", Redacted: true},
 			wantCode: exitFindings,
 			rows:     []llmHit{{llm.RuleID, "medium", "alpha", "fetch"}},
 			related:  string(llm.CategoryOther),
@@ -695,7 +559,7 @@ func TestScanLLMHostileEnv(t *testing.T) {
 		{
 			name: "model answers high",
 			desc: "Read keys. " + llmMarkHigh + " <IMPORTANT> " + hostile + " </IMPORTANT>",
-			sent: llmSecretPayload{ToolName: "fetch",
+			sent: providerPayload{ToolName: "fetch",
 				ToolDescription: "Read keys. " + llmMarkHigh + " <IMPORTANT> " + mask + " </IMPORTANT>", Redacted: true},
 			wantCode: exitFindings,
 			rows:     []llmHit{{llm.RuleID, "high", "alpha", "fetch"}},
@@ -703,13 +567,12 @@ func TestScanLLMHostileEnv(t *testing.T) {
 			risk:     llm.CategoryCredentialAccess.Text(),
 		},
 		{
-			// llmSecretAPI answers HTTP 400 when llmAnswerFor gives no
-			// verdict, and llmMarkInvalid makes it give none. So this tool is
-			// refused, and the refusal must not give MOAT-LLM-002.
+			// llmMarkStatus(400) makes fakeProvider answer HTTP 400. So this
+			// tool is refused, and the refusal must not give MOAT-LLM-002.
 			name: "provider refuses the tool",
-			desc: "Fetch a page. " + llmMarkInvalid + " <IMPORTANT> " + hostile + " </IMPORTANT>",
-			sent: llmSecretPayload{ToolName: "fetch",
-				ToolDescription: "Fetch a page. " + llmMarkInvalid + " <IMPORTANT> " + mask + " </IMPORTANT>", Redacted: true},
+			desc: "Fetch a page. " + llmMarkStatus(400) + " <IMPORTANT> " + hostile + " </IMPORTANT>",
+			sent: providerPayload{ToolName: "fetch",
+				ToolDescription: "Fetch a page. " + llmMarkStatus(400) + " <IMPORTANT> " + mask + " </IMPORTANT>", Redacted: true},
 			wantCode: exitFindings,
 			rows:     []llmHit{{llm.RuleID, "medium", "alpha", "fetch"}},
 			related:  string(llm.CategoryOther),
@@ -718,7 +581,7 @@ func TestScanLLMHostileEnv(t *testing.T) {
 		{
 			name:     "cut and redacted",
 			desc:     cutDesc,
-			sent:     llmSecretPayload{ToolName: "fetch", ToolDescription: cutSent, Truncated: true, Redacted: true},
+			sent:     providerPayload{ToolName: "fetch", ToolDescription: cutSent, Truncated: true, Redacted: true},
 			wantCode: exitFindings,
 			rows:     []llmHit{{llm.RuleID, "medium", "alpha", "fetch"}},
 			related:  string(llm.CategoryOther),
@@ -730,8 +593,8 @@ func TestScanLLMHostileEnv(t *testing.T) {
 			for _, out := range llmOutputs {
 				t.Run(tc.name+"/"+string(provider)+"/"+out.name, func(t *testing.T) {
 					t.Parallel()
-					api := newLLMSecretAPI(t, provider)
-					servers := []llmSecretServer{{name: "alpha", secrets: []string{hostile},
+					api := newFakeProvider(t, provider)
+					servers := []llmSecretServer{{name: "alpha", credentials: envCredentials, secrets: envSecrets,
 						tools: []inspect.Tool{mkTool("fetch", tc.desc), add}}}
 
 					r := llmSecretScan(t, api, servers, out.json)
@@ -775,8 +638,242 @@ func TestScanLLMHostileEnv(t *testing.T) {
 					llmSecretAssertAbsent(t, hostile, "stdout", r.stdout)
 					llmSecretAssertAbsent(t, hostile, "stderr", r.stderr)
 					assertNoLeakBoth(t, r.stdout, r.stderr)
-					llmSecretAssertRequests(t, api, provider, hostile,
-						map[string]llmSecretPayload{"fetch": tc.sent, "add": addSent})
+					llmSecretAssertRequests(t, api, hostile,
+						map[string]providerPayload{"fetch": tc.sent, "add": addSent})
+				})
+			}
+		}
+	}
+}
+
+// TestScanLLMCredentialsOnly checks the split of issues #229 and #235: scan
+// --llm hides only Result.Credentials in the request, and the local report
+// hides all of Result.Secrets in the Key of a row.
+//
+// A plain config value (an env value "production", the words of a DSN, a word
+// of a path segment, a query value, a Content-Type header value) is in
+// Secrets but not in Credentials. It reaches the provider as it is, the
+// message has no "redacted" key, and a model answer of none gives no row (no
+// floor). A model answer of low stays low. A credential (a bearer token) is
+// removed from the request, the message has "redacted": true, and a model
+// answer of none gives the floor row (MOAT-LLM-001, medium, the risk text of
+// the removal). The Key of a row shows discover.Mask for every value of
+// Secrets, a plain value too, in the terminal report and in --json.
+//
+// Each case lists, as literals, the Secrets and the Credentials that Inspect
+// gives for its config, as echoConfigs does. The tests of internal/inspect
+// (TestIsCredential, TestEnvCredentials, TestArgCredentials,
+// TestRemoteResultSecrets and the others in secrets_test.go) test how
+// Inspect builds these lists from a config. Each case checks first that its
+// lists agree with the values that the case is about, and that Credentials
+// is a subset of Secrets. No config value shows on stdout or stderr: the
+// report prints env and header values never, and args and URLs masked.
+func TestScanLLMCredentialsOnly(t *testing.T) {
+	t.Parallel()
+
+	const mask = discover.Mask
+	const dsn = "host=localhost dbname=production user=postgres"
+	const queryURL = "https://mcp.example.invalid/mcp?workspace=engineering"
+	plainURL := "https://mcp.example.invalid/mcp"
+
+	// none is the payload of a tool that goes out unchanged.
+	none := func(name, desc string) providerPayload {
+		return providerPayload{ToolName: name, ToolDescription: desc}
+	}
+	row := func(severity, tool string) llmHit { return llmHit{llm.RuleID, severity, "alpha", tool} }
+
+	tests := []struct {
+		name string
+		// server is the config entry of the server "alpha".
+		server map[string]any
+		// secrets and credentials are the Result.Secrets and the
+		// Result.Credentials that Inspect gives for server. The values are
+		// fake; the test compares them in memory only.
+		secrets, credentials []string
+		// plain must be in Secrets and not in Credentials. credential must be
+		// in Credentials. The case is about these values.
+		plain, credential []string
+		tools             []inspect.Tool
+		// want is the payload of each request, keyed by the tool name that
+		// the provider gets.
+		want map[string]providerPayload
+		rows []llmHit
+		// wantCode is the exit code. No LLM row is high, so it is exitOK,
+		// except when the config itself gives the rule finding MOAT-T4-002
+		// (high): a token written in clear text in a header.
+		wantCode int
+	}{
+		{
+			name:    "plain env value",
+			server:  map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
+			secrets: []string{"production"},
+			plain:   []string{"production"},
+			tools:   []inspect.Tool{mkTool("deploy", "Deploys the app to production.")},
+			want:    map[string]providerPayload{"deploy": none("deploy", "Deploys the app to production.")},
+		},
+		{
+			name:   "DSN arg",
+			server: map[string]any{"command": "psql-mcp", "args": []string{dsn}},
+			// The DSN is no credential: it has no password.
+			secrets: []string{"localhost dbname=production user=postgres", "production", "postgres"},
+			plain:   []string{"production", "postgres"},
+			tools:   []inspect.Tool{mkTool("query", "Runs SQL as postgres on localhost, database production.")},
+			want: map[string]providerPayload{
+				"query": none("query", "Runs SQL as postgres on localhost, database production."),
+			},
+		},
+		{
+			name:    "path segment with a space",
+			server:  map[string]any{"command": "fs-mcp", "args": []string{"/Users/me/My Documents/notes"}},
+			secrets: []string{"My Documents", "Documents"},
+			plain:   []string{"Documents"},
+			tools:   []inspect.Tool{mkTool("list", "Lists the files in Documents.")},
+			want:    map[string]providerPayload{"list": none("list", "Lists the files in Documents.")},
+		},
+		{
+			name:    "plain query value",
+			server:  map[string]any{"type": "http", "url": queryURL},
+			secrets: []string{"engineering"},
+			plain:   []string{"engineering"},
+			tools:   []inspect.Tool{mkTool("search", "Searches the engineering workspace.")},
+			want:    map[string]providerPayload{"search": none("search", "Searches the engineering workspace.")},
+		},
+		{
+			// Issue #229: the description is not garbled.
+			name:    "Content-Type header",
+			server:  map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Content-Type": "application/json"}},
+			secrets: []string{"application/json"},
+			plain:   []string{"application/json"},
+			tools:   []inspect.Tool{mkTool("get", "Fetches a record and returns application/json.")},
+			want:    map[string]providerPayload{"get": none("get", "Fetches a record and returns application/json.")},
+		},
+		{
+			// The plain value is in the tool name. The provider gets the
+			// name as it is, and the model answer low stays low: no floor.
+			// The Key of the row masks the value (the wide list).
+			name:    "plain value in a tool name",
+			server:  map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}, "env": map[string]string{"NODE_ENV": "production"}},
+			secrets: []string{"production"},
+			plain:   []string{"production"},
+			tools:   []inspect.Tool{mkTool("deploy_production", "Deploys the app. "+llmMarkLow)},
+			want: map[string]providerPayload{
+				"deploy_production": none("deploy_production", "Deploys the app. "+llmMarkLow),
+			},
+			rows: []llmHit{row("low", "deploy_"+mask)},
+		},
+		{
+			// Issue #229: the value of an auth header is still removed. The
+			// whole value and the token overlap, so they give one Mask.
+			name:        "bearer token",
+			server:      map[string]any{"type": "http", "url": plainURL, "headers": map[string]string{"Authorization": "Bearer " + echoToken}},
+			secrets:     []string{"Bearer " + echoToken, echoToken},
+			credentials: []string{"Bearer " + echoToken, echoToken},
+			credential:  []string{echoToken, "Bearer " + echoToken},
+			tools:       []inspect.Tool{mkTool("auth", "Send Authorization: Bearer "+echoToken+" with each call.")},
+			want: map[string]providerPayload{
+				"auth": {ToolName: "auth", ToolDescription: "Send Authorization: " + mask + " with each call.", Redacted: true},
+			},
+			rows:     []llmHit{row("medium", "auth")},
+			wantCode: exitFindings,
+		},
+		{
+			// One server with a credential and a plain value. Both tool
+			// names echo a value. The request hides the token only; the Key
+			// of each row hides both values.
+			name: "row Key masks the wide list",
+			server: map[string]any{"type": "http", "url": plainURL,
+				"headers": map[string]string{"Authorization": "Bearer " + echoToken, "X-Workspace": "production"}},
+			secrets:     []string{"Bearer " + echoToken, echoToken, "production"},
+			credentials: []string{"Bearer " + echoToken, echoToken},
+			plain:       []string{"production"},
+			credential:  []string{echoToken},
+			tools: []inspect.Tool{
+				mkTool("deploy_production", "Deploys the app. "+llmMarkLow),
+				mkTool("tok_"+echoToken, "Calls the API."),
+			},
+			want: map[string]providerPayload{
+				"deploy_production": none("deploy_production", "Deploys the app. "+llmMarkLow),
+				"tok_" + mask:       {ToolName: "tok_" + mask, ToolDescription: "Calls the API.", Redacted: true},
+			},
+			rows:     []llmHit{row("low", "deploy_"+mask), row("medium", "tok_"+mask)},
+			wantCode: exitFindings,
+		},
+	}
+	for _, tt := range tests {
+		// Check the lists once for each case, before the subtests: the
+		// values of the case must sit in the list that the case is about, and
+		// Credentials must be a subset of Secrets, as Inspect promises.
+		for _, v := range tt.plain {
+			if !slices.Contains(tt.secrets, v) || slices.Contains(tt.credentials, v) {
+				t.Fatalf("%s: a plain value is not in Secrets only (in Secrets: %v, in Credentials: %v)",
+					tt.name, slices.Contains(tt.secrets, v), slices.Contains(tt.credentials, v))
+			}
+		}
+		for _, v := range tt.credential {
+			if !slices.Contains(tt.credentials, v) {
+				t.Fatalf("%s: a credential value is not in Credentials", tt.name)
+			}
+		}
+		for _, v := range tt.credentials {
+			if !slices.Contains(tt.secrets, v) {
+				t.Fatalf("%s: a value of Credentials is not in Secrets", tt.name)
+			}
+		}
+		for _, provider := range []llm.Provider{llm.ProviderAnthropic, llm.ProviderOpenAI} {
+			for _, out := range llmOutputs {
+				t.Run(tt.name+"/"+string(provider)+"/"+out.name, func(t *testing.T) {
+					t.Parallel()
+					api := newFakeProvider(t, provider)
+					e := newPinEnv(t, map[string]any{"alpha": tt.server})
+					insp := fakeServers(map[string][]inspect.Tool{"alpha": tt.tools})
+					setFakeSecrets(insp, "alpha", tt.credentials, tt.secrets)
+
+					r := llmRealScan(t, api, e, insp, 0, out.json)
+
+					if r.code != tt.wantCode {
+						t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, tt.wantCode, r.stdout, r.stderr)
+					}
+					if out.json && !decodeScanJSON(t, r.stdout).Complete {
+						t.Errorf("JSON complete = false, want true")
+					}
+					got := llmJSONOrTerminalRows(t, r.stdout, out.json)
+					slices.SortFunc(got, llmSecretCompareHits)
+					wantRows := slices.Clone(tt.rows)
+					slices.SortFunc(wantRows, llmSecretCompareHits)
+					if !slices.Equal(got, wantRows) {
+						t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s\nstderr:\n%s", got, wantRows, r.stdout, r.stderr)
+					}
+					// A medium row here can only be the floor row (the model
+					// answers none or low), and a low row is the model rating.
+					if !out.json {
+						for _, f := range parseFindings(t, r.stdout) {
+							if !f.LLM {
+								continue
+							}
+							wantRisk := llm.CategoryOther.Text()
+							if f.Severity == "medium" {
+								wantRisk = llm.RedactedText
+							}
+							if f.Risk != wantRisk {
+								t.Errorf("LLM row %q (%s): risk = %q, want %q", f.Tool, f.Severity, f.Risk, wantRisk)
+							}
+						}
+					}
+
+					// No config value shows: neither a credential nor a plain
+					// value (the Key masks it).
+					for _, v := range tt.secrets {
+						llmSecretAssertAbsent(t, v, "stdout", r.stdout)
+						llmSecretAssertAbsent(t, v, "stderr", r.stderr)
+					}
+					assertNoLeakBoth(t, r.stdout, r.stderr)
+
+					// A plain value is in the body exactly when its payload
+					// holds it, so the check is positive for the plain values;
+					// a credential is in no body.
+					for _, v := range slices.Concat(tt.plain, tt.credential) {
+						llmSecretAssertRequests(t, api, v, tt.want)
+					}
 				})
 			}
 		}

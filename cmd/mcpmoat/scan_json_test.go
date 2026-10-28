@@ -466,16 +466,19 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			t.Parallel()
 
 			home, work := tt.dirs(t)
+			scanArgs := []string{"scan", "--no-connect"}
 			if tt.ignoreFile != "" {
 				writeTestFile(t, work, rules.IgnoreFileName, tt.ignoreFile)
+				// scan reads the file only with --use-ignore-file.
+				scanArgs = append(scanArgs, useIgnoreFileFlag)
 			}
 			run := func(args ...string) (code int, stdout, stderr string) {
 				c, out, errOut := dirsCLI(t, home, work)
 				return runScanArgs(c, out, errOut, args...)
 			}
 
-			termCode, termOut, termErr := run("scan", "--no-connect")
-			jsonCode, jsonOut, jsonErr := run("scan", "--no-connect", "--json")
+			termCode, termOut, termErr := run(scanArgs...)
+			jsonCode, jsonOut, jsonErr := run(append(slices.Clone(scanArgs), "--json")...)
 
 			if termCode != tt.wantCode {
 				t.Errorf("terminal run: exit code = %d, want %d", termCode, tt.wantCode)
@@ -944,6 +947,10 @@ func TestScanJSONIgnored(t *testing.T) {
 				args := scanServersArgs(t, mode, home, ignoreTestServers())
 				if tt.file != "" {
 					writeTestFile(t, work, rules.IgnoreFileName, tt.file)
+					// scan reads the file only with --use-ignore-file. The
+					// base run below gets the flag too: it reads no file,
+					// because its working directory is empty.
+					args = append(args, useIgnoreFileFlag)
 				}
 				run := func(extra ...string) (string, string) {
 					c, stdout, stderr := dirsCLI(t, home, work)
@@ -1010,7 +1017,7 @@ func TestScanJSONIgnoredNoFileText(t *testing.T) {
 			t.Parallel()
 
 			home, work := t.TempDir(), t.TempDir()
-			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json")
+			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json", useIgnoreFileFlag)
 			writeTestFile(t, work, rules.IgnoreFileName, file)
 			c, stdout, stderr := dirsCLI(t, home, work)
 
@@ -1032,6 +1039,54 @@ func TestScanJSONIgnoredNoFileText(t *testing.T) {
 			if want := []string{"file_entries", "rules", "total"}; !slices.Equal(keys, want) {
 				t.Errorf("ignored has the keys %v, want %v", keys, want)
 			}
+		})
+	}
+}
+
+// TestScanJSONIgnoreFileWithoutFlag checks a .mcpmoat-ignore file in the
+// working directory without --use-ignore-file. scan does not read the file, so
+// it drops nothing: "ignored" has zero counts, and the findings that the file
+// lists stay in the document. stderr has the note line once, and no "using N
+// entries" or "findings ignored" line.
+func TestScanJSONIgnoreFileWithoutFlag(t *testing.T) {
+	t.Parallel()
+
+	// Each entry matches findings of ignoreTestServers.
+	const file = "MOAT-T4-002\nMOAT-T4-003\n"
+	wantCounts := map[string]int{"MOAT-T4-002": 2, "MOAT-T4-003": 1}
+
+	for _, mode := range configModes {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+
+			home, work := t.TempDir(), t.TempDir()
+			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json")
+			writeTestFile(t, work, rules.IgnoreFileName, file)
+			c, stdout, stderr := dirsCLI(t, home, work)
+
+			_, out, errOut := runScanArgs(c, stdout, stderr, args...)
+
+			doc := decodeScanJSON(t, out)
+			assertIgnoredMatchesStderr(t, doc, errOut)
+			if doc.Ignored.Total != 0 || doc.Ignored.FileEntries != 0 || len(doc.Ignored.Rules) != 0 {
+				t.Errorf("ignored = %+v, want total 0, no rules, file_entries 0\nstderr:\n%s", doc.Ignored, errOut)
+			}
+			gotCounts := map[string]int{}
+			for _, f := range doc.Findings {
+				if _, ok := wantCounts[f.RuleID]; ok {
+					gotCounts[f.RuleID]++
+				}
+			}
+			if !maps.Equal(gotCounts, wantCounts) {
+				t.Errorf("findings of the rules in the file = %v, want %v (the file is not read)", gotCounts, wantCounts)
+			}
+			if n := strings.Count(errOut, ignoreNoteLine+"\n"); n != 1 {
+				t.Errorf("stderr has the note line %d times, want 1\nstderr:\n%s", n, errOut)
+			}
+			if fileNoticePattern.MatchString(errOut) || ignoredLinePattern.MatchString(errOut) {
+				t.Errorf("stderr has a line of an ignore file in use, want only the note\nstderr:\n%s", errOut)
+			}
+			assertNoLeakBoth(t, out, errOut)
 		})
 	}
 }

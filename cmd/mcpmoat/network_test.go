@@ -554,7 +554,7 @@ func TestScanNetworkNoConnect(t *testing.T) {
 // fixture, and the stdio child still does not get the key.
 func TestScanNetworkWithLLM(t *testing.T) {
 	w := newNetWorld(t, false)
-	api := newLLMAPI(t)
+	api := newFakeProvider(t, llm.ProviderAnthropic)
 	w.rec.allowAddr(api.host)
 	var builds atomic.Int32
 	c, _, out := w.cli(t, func(cfg llm.Config) (toolClassifier, error) {

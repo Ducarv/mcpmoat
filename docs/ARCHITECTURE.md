@@ -5,11 +5,12 @@
 > (T4 and T5) and the ignore list. `mcpmoat scan` without `--no-connect` also connects to the
 > servers, pins their tools on the first run, and reports new, removed and changed tools on later
 > runs (T2). It prints a diff for each new and each changed tool. It also applies the description
-> and schema rules (T1 and T3, built-in and from `--rules`) to the tools, with a time budget for
-> each server. `mcpmoat pin --accept <server> --expect <digest>` accepts the changes. The shadowing
-> check is not applied yet (#200). `mcpmoat scan --json` writes the same report as one JSON document
-> (FR-15, see [JSON output](#json-output)). `mcpmoat scan --llm` also asks a language model to rate
-> the name and description of each inspected tool, and adds advisory findings (FR-17, see
+> and schema rules (T1 and T3, built-in and from `--rules`) to the tools, with a time limit for
+> all servers and a share of it for each server. `mcpmoat pin --accept <server> --expect <digest>`
+> accepts the changes. The shadowing check is not applied yet (#200). `mcpmoat scan --json` writes
+> the same report as one JSON document (FR-15, see [JSON output](#json-output)). `mcpmoat scan
+> --llm` also asks a language model to rate the name and description of each inspected tool, and
+> adds advisory findings (FR-17, see
 > [The `--llm` classifier](#the---llm-classifier)).
 
 This page is the one place for the package layout, the import direction, the data flow, the
@@ -23,7 +24,7 @@ cmd/mcpmoat/            CLI entry (standard library flag); runWithContext() retu
 internal/
   termsafe/             escapes untrusted text for the terminal
   safefile/             hardened bounded read of untrusted files
-  discover/             config readers: Claude Code, Cursor, Codex
+  discover/             config readers (Claude Code, Cursor, Codex), secret and credential checks
     discovertest/       test helpers for discover
   inspect/              connects to servers, reads tools, prompts and resources
     inspecttest/        test helpers for inspect, including Fake
@@ -57,7 +58,9 @@ docs/                   PRD and other documentation
   `--llm` step.
   `scan_llm_flags.go` holds the flags, `checkLLMFlags` and the setup warning. `scan_llm_plan.go`
   builds the jobs (`llmPlan`, `planLLMJobs`, `fairShare`, `llmServerJobs`, `maxLLMTools`): it maps
-  each `inspect.Tool` and the `inspect.Result.Secrets` of its server to an `llm.Input`.
+  each `inspect.Tool` and the `inspect.Result.Credentials` of its server to an `llm.Input`, and
+  gives each job a `*discover.TextRedactor` of the wide `inspect.Result.Secrets`
+  (`llmJob.redactor`) for the row key.
   `scan_llm.go` runs the step (`llmStep`, `classifyPlan`, `runLLMJobs`, `sortAnswer`,
   `rejectedFailure` and the failure lines), and `scan_llm_rows.go` turns the answers into rows
   (`llmRow`, `invalidRow`, `llmSeverity`). The step calls a `toolClassifier`, a small interface
@@ -72,11 +75,15 @@ docs/                   PRD and other documentation
   `OpenIfExistsInRoot` in the same root, so the checked directory is the one that it reads from.
   `pins.Load` and `pins.LoadLocked` do this.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
+  It also holds the shared redaction of tool text (`redact_text.go`: `NewTextRedactor`
+  and its `Text` and `Prefix` methods) and the credential checks (`ArgCredentials`, `TokenLike`,
+  `IsAuthScheme`) that `inspect`, `llm` and `cmd/mcpmoat` use.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
 - `internal/rules`: loads and checks the YAML rules, applies the description and schema rules to
-  one tool at a time (`Analyzer`), runs the config heuristics, and reads `.mcpmoat-ignore`. It also
-  holds the shadowing check (`CheckShadowing`), which `scan` does not call yet (#200).
+  one tool at a time (`Analyzer`), runs the config heuristics, and reads `.mcpmoat-ignore` (`scan`
+  asks for that only with `--use-ignore-file`). It also holds the shadowing check
+  (`CheckShadowing`), which `scan` does not call yet (#200).
 - `internal/pins`: computes the canonical hash of each tool (`Canonical`, `Hash`), makes the pins of
   a server (`Snapshot`), keeps the versioned `pins.json` store (`Load`, `LoadLocked`, `Get`, `Set`,
   `Clone`, `Save` and `DefaultPath`), compares the pins with the current tools (`Compare`), and
@@ -140,8 +147,9 @@ be imported). The depguard rules below apply to it as to any other package.
 `internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.
 This direction is allowed: `inspect` does not import `rules`, so there is no cycle.
 `internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name, the
-description and the secret values of the server (`llm.Input`). `internal/llm` imports `discover`
-for the `discover.Secret` type of these values and of the API key, for `discover.Mask` and for
+description and the credential values of the server (`llm.Input`). `internal/llm` imports
+`discover` for the `discover.Secret` type of these values and of the API key, for the text
+redaction (`discover.NewTextRedactor`), for `discover.Mask` and for
 `discover.IsLoopbackHost`. It imports `github.com/cenkalti/backoff/v7` (v7.0.1, MIT licence, no
 dependencies of its own) only for the backoff of its retries. No error text of that module leaves
 `internal/llm`.
@@ -185,36 +193,64 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs, for clashes with built-in IDs and for reserved
    native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023`,
-   `MOAT-T1-024` or an ID that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last,
-   `rules.NewAnalyzer` compiles the match block of each rule once. It compiles a config rule only to
-   check it and drops its matcher, and it keeps the description and schema rules. A rule whose regex
-   does not compile gives a load error with the file, the field `match` and the reason. A bad rule
-   file, an ID problem or a bad regex gives exit code 2, also with `--no-connect` (`loadRules` in
-   `cmd/mcpmoat/scan_rules.go`). Then `scan` prints a fixed notice on stderr for the rules from
-   `--rules` that it does not apply: `configRulesNotice` when a rule has the target `config` (`scan`
-   runs only its built-in config checks), and `toolRulesNoConnectNotice` when a rule has the target
-   `description` or `schema` and `--no-connect` is set.
-3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
-   two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool
-   rules, with the file and the flags, and one for the pin rules, the LLM rules, `MOAT-T1-023` and
-   `MOAT-T1-024`, with the flags only. The file can come from a cloned repository, so it cannot
-   ignore a pin rule, an LLM rule, the budget rule or the cap rule. The guard is `fileCannotIgnore`:
-   it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with `MOAT-T2-`, the unexported
+   `MOAT-T1-024`, `MOAT-T4-005` or an ID that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case.
+   Last, `rules.NewAnalyzer` compiles the match block of each rule once. It compiles a config rule
+   only to check it and drops its matcher, and it keeps the description and schema rules. A rule
+   whose regex does not compile gives a load error with the file, the field `match` and the reason.
+   A bad rule file, an ID problem or a bad regex gives exit code 2, also with `--no-connect`
+   (`loadRules` in `cmd/mcpmoat/scan_rules.go`). Then `scan` prints a fixed notice on stderr for
+   the rules from `--rules` that it does not apply: `configRulesNotice` when a rule has the target
+   `config` (`scan` runs only its built-in config checks), and `toolRulesNoConnectNotice` when a
+   rule has the target `description` or `schema` and `--no-connect` is set.
+3. `scan` does this step after step 4, because it needs the working directory that `loadConfigs`
+   returns. Only with `--use-ignore-file`, it reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile`
+   (`loadIgnore`). Without the flag, `scan` only checks that the file exists (`os.Lstat` in
+   `noteIgnoreFile`, which never opens the file) and prints the note `ignoreFileNote` on stderr.
+   Then it adds the `--ignore` rule IDs. It keeps two lists (`scanIgnores` in
+   `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool rules, with the file and the
+   flags, and one for the pin rules, the LLM rules, `MOAT-T1-023`, `MOAT-T1-024` and `MOAT-T4-005`,
+   with the flags only. The file can come from a cloned repository, so it cannot ignore a pin rule,
+   an LLM rule, the budget rule or a cap rule. The guard is `fileCannotIgnore`: it is true for a
+   pin rule (`pins.IsPinRuleID`: the rule ID starts with `MOAT-T2-`, the unexported
    `ruleIDPrefix`), for `llm.RuleID` and `llm.RuleIDInvalid` (`MOAT-LLM-001` and `MOAT-LLM-002`),
-   for `rules.RuleAnalysisBudget` (`MOAT-T1-023`) and for `rules.RuleToolFindingCap`
-   (`MOAT-T1-024`). When a file entry for such a rule matches a finding, `scan` keeps the finding,
-   prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells the user to use
-   `--ignore`. `scanIgnores.fileEntries` holds the number of entries that `scan` read from the file (the
-   N in the stderr line `using N entries`, set in `loadIgnore`). Some of them can be entries that the
-   file cannot apply (see above) or that match no finding. The count goes to the JSON
-   `ignored.file_entries`.
+   for `rules.RuleAnalysisBudget` (`MOAT-T1-023`), for `rules.RuleToolFindingCap` (`MOAT-T1-024`)
+   and for `rules.RuleConfigFindingCap` (`MOAT-T4-005`). When a file entry for such a rule matches
+   a finding, `scan` keeps the finding, prints one warning for each such rule ID
+   (`warnFileCannotIgnore`), and tells the user to use `--ignore`. `scanIgnores.fileEntries` holds
+   the number of entries that `scan` read from the file (the N in the stderr line
+   `using N entries`, set in `loadIgnore`). Some of them can be entries that the file cannot apply
+   (see above) or that match no finding. The count goes to the JSON `ignored.file_entries`. It is 0
+   without `--use-ignore-file`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
    `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
    uses the same function, so both commands read the configs with the same trust rules.
 5. It runs the built-in config rules on every server it found, also a disabled one, as `discover`
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
    from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
-   some findings. The rule set gives the severity of each one that is left.
+   some findings. The rule set gives the severity of each one that is left. `configStep` runs this
+   step with `configChecks.findings` (both in `cmd/mcpmoat/scan_findings.go`), and it caps the rows
+   (#213):
+   - The caps count the rows after the ignore list. First a server keeps at most 100 rows
+     (`configRowsPerServer`). Then, when more than 10,000 rows are left over all the servers, the
+     scan keeps 10,000 (`configRowsTotal`). Each cut keeps the most severe rows (`cutConfigHits`, a
+     stable sort): severity first, then trusted servers before untrusted ones (`configHit.untrusted`,
+     so a project file cannot push out the finding of a server that the user set up), then server
+     order, then finding order. A severity that is not valid counts as critical (`capRank`). The kept rows of a server stay in their first order.
+   - A server that lost rows in one or both cuts gets one `MOAT-T4-005` row
+     (`rules.RuleConfigFindingCap`, a native rule with no YAML file, see `configCapRow`). Its
+     related text is `N more config findings are not listed; limit M` (`configCapText`). M is 100,
+     or 10000 when the scan cut rows of that server. Its severity is the highest severity of the
+     rows it left out, but never lower than high (`configCapSeverity`), so the row fails closed.
+     It does not count toward the caps. So the step gives at most 10,000 config rows plus one cap
+     row for each cut server.
+   - Only `--ignore MOAT-T4-005` drops the cap row, not the file (`fileCannotIgnore`), so a hostile
+     config and ignore file cannot hide that rows were cut. `configStep` prints one line on stderr
+     when a server lost rows, also when `--ignore` drops the cap rows (`configCapWarningText`):
+     `mcpmoat scan: warning: config findings were left out for N servers; see MOAT-T4-005` (or
+     `for 1 server`). The text does not say that each server has a row, because `--ignore` can
+     drop the rows. The JSON `complete` stays `true`, and the exit code follows `--fail-on`.
+   - The caps bound the rows, not the work before the cut: `rules.CheckConfig` still makes one
+     finding for each key (see [Size bound](#size-bound)).
 6. `writeScanOutput` writes the report on stdout. Without `--json` it calls `writeScanReport` (see
    [Terminal report](#terminal-report)): `report.WriteServers` prints the server table,
    `report.WriteSummary` prints the summary, and `report.WriteFindings` prints the findings, only
@@ -256,13 +292,17 @@ step 5 and step 6:
     not absolute (the working directory is not known) gets the same finding with the reason
     `the config path is not absolute`, because its identity would not match the store.
     `pins.json` has a size limit of 32 MiB, and `Store.Set` refuses a server that would make the
-    file larger (`pins.ErrStoreFull`). The report comes before the save, so `pinOutcomes` adds each
-    first-run server to a copy of the store (`pinner.budget`, made with `Store.Clone`) in the order
-    of the save. A server that does not fit is not pinned and gets the same high MOAT-T2-004
-    finding with the fixed reason `reasonStoreFull` and the fix `fixStoreFull` (the texts are in
-    [Pins and rug pulls](pins.md)). The reason stays at 80 runes or less, so the terminal report
-    does not cut it. The risk (`riskServerUnverified`) tells that the tools of the server are not
-    checked against pins. The servers that fit are still pinned.
+    file larger (`pins.ErrStoreFull`). It also refuses a project server that would make the project
+    servers use more than their share of 16 MiB (`pins.ErrProjectShareFull`, which wraps
+    `pins.ErrStoreFull` too; see [The `pins.json` store](#the-pinsjson-store)). The report comes
+    before the save, so `pinOutcomes` adds each first-run server to a copy of the store
+    (`pinner.budget`, made with `Store.Clone`) in the order of the save. A server that does not fit
+    is not pinned and gets the same high MOAT-T2-004 finding with the fixed reason
+    `reasonStoreFull` and the fix `fixStoreFull`, or `reasonShareFull` and `fixShareFull` when only
+    the project share is full (the texts are in [Pins and rug pulls](pins.md)). The reason stays at
+    80 runes or less, so the terminal report does not cut it. The risk (`riskServerUnverified`)
+    tells that the tools of the server are not checked against pins. The servers that fit are
+    still pinned.
     `scan` prints `mcpmoat scan: pinned N tools for <server>` on stderr only after the save worked.
   - A pinned server that failed or timed out gets a MOAT-T2-004 finding (high, exit 1) with the
     reason `pinned server could not be inspected` (`pinner.notInspected`). A hostile server must not
@@ -274,24 +314,27 @@ step 5 and step 6:
   - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
-  - A server that is in the store goes through `pins.Compare` (`pinner.compare`). The findings are
-    MOAT-T2-001 (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool,
-    low) and MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is
-    pinned, because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull,
-    and medium otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified
-    when its name is empty or used twice, when it has no canonical form, when it is pinned with
-    another hash version, or when its pinned text does not match its hash. These are native rule
-    IDs: there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
+  - A server that is in the store goes through `pins.CompareMasked` (`pinner.compare`, see Masked
+    diffs in [Tool hash](#tool-hash)). The findings are MOAT-T2-001 (changed tool, high),
+    MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool, low) and MOAT-T2-004 (not
+    verified). The severity of MOAT-T2-004 is high when the tool name is pinned, because a
+    duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull, and medium
+    otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified when its
+    name is empty or used twice, when it has no canonical form, when it is pinned with another
+    hash version, or when its pinned text does not match its hash. These are native rule IDs:
+    there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
     reason text in brackets after the tool name on the `Tool` line, or on a `Reason` line when the
     finding has no tool name (it is about the whole server, or the tool name is empty):
     `duplicate tool name`, `empty tool name`, `invalid tool data`, `pinned with another hash
-    version` or `pinned text does not match its hash`. The reason
-    never holds server text. For the last two reasons the pin cannot be trusted, so the change also
-    has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
-    server and tool name. The `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a
-    server that is in the store. When the tools of a pinned server no longer fit the size limit of
-    pins.json (`pins.ValidateServer`), `pins.Compare` has no reason for it, so `pinner.compare`
-    adds the high MOAT-T2-004 finding `the tools cannot be pinned` that a first run gives.
+    version` or `pinned text does not match its hash`. The reason never holds server text. For
+    the last two reasons the pin cannot be trusted, so the change also has a diff of the whole
+    current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID, server and real tool
+    name (`Change.RawTool`, not the masked `key`). The `.mcpmoat-ignore` file does not, also with
+    `--use-ignore-file` (see step 3). `scan` never re-pins a server that is in the store. When the
+    tools of a pinned server no longer fit the size limit of pins.json (`pins.ValidateServer`),
+    `pins.Compare` has no reason
+    for it, so `pinner.compare` adds the high MOAT-T2-004 finding `the tools cannot be pinned` that
+    a first run gives.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
@@ -301,11 +344,18 @@ step 5 and step 6:
   `noText` when a kept diff is only a fixed note (`pins.Change.DiffIsNote`). `setSelectors` checks
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
-  server, and `ambiguous` when the name cannot select it.
-  - The JSON `accept` object (`scan --json`, since schema version 3) comes from the same hint and
-    the same decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns
-    the text of the line and `isCommand`, which is true only when the text is the `pin --accept`
-    command (`acceptCommand`) and false for the prose steps (`acceptSteps`). The terminal prints
+  server, and `ambiguous` when the name cannot select it. Then `markStoreFull` checks that the new
+  tools of each hint (the field `snap` of `acceptHint`) fit in `pins.json`. It runs after every
+  first-run server is in the budget, as the save adds them before the user can run `pin --accept`.
+  It calls `Store.CheckSet` on the budget for each hint. `CheckSet` runs the same checks as `Set`
+  and returns the same errors, but changes nothing, so each hint is checked alone (`pin --accept`
+  saves one server at a time) and the budget holds only what the save of `scan` writes. When
+  `CheckSet` refuses with `pins.ErrProjectShareFull`, it sets `storeFull` and `shareFull`. When it
+  refuses with `pins.ErrStoreFull` only, it sets `storeFull`.
+  - The JSON `accept` object (`scan --json`, since schema version 3) comes from the same hint and the same
+    decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
+    of the line and `isCommand`, which is true only when the text is the `pin --accept` command
+    (`acceptCommand`) and false when it is the prose steps (`acceptSteps`). The terminal prints
     `text`. The JSON gets `digest` (the digest of the hint) and, only when `isCommand` is true,
     `command` (the same `text`). It never gets the prose, so a program cannot run a line that the
     terminal shows as steps. `acceptOf` (`cmd/mcpmoat/scan_json.go`) finds the hint of a server by
@@ -351,23 +401,40 @@ step 5 and step 6:
     This is a finding, not an execution error: the exit code follows `--fail-on`, and the JSON
     `complete` stays `true`. The cap keeps a hostile server from filling the report. It does not cap
     the other rows (see [Size bound](#size-bound)).
-  - Budget: each server gets its own wall-clock budget of 5 seconds (`toolRulesBudget`), as a
-    context deadline. The analyzer checks the context before each regex on each form, and between
-    the schema strings and the seams. So it stops at most about one regex on one form after the
-    deadline (under about 1 s in the measured worst case), plus one build of the forms of one text,
-    which cannot be stopped (under about 0.2 s in the measured worst case, a fill of CSIs; see the
-    cost comment in `internal/rules/match.go` and `maxStrictOSCStarts`). A server that uses up its
-    budget keeps the rows found so far and gets one finding `MOAT-T1-023`
-    (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
-    Its severity is the highest severity of the description and schema rules that `scan` applies,
-    but never lower than high (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
-    the built-in rules, and critical when a description or schema rule from `--rules` is critical.
-    This severity counts every applied description or schema rule, also one that `--ignore` drops,
-    on purpose: the rules that did not run could have given a finding (fail closed). Its related
-    text is `rule analysis time budget used up; N of M tools not fully checked`. `scan` also prints
-    one fixed warning on stderr for that server. This is a finding, not an
-    execution error: the exit code follows `--fail-on` (1 with the default), and the JSON
-    `complete` stays `true`. The other servers still run, each with its own budget.
+  - Budget (#210): the whole step has a wall-clock limit of 30 seconds (`toolRulesStepBudget`), a
+    context deadline on the step context that `checkTools` makes. Each server gets its own context,
+    made from the step context, with a fair share of the time that is left: the time until the
+    step limit divided by the servers still to check, but never more than 5 seconds
+    (`toolRulesBudget`, see `serverShare`). A server that ends early leaves its time to the servers
+    after it. Before #210 each server had its own 5 seconds, one after the other, so 20 servers
+    could take about 100 seconds. The analyzer checks the context before each regex on each form,
+    and between the schema strings and the seams. So it stops at most about one regex on one form
+    after the deadline, plus one build of the forms of one text, which cannot be stopped (#146).
+    The worst known case of that build is a fill of CSIs (see the cost comment in
+    `internal/rules/match.go` and `maxStrictOSCStarts`). [Limits](limits.md) has the measured size
+    of the overshoot, and the comment of `TestAnalyzerCheckToolHostileBudget` in
+    `internal/rules/analyze_test.go` explains it. So the step takes at most 30 s plus one
+    overshoot. The overshoot comes out of the shared limit, so servers early in the order can use
+    up the time of later servers: those servers get `MOAT-T1-023`, never a silent pass. A server
+    that uses up its share keeps the rows found so far and gets one finding `MOAT-T1-023`
+    (`rules.RuleAnalysisBudget`, a native rule with no YAML file). Its severity is the highest
+    severity of the description and schema rules that `scan` applies, but never lower than high
+    (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with the built-in rules,
+    and critical when a description or schema rule from `--rules` is critical. This severity
+    counts every applied description or schema rule, also one that `--ignore` drops, on purpose:
+    the rules that did not run could have given a finding (fail closed). Its related text is
+    `rule analysis time budget used up; N of M tools not fully checked`. `checkServer`
+    also prints one warning on stderr for that server, with the share that it got, rounded to
+    milliseconds. A server that the step reaches after the step limit, or with a fair share under
+    1 ms (`minServerShare`, the rounding unit of that warning), is not analysed, and the servers
+    after it are not analysed either (`checkTools`). So the late servers are always the last ones.
+    `addLateServer` gives each late server the same row for all its tools, with no warning of its
+    own. At the end, the step prints one line for all such servers (`lateServersText`):
+    `mcpmoat scan: warning: the 30s time limit of the rule analysis left too little time; N
+    servers were not checked`. This is a finding, not an execution error: the exit code follows `--fail-on` (1
+    with the default), and the JSON `complete` stays `true` (see [JSON output](#json-output)). The
+    end of the step limit is not an interrupt: `interrupted` checks the parent context, which
+    ends only on a signal.
   - Errors: a signal during the step prints the interrupted line, prints no report and gives exit
     code 2 (see Signals above). An internal error of the step (a guard: `CheckTool` fails only when
     its context ends) prints `mcpmoat scan: server <name>: the rule analysis failed (internal
@@ -375,14 +442,16 @@ step 5 and step 6:
 - 5e. Only with `--llm` (FR-17), `llmStep` in `cmd/mcpmoat/scan_llm.go` runs after the tool rule
   step: `planLLMJobs` builds the jobs, and `classifyPlan` runs them. It sends the name and
   description of each tool of each server with status `StatusOK` to the classifier, with the
-  secret values of that server (`inspect.Result.Secrets` goes to `llm.Input.Secrets`, and
+  credential values of that server (`inspect.Result.Credentials` goes to `llm.Input.Credentials`, and
   `internal/llm` replaces them before the request). For a stdio server, these values include the
-  secrets in its expanded argv. It adds one advisory row for each tool that the model rates as
-  risky, for each tool with an unusable answer or a refusal of the provider, and for each cut tool
-  (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It only adds rows:
-  it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
-  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step
-  3). The ignored count includes the dropped LLM rows.
+  credentials in its expanded argv. The wide `inspect.Result.Secrets` stays for the local report:
+  it masks the `key` of each LLM row (see Secret values in [The `--llm`
+  classifier](#the---llm-classifier)). It adds one advisory row for each tool that the model rates
+  as risky, for each tool with an unusable answer or a refusal of the provider, and for each cut
+  tool (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It only adds
+  rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
+  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not, also with
+  `--use-ignore-file` (see step 3). The ignored count includes the dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
   tool and a new tool also get a diff, so the user can review the content of a new tool before
   they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
@@ -399,7 +468,10 @@ step 5 and step 6:
   with ` (the diff was cut: review the full tool first)`. When `--ignore` dropped a pin finding of
   that server, it ends with ` (--ignore hid some changes: run scan without it to review them
   first)`. When a kept diff is only a fixed note, it ends with
-  ` (a change has no diff text: review the tool first)`.
+  ` (a change has no diff text: review the tool first)`. When the hint has `shareFull`, it ends
+  with `hintShareFullNote`, after the other notes. Else, when the hint has `storeFull`, it ends
+  with `hintStoreFullNote`. Both notes drop the command and keep the digest, in the terminal and
+  in the JSON `accept` object.
   The command holds the server name, the project and the config path only when each one is a bare
   shell word
   (`isBareShellWord`: the ASCII characters `[A-Za-z0-9._@/:+=-]`, starting with a letter, `_` or
@@ -407,15 +479,18 @@ step 5 and step 6:
   No quoting is safe in all of them, so any other name or path gives a line with no command
   (`acceptCommand`). The line has no command either when the user did not see every change (a cut
   diff, a change that `--ignore` hid, or a diff that is only a note), when the name cannot select
-  the server (`acceptHint.ambiguous`), or when a config file has a problem. `pin` refuses the last
-  two without a `--config` that narrows it, and refuses a config problem until the file is fixed
-  (`acceptSteps`).
+  the server (`acceptHint.ambiguous`), when a config file has a problem, or when `pins.json` has no
+  room for the tools (`acceptHint.storeFull`: `pin --accept` would refuse them). `pin` refuses the
+  ambiguous name and the config problem without a `--config` that narrows it, and refuses a config
+  problem until the file is fixed (`acceptSteps`). The steps still hold the digest.
 - `scan` saves the new pins after it prints the report, so a save error never hides the report
-  (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again with the lock on
-  the pins directory (`readPinsLocked`, see [The `pins.json` store](#the-pinsjson-store)), sets
+  (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again with the pins lock
+  (`readPinsLocked`, see [The `pins.json` store](#the-pinsjson-store)), sets
   only the first-run servers that the file does not hold yet (another run may have pinned them
   meanwhile), saves, and then releases the lock. It releases the lock right after the save, before
-  it prints any line, so a blocked stdout or stderr never holds the lock. The `pinned N tools`
+  it prints any line, so a blocked stdout or stderr never holds the lock. `setNewPins` does the
+  locked work and keeps the warnings and a failure (`saveFailure`), and `printPinSave` prints them
+  after the release. The `pinned N tools`
   lines come after the save, only for the servers it set. When the save created a new pins file
   (`Store.Existed` is false), `printNewPinsFile` prints one line before them. When the first read
   found `pins.json` but the locked read does not, the file was removed while `scan` ran: a save
@@ -423,7 +498,8 @@ step 5 and step 6:
   exits with 2 (`pinsRemovedWhileRunning`). When the file holds a server that this scan wanted to
   pin, with other tools, `scan` prints a warning: this scan did not compare its tools with the pins
   of the other run. Another run can make the file larger after the report, so a server that fitted
-  in 5b can get `pins.ErrStoreFull` here. That server is not pinned and gets a warning on stderr,
+  in 5b can get `pins.ErrStoreFull` here (or `pins.ErrProjectShareFull` for a project server). That
+  server is not pinned and gets a warning on stderr,
   the other servers are still saved, and `scan` exits with 2. The message texts are in [Pins and
   rug pulls](pins.md).
 
@@ -457,13 +533,13 @@ change the exit codes.
    fails, times out or is refused exits with 2, and nothing is written. The inspection warnings go
    to stderr, like in `scan`.
 4. It makes the pins of the tools (`pins.Snapshot`) and compares them with the pins of the read
-   without the lock (`pins.Compare`). It prints the diff of each changed tool and of each new tool
-   on stdout (`report.WriteDiffs`). When the pins file existed at the first read of the command
-   but this read does not find it, the file was removed while the server ran. Then `pin` prints no
-   diff (every tool would look new), saves nothing, prints `pinsRemovedText` and exits with 2
-   (`pinsRemovedWhileRunning`).
-   A server that is not pinned yet has no pins, so `pin` shows every tool as a new tool, with only
-   added lines. A diff that was cut at the size limit gives the same stderr warning as in `scan`.
+   without the lock (`pins.CompareMasked` with the mask of the server). It prints the diff of each
+   changed tool and of each new tool on stdout (`report.WriteDiffs`). When the pins file existed at
+   the first read of the command but this read does not find it, the file was removed while the
+   server ran. Then `pin` prints no diff (every tool would look new), saves nothing, prints
+   `pinsRemovedText` and exits with 2 (`pinsRemovedWhileRunning`). A server that is not pinned yet
+   has no pins, so `pin` shows every tool as a new tool, with only added lines. A diff that was cut
+   at the size limit gives the same stderr warning as in `scan`.
 5. With `--expect`, it computes `pins.Digest` of the snapshot and compares it with the flag value
    before `Store.Set` and `Save`. If they differ, it prints
    `mcpmoat pin: the tools of <server> differ from what scan showed (digest ..., expected ...);
@@ -472,18 +548,20 @@ change the exit codes.
    harmless tools to `scan` and harmful tools to `pin`. `pin` checks the flag with
    `pins.ValidDigest` right after it parses the flags, so an invalid or empty `--expect` exits with 2
    before it reads any file or starts any server.
-6. It reads `pins.json` again with the lock on the pins directory (`readPinsLocked`), sets the
+6. It reads `pins.json` again with the pins lock (`readPinsLocked`), sets the
    pins of this server only (`Store.Set`) on that store, saves the file, and then releases the
    lock. It releases the lock right after the save, before it prints any line, so a blocked stdout
-   or stderr never holds the lock. The diffs of step 4 come from the read without the lock, so a
-   slow reader of stdout (a pager) never holds the lock. When the file existed at the first read
-   of the command (or at the read for the diffs) but not at the locked read, it was removed while
-   `pin` ran: `pin` saves nothing, prints `pinsRemovedText` and exits with 2
+   or stderr never holds the lock (`saveAccepted` keeps a failure in a `saveFailure`, as `scan`
+   does, and prints it after the release). The diffs of step 4 come from the read without the
+   lock, so a slow reader of stdout (a pager) never holds the lock. When the file existed at the
+   first read of the command (or at the read for the diffs) but not at the locked read, it was
+   removed while `pin` ran: `pin` saves nothing, prints `pinsRemovedText` and exits with 2
    (`pinsRemovedWhileRunning`). When the entry of this server changed between the two reads, `pin`
    warns that the diff is against the older pins. The counts
    of step 7 come from the locked store. Other servers keep their pins, and so do entries that
    another run wrote. A `pins.json` problem exits with 2. When `Set` refuses the server with
-   `pins.ErrStoreFull`, `pin` prints a message that the pins file is full (see [Pins and rug
+   `pins.ErrStoreFull`, `pin` prints a message that the pins file is full, or that the project
+   share of the pins file is full when the error is `pins.ErrProjectShareFull` (see [Pins and rug
    pulls](pins.md)), saves nothing and exits with 2. When the save created a new pins file,
    `printNewPinsFile` prints one line on stderr before step 7.
 7. It prints `accepted <server>: N new, N changed, N removed` on stdout, with `, N not verified`
@@ -543,8 +621,29 @@ keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000 lines. 
 applies, the diff ends with a marker line and `Change.Truncated` is true, so `scan` and `pin` can
 warn the user. The labels are `pinned` and `current`. A changed or new tool always has diff text, or
 a fixed note when the diff cannot be made or the change is not visible in the rendered text. Server
-text is raw in the diff. The report layer escapes it (see [Where untrusted text is
-escaped](#where-untrusted-text-is-escaped)).
+text is raw in the diff, apart from the mask below. The report layer escapes it (see [Where
+untrusted text is escaped](#where-untrusted-text-is-escaped)).
+
+Masked diffs: `scan` and `pin` call `pins.CompareMasked(stored, current, mask)`. `pins.Compare` is
+the same call with a nil mask. The mask comes from `cmd/mcpmoat` (`compareMask` in
+`pins_shared.go`, over one `discover.TextRedactor` for each server, built from
+`inspect.Result.Secrets`), so `internal/pins` needs no list of secrets. `discover.NewTextRedactor`
+reads the values and builds the border table of the search for each value once, and every string of
+a pin diff reuses them. The search still runs once for each configured value, so a hostile config
+with very many values makes a large diff slower. A multi-pattern search would fix that (a
+follow-up). `render` applies the mask to the decoded text of both sides before the 200-rune wrap,
+the trim and the 64 KiB cut: to the name, the title, the description, and every JSON string value,
+key and number of the annotations, `_meta`, icons and schemas (`maskJSON`). So a wrap or a cut
+cannot leave a part of a value, and a JSON escape in the server text (`\"`, `\u0041`) cannot hide
+one. This holds for how the server writes the value, not for the value itself: the mask compares the
+decoded bytes, so a configured value that holds a backslash sequence (the Windows path
+`C:\tools\new_dir` holds `\t` and `\n`) is not found when the server sends a real tab and newline
+there, and the escaped output then shows the value again. `CompareMasked` also masks `Change.Tool`
+and keeps the real name in `Change.RawTool`, which only the ignore lookup reads and which is never
+printed. The verdicts, the hashes, the digest and `pins.json` use the raw text. When the hashes
+differ but the masked texts are equal, the diff is the fixed note `the tool changed only in text
+that holds a secret value from the config, so the diff is hidden`. For the limits of this mask, see
+Known limits in [The `pins.json` store](#the-pinsjson-store).
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
@@ -657,31 +756,48 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   never holds args, a URL, env, headers or a command from your configs.
 - Echo residual risk: a server can echo an env value that you configured into a tool description.
   That text then lands in the canonical text in `pins.json`. mcpmoat cannot tell such a value from
-  other text. The same is true for a URL from the server, such as a signed icon `src` with a token
-  in it. The file and the pin diff can hold it. The file has mode `0600`, so treat it as private.
+  other text in the file. The same is true for a URL from the server, such as a signed icon `src`
+  with a token in it. The file has mode `0600`, so treat it as private. The pin diff masks the
+  configured values of the server (`pins.CompareMasked`, see Masked diffs in [Tool
+  hash](#tool-hash)), but not a URL token that the server made itself. For a value that is no
+  longer configured, see Known limits below.
 - Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
   an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
   server and refuses it on its own, with a size cap of 2 MiB for each server (compact JSON), so the
   caller can still save the others. The server chose the data that `Set` refuses, so the caller must
   report a refused server, never skip it silently: a server that is never pinned looks new on each
   run, and its changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync,
-  rename). A new directory gets mode `0700`. The rules, the caps and the other error texts are in
-  the doc comments of `Load`, `LoadLocked`, `Set` and `Save` in `internal/pins/store.go`.
+  rename) through the open pins directory (see Write below). A new directory gets mode `0700`.
+  The rules, the caps and the other error texts are in the doc comments of `Load`, `LoadLocked`,
+  `Set` and `Save` in `internal/pins/store.go`.
 - Size budget: the whole file has a limit of 32 MiB, as the indented JSON that `Save` writes. The
   `Store` knows the size of that file without an encode, so `Set` also refuses a server whose entry
   would make the file larger than the limit, with an error that wraps `ErrStoreFull`. The store
   does not change, so the servers that fit are still saved and only the refused server is not
   pinned. `Set` refuses only growth: a change that does not make the file larger, such as a smaller
   replacement of a server, is always accepted. `Clone` returns a copy of the store, so `scan` can
-  call `Set` on the copy to learn whether a server fits before it prints the report (see 5b),
-  without a change to the real store. The size check in `Save` stays as a backstop. The format of
-  `pins.json` did not change, so its version stays 1.
+  call `Set` on the copy to learn whether a server fits before it prints the report (see 5b and
+  5c), without a change to the real store. `CheckSet` runs the same checks as `Set` and returns the
+  same errors, but changes nothing, so `scan` can test one accept hint at a time. The size check in
+  `Save` stays as a backstop. The format of `pins.json` did not change, so its version stays 1.
+- Project share: the project servers (an identity with a `project_path`: a project `.mcp.json`,
+  `.cursor/mcp.json` and the `projects.<path>` servers of `~/.claude.json`) may use at most 16 MiB
+  of the file together (`pins.ProjectShareMiB`, half of the file limit). The `Store` counts their
+  entry bytes with the same measure as the file size. `Set` refuses a project server that would
+  make them larger than the share, with an error that wraps both `ErrProjectShareFull` and
+  `ErrStoreFull`, so a caller that tests only for `ErrStoreFull` still sees a full store. A project
+  config can come from a cloned repository, so the share keeps it from filling the file: the
+  servers of the user scope (no `project_path`) do not count toward the share and always keep the
+  other 16 MiB. The share refuses only growth, like the file limit, and `Load` reads a file whose
+  project servers are already over the share.
 - Owner and mode check: `Load` and `LoadLocked` refuse an unsafe pins directory or `pins.json`, and
-  `Save` refuses an unsafe pins directory. Unsafe means that another user owns the path, that group
-  or others can write it (mode bits `0o022`), or (macOS only) that its ACL lets a user or group
-  write it. The error wraps `ErrInsecurePermissions` and names the path, the mode and a fix (the
-  texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so the user must fix
-  an unsafe path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any
+  `Save` refuses an unsafe pins directory. The `Save` of a `Store` from plain `Load` also refuses an
+  unsafe parent directory, because it opens the directory again (`openPinsDir`, see Write). Unsafe
+  means that another user owns the path, that group or others can write it (mode bits `0o022`),
+  or (macOS only) that its ACL lets a user or group write it. The error wraps
+  `ErrInsecurePermissions` and names the path, the mode and a fix (the texts are in
+  [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so the user must fix an unsafe
+  path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any
   server starts. Both commands read the file again just before they save, and then they save. That
   second read and the save can refuse after the servers ran, because a mode can change while `scan`
   inspects them. Modes such as `0755` for a directory and `0644` for a file pass: pins are not
@@ -710,15 +826,19 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   `os.Stat` shows only the target. The sticky bit of a parent such as `/tmp` does not stop another
   user from creating a symlink there and pointing it to another directory later.
 - Parent directories: `Load` and `LoadLocked` first check each parent directory of the pins
-  directory, up to `/` (`checkParents`). `checkParentsAs` resolves the path one part at a time, as
-  the kernel does, and does not use `filepath.EvalSymlinks`. It starts at `/`. For a symlink it
+  directory, up to `/` (`checkParents`). So does the `Save` of a `Store` from plain `Load`, because
+  it opens the directory again with `openPinsDir`. `checkParentsAs` resolves the path one part at a
+  time, as the kernel does, and does not use `filepath.EvalSymlinks`. It keeps the state of the walk
+  in a small struct (`parentWalk`), with one method for each step (`checkRoot`, `enterDir`,
+  `followSymlink` and `checkDir`). It starts at `/`. For a symlink it
   checks the owner, reads the target with `os.Readlink` and goes on inside the target (from `/` for
   an absolute target, from the directory that holds the link for a relative one). A `..` goes up
   from the directory that the walk has reached, not from the written path. It stops with an error
   after 40 symlinks, which also ends a loop. So when `~/.config` is a symlink to `/data/cfg`,
   `/data` is checked too, and so is a link that `/data/cfg` is itself. Every directory above the
   pins directory that the walk passes, also one that holds a symlink or lies inside a link target,
-  gets the owner and mode check once. A parent is refused when a user that is neither the current
+  gets the owner and mode check once, and on macOS the ACL check (see the ACL item) when the owner
+  and the mode pass. A parent is refused when a user that is neither the current
   user nor root owns it, or when group or others can write it, unless the sticky bit is set (as on
   `/tmp`), and a symlink that such a user owns is refused (see the symlink rule above). When more
   than one entry is unsafe, the error names the last one that the walk found, which is the one
@@ -734,10 +854,17 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   user write a path that passes the mode check. `checkACL` reads the ACL of the open pins directory
   and of the open `pins.json` with the `fgetattrlist(2)` system call, as a raw syscall without cgo.
   It refuses any allow entry that holds a write-class right, for any principal. The fix hint is
-  `chmod -N -- '<path>'`, which removes the whole ACL. A deny entry passes, for example the
-  `everyone deny delete` entry that macOS puts on home directories. The check fails closed: an ACL
-  that it cannot read or parse is refused. On Linux, POSIX ACL entries show in the group bits of
-  the mode, so the mode check already catches them. Other systems are out of scope.
+  `chmod -N -- '<path>'`, which removes the whole ACL. `checkParentACL` applies the same rule to
+  each parent directory that the parent walk checks. It reads the ACL by path with
+  `getattrlist(2)` and `FSOPT_NOFOLLOW`, because the walk is by path, and a read by path needs only
+  search permission on the directories above it. Its fix hint removes only the bad entry, by its
+  index: `chmod -a# <N> '<path>'` (`ls -led` shows N), `ask root to run chmod -a# ...` when root
+  owns the parent, `ask the owner or root to run chmod -a# ...` when another user owns it, or a
+  private `XDG_CONFIG_HOME`. It never gives `chmod -N` for a parent: on a home directory that would
+  also remove the deny entry. The lock file has a stricter rule (see Lock). A deny entry passes,
+  for example the `everyone deny delete` entry that macOS puts on home directories. The check fails
+  closed: an ACL that it cannot read or parse is refused. On Linux, POSIX ACL entries show in the
+  group bits of the mode, so the mode check already catches them. Other systems are out of scope.
 - First run: a missing `pins.json` or a missing pins directory is a first run. The store is empty
   and `Store.Existed` returns false. `checkFirstRunWith` walks up to the nearest part of the path
   that exists. That part must be a directory or a symlink to one. A part that is a file, or a
@@ -757,50 +884,94 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
 - Lock: `scan` and `pin --accept` read `pins.json` again just before they save with `LoadLocked`
   (`readPinsLocked` in `cmd/mcpmoat/pins_shared.go`), and hold the lock through `Set` and `Save`.
   So two parallel runs keep each other's changes. The lock is an exclusive advisory `flock(2)` on
-  the open handle of the pins directory, not on a lock file: that needs no extra file, has no
-  symlink or FIFO risk at a lock path, and works on a read-only directory. To lock the same
-  directory on every run, `LoadLocked` creates a missing pins directory (mode `0700`) first. The
-  first read, before any server starts, and the read for the diffs of `pin --accept` take no lock,
-  so a slow server or a slow reader of stdout never holds it. While another run holds the lock, the
-  run tries again for up to 10 seconds (`defaultPinsLockWait` in `cmd/mcpmoat/cli.go`). Then it
-  prints the read error (which wraps `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal
-  during the wait gives the interrupted line. When the system or the file system cannot lock the
-  directory (for example some network mounts), `LoadLocked` goes on without the lock
-  (`Store.RanWithoutLock`), and the run prints one warning. The texts of both lines are in
-  [Pins and rug pulls](pins.md). `scan` and `pin --accept` release the lock right after the save,
-  before they print. The code is in `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`).
+  the lock file `pins.json.lock` in the pins directory (the pins file name plus `lockSuffix`), not
+  on the directory: `flock` needs only a read-only descriptor, so with a pins directory of mode
+  `0755` another user could hold a lock on the directory and block every save. `openLockFile`
+  opens the lock file through the same `os.Root` as the directory check, after that check and
+  before the read of `pins.json`. It opens an existing file with no create, and creates a missing
+  one with `O_EXCL` and mode `0600`. When the create fails because another run created the file
+  meanwhile, it opens that file. When the file is gone again before that open, it creates it again,
+  at most 3 times in all (`maxLockCreates`). That open can still fail with "permission denied" for
+  a moment, when another run created the file with a very narrow umask and has not set mode `0600`
+  yet. Then the run exits with 2, and running the command again works. It refuses, with an error
+  that wraps `ErrInsecurePermissions`, a lock file that is not the directory entry itself
+  (`os.SameFile` of the open file and `root.Lstat`: a symlink or an entry swapped after the open),
+  that is not a regular file, that another user owns, that gives the group or others any access
+  (`checkLockFile`: mode `0600` passes, `0644` is refused), or (macOS only) whose ACL has an allow
+  entry with a read, execute or write right (`checkLockFileACL`). The fix hint (`lockFileFix`) is
+  `rm -- '<path>', then mcpmoat makes a new one with mode 0600`, or `rmdir -- '<path>', ...` when
+  the lock entry is a directory. The ACL refusal uses the same hint. mcpmoat never changes the mode
+  of an existing lock file, and a `chmod` would not help: a descriptor that another user opened
+  before stays valid. So only the current user and root can hold the lock. To have a directory for
+  the lock file, `LoadLocked` creates a missing pins directory (mode `0700`) first. The lock file
+  stays in the directory after the run, also after a run that saves nothing. A read-only pins
+  directory (for example mode `0500`) works only when the lock file already exists. Else
+  `LoadLocked` cannot create it and returns an error that names the lock file and does not wrap
+  `ErrLocked`, and the run exits with 2. The first read, before any server starts, and the read for
+  the diffs of `pin --accept` take no lock, so a slow server or a slow reader of stdout never holds
+  it. While another run holds the lock, the run tries again for up to 10 seconds
+  (`defaultPinsLockWait` in `cmd/mcpmoat/cli.go`). Then it prints the read error (which wraps
+  `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal during the wait gives the
+  interrupted line. When the system or the file system cannot lock the lock file (for example some
+  network mounts), `LoadLocked` goes on without the lock (`Store.RanWithoutLock`), and the run
+  prints one warning. The texts of both lines are in [Pins and rug pulls](pins.md). `scan` and
+  `pin --accept` release the lock right after the save, before they print. The code is in
+  `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`, and `checkLockFile` in
+  `perm_unix.go`).
+- Write: `Save` writes through an open `os.Root` of the pins directory, never by path
+  (`atomicWriter.writeFile` in `atomic.go`). A `Store` from `LoadLocked` keeps the root, a handle of
+  the directory and its file info until the release, so `Save` writes to the directory that
+  `LoadLocked` checked and whose lock file it locked. `Save` checks that handle again first
+  (`checkDirHandle`). A `Store` from `Load` holds no lock and keeps nothing open (read-only paths
+  and tests use it), so its `Save` opens the directory again with the same checks as `LoadLocked`
+  (`openPinsDir`: the parent walk, a missing directory created, the handle check). The steps are: a
+  temp file `.pins-<26 base32 chars>.tmp` created through the root with `O_EXCL` and mode `0600`, the
+  write, fsync and close; then a check that the path still names that directory
+  (`verifyPinsDir`: `os.Stat` and `os.SameFile` with the file info of the handle); then the rename
+  through the root and a sync of the directory. The directory sync is best effort, and its error is
+  ignored on every system. When the directory was moved, removed or replaced, `Save` fails with an
+  error that wraps `ErrPinsDirChanged`, removes the temp file and saves nothing, and the command
+  exits with 2. So when run A holds the lock and the directory is removed, and run B then creates
+  a new directory and locks its new lock file, A fails and does not write to a directory that the
+  next run does not read. A `Save` after the release function of `LoadLocked` fails, because the
+  directory is closed. A `Clone` of a locked `Store` shares its open directory.
 
 Known limits:
 
-- `Save` checks the pins directory by path (`checkDirPerm`), not on an open handle as `Load` does,
-  and it does not read the ACL. It checks after it created a missing directory
-  (`atomicWriter.writeFile`), so a directory that another user made in the meantime is refused
-  too. A swap of the path between this check and the write is not detected. Only root, or a user
-  who can write a parent (which the parent check refuses), can make that swap. `Save` does not
-  check the old `pins.json`, because the rename replaces it.
+- The mask of the pin diffs and of the tool names (`pins.CompareMasked`) uses the values that are
+  configured now. A value that is no longer configured (for example a rotated token) and that is
+  still in an old pin can show on the pinned side of a diff. A value that a server splits over two
+  JSON strings, or over the tool name and the description, is not found. `pins.json` keeps the raw
+  text (see Echo residual risk above).
+- `Save` checks right before the rename that the path still names the directory that it writes
+  to, but a small window remains between this check and the rename. Only the current user or root
+  can move the pins directory in that window, because the parent check refuses a parent that
+  another user can write. `Save` does not check the old `pins.json`, because the rename replaces
+  it.
 - The parent check is by path, by design (see above). It trusts root.
 - The parent check refuses a parent that the group can write, also when the group holds only you.
   For example, a `~/.config` made with umask 002 (mode `0775`) is refused until
   `chmod go-w ~/.config`.
-- ACLs on the parent directories are not checked, also on macOS. Only the pins directory and
-  `pins.json` get the ACL check. So an allow ACL entry for another user on `~/.config` or `~` (for
-  example `delete_child`) is not detected, and that user could remove or replace the `mcpmoat`
-  directory.
 - The ACL check cannot map the principal of an entry to a user or a group without cgo. So it
-  refuses an allow entry with a write right also when the entry is for your own account (fail
-  closed). `chmod -N` removes it.
+  refuses an allow entry also when the entry is for your own account (fail closed). The fix hint
+  removes it (`chmod -N` on the pins directory or `pins.json`, `chmod -a#` on a parent, `rm` on
+  the lock file).
 - The lock is advisory, so it stops only runs that lock too. mcpmoat v0.1.0 takes no lock, so a
   v0.1.0 run in parallel with a newer run can still lose an update (the last writer wins).
-- Any local process that can open the pins directory can hold the lock, also a process of another
-  user when the directory has mode `0755` (that mode passes the check). Such a process blocks
-  pinning: `scan` and `pin --accept` wait 10 seconds and exit with 2 (fail closed).
+- The current user and root can still hold the lock, for example with a process that opened the
+  lock file and hangs. Then `scan` and `pin --accept` wait 10 seconds and exit with 2 (fail
+  closed).
 - A file system that cannot lock (some network mounts) runs without the lock after one warning, and
   a parallel run can still lose an update. On systems that are not Unix, such as Windows, there is
-  no lock at all: the run prints the same warning. Windows is a non-goal (PRD section 2.2).
-- A locked run creates a missing pins directory before it takes the lock. When the run then saves
-  nothing, an empty directory with mode `0700` remains.
-- On systems that are not Unix, such as Windows, the owner, mode and parent checks and the
-  directory sync are skipped, because the mode bits are mostly ignored there.
+  no lock at all: the run still opens the lock file and prints the same warning. Windows is a
+  non-goal (PRD section 2.2).
+- A locked run creates a missing pins directory and the lock file before it takes the lock. The
+  lock file stays after every run, so a run that saves nothing leaves a directory with mode `0700`
+  that holds only `pins.json.lock`.
+- A read-only pins directory works only when `pins.json.lock` already exists in it (see Lock).
+- On systems that are not Unix, such as Windows, the owner, mode and parent checks, and the owner
+  and mode check of the lock file, are skipped, because the mode bits are mostly ignored there.
+  The directory sync of `Save` still runs there, and its error is ignored, as on every system.
 - Some file systems report fixed mode bits that `chmod` cannot change (for example FAT, some
   network mounts and WSL `/mnt/c`). The check can then refuse the pins directory at once, also a new
   one. Set `XDG_CONFIG_HOME` to a path on another volume.
@@ -815,12 +986,12 @@ Known limits:
   servers at full size fill the 32 MiB file. Then the servers that are already in the file stay,
   and each new server that does not fit is not pinned (a high MOAT-T2-004 finding) until the user
   removes old entries. mcpmoat never removes a server from the file itself.
-- The 32 MiB budget is first come, first served, and nothing prunes old entries. So the servers of
-  a hostile project config can fill the file, and later servers are then not pinned. Each refused
-  server is reported, never skipped silently. The user removes servers from `pins.json` by hand.
-- At report time, the budget check (`pinner.budget`) covers only servers that are pinned for the
-  first time. A pinned server whose tools grew still gets the "To accept" line, and
-  `pin --accept` can then refuse it with exit 2 because the file is full.
+- The 32 MiB budget is first come, first served, and nothing prunes old entries. The project share
+  stops the servers of a project config from filling the whole file, but it does not protect one
+  project from another: all project servers share the 16 MiB. So the servers of a hostile project
+  config can use up the share, and later project servers are then not pinned. The servers of the
+  user scope can still fill the whole file. Each refused server is reported, never skipped
+  silently. The user removes servers from `pins.json` by hand.
 - `Save` writes indented JSON, and the 32 MiB cap applies to that form. A compact file near the cap,
   for example from a hand edit, loads but cannot be saved.
 
@@ -854,7 +1025,9 @@ of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pi
 MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too. The budget finding
 MOAT-T1-023 has no YAML file, so its title, risk and fix are fixed texts in
 `cmd/mcpmoat/scan_tools.go` (`budgetTitle`, `budgetRisk`, `budgetRemediation`). The cap finding
-MOAT-T1-024 has fixed texts there too (`capTitle`, `capRisk`, `capRemediation`). The LLM findings
+MOAT-T1-024 has fixed texts there too (`capTitle`, `capRisk`, `capRemediation`). The config cap
+finding MOAT-T4-005 has fixed texts in `cmd/mcpmoat/scan_findings.go` (`configCapTitle`,
+`configCapRisk`, `configCapRemediation`). The LLM findings
 MOAT-LLM-001 and MOAT-LLM-002 have fixed titles, risk texts and remediations in `internal/llm`
 (`Title`, `Category.Text`, `Remediation`, `InvalidTitle`, `InvalidText`, `InvalidRemediation`). No
 text from the model reaches them.
@@ -863,10 +1036,11 @@ The summary and the findings are the report. They are not logs, so they stay on 
 do not change the exit code, which counts findings only (FR-16).
 
 The failure reason of a server in the summary can hold error text from the server. `scan` prints it
-on stdout, and `pin` prints it on stderr. So the known gap of `internal/inspect` (an expanded
-variable value shorter than 8 bytes is not scrubbed from error text, see "Secrets" in
-`internal/inspect/doc.go`) applies to stdout too. `termsafe` makes the text safe for a terminal,
-but it does not remove a secret.
+on stdout, and `pin` prints it on stderr. So the known gap of `internal/inspect` applies to stdout
+too: a configured value shorter than 8 bytes is removed from error text only where it stands as a
+whole word (see `replaceWords` in `internal/inspect/scrub_words.go` and "Known limits" in
+`internal/inspect/doc.go`), so a hostile server that glues a letter to the value can still show
+it. `termsafe` makes the text safe for a terminal, but it does not remove a secret.
 
 Colour (FR-14, NFR-07) is decoration. Every severity and status also shows as a word, so the plain
 output is complete. `report.Style` holds one switch, `Color`. `cmd/mcpmoat` sets it in
@@ -900,7 +1074,8 @@ Shape (`schema_version` 4):
 - `ignored` is always there. It has `total` (the number of findings that an ignore entry dropped:
   the number in the `N findings ignored` line on stderr), `rules` (the count for each rule ID; `{}`
   when nothing was ignored; the keys are rule IDs, never text from the ignore file) and
-  `file_entries` (the number of entries that `scan` read from `.mcpmoat-ignore`). The dropped
+  `file_entries` (the number of entries that `scan` read from `.mcpmoat-ignore`; 0 without
+  `--use-ignore-file`). The dropped
   findings are not in `findings`, so a CI job reads these counts to see what the ignore list hid.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
@@ -909,9 +1084,15 @@ Shape (`schema_version` 4):
   share of their server of the `--llm` cap. The exit code is then 2, and the reason is on stderr
   only. A refusal of one tool alone does not change `complete`: it is a `MOAT-LLM-002` row. A
   failed save of new pins comes after the document is written, so it does not change `complete`:
-  the findings are whole, and the exit code is 2. A server that used up its rule analysis budget
-  does not change `complete` either: it is a `MOAT-T1-023` finding (see 5d). A server that has
-  more tool findings than the row cap does not change it either: it is a `MOAT-T1-024` finding.
+  the findings are whole, and the exit code is 2. A server that used up its share of the rule
+  analysis time, or that the step did not analyse at all, does not change `complete`
+  either: it is a `MOAT-T1-023` finding (see 5d). This is a decision (#210): the `MOAT-T1-023`
+  row of each such server is the marker for an incomplete rule analysis. `complete` `false` would
+  force exit code 2, so hostile input could turn a finding into an execution error, against the
+  meaning of FR-16. There is no new field and no schema change. A CI job must check the findings
+  for `MOAT-T1-023`, not only `complete`. A server that has more tool findings than the row cap,
+  or more config findings than a config cap, does not change `complete` either: it is a
+  `MOAT-T1-024` or a `MOAT-T4-005` finding.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report. A server
@@ -957,7 +1138,12 @@ Redaction: the document never holds env or header values, the working directory 
 error text from a server or from the OS. A server entry holds no env or header data. A finding
 names the key it is about in `key` (and `related`): the key name only, never its value, as in the
 terminal table. `ScanReport` has no field for the rest. The `argv` and the `url` are redacted when
-the JSON types are built.
+the JSON types are built. A tool name in `key` (tool rule, pin and LLM findings) and the `tool` and
+`diff` of each `diffs` entry show each value of `inspect.Result.Secrets` (8 bytes or more) that the
+server echoes as `********`. `cmd/mcpmoat` masks them before it builds the rows (`maskedToolKey`
+in `scan_tools.go`, and `pins.CompareMasked` with `compareMask` for the pin rows and diffs), so the
+terminal and the JSON output get the same text. No field says that a value was masked. A shorter
+value is not masked. The ignore lookup uses the real tool name.
 
 Escaping: names, paths and diffs come from untrusted servers and configs. Valid UTF-8 text stays
 exact, so a JSON parser gets the original back. `encoding/json` writes invalid UTF-8 as U+FFFD.
@@ -998,11 +1184,11 @@ Not in version 4: a summary, `pin --json` and `--fail-on` (#65).
 
 ### Size bound
 
-`scan --json` bounds the text of each field, the number of tool findings for each server and the
-memory of the writer, also for a hostile config. A project `.mcp.json` can hold a server name of
-megabytes, and every finding row of that server repeats it. The bound has three parts. It does not
-bound the whole document: the config findings, the pin findings and the LLM findings have no row cap
-(see part 2).
+`scan --json` bounds the text of each field, the number of tool findings for each server, the
+number of config findings and the memory of the writer, also for a hostile config. A project
+`.mcp.json` can hold a server name of megabytes, and every finding row of that server repeats it.
+The bound has three parts. The pin findings and the LLM findings have no row cap of their own, but
+other limits bound them (see part 2).
 
 1. Per-field caps (`boundReport` in `internal/report/json_bound.go`). `WriteJSON` cuts each
    untrusted text field to a number of characters (runes) and adds `...` (`termsafe.CutMarker`)
@@ -1034,17 +1220,20 @@ bound the whole document: the config findings, the pin findings and the LLM find
      scan, so also at most 10,000;
    - plus the LLM rows: the scan sends at most 500 tools in all (`maxLLMTools`), and the LLM step
      adds at most one row for each tool;
-   - plus the config rows (T4 and T5). These have no bound of their own. `secretFinding` in
-     `internal/rules/config.go` makes one row for each env key and each header key that looks like a
-     secret, so the number of config rows is limited only by the size of the config file: 32 MiB
-     for a global file (`maxConfigSize`) and 4 MiB for a project file (`maxProjectConfigSize`).
+   - plus the config rows (T4 and T5), at most 100 (`configRowsPerServer`), plus one `MOAT-T4-005`
+     row (see step 5). `secretFinding` in `internal/rules/config.go` makes one row for each env key
+     and each header key that looks like a secret, so before the cap the number of config rows is
+     limited only by the size of the config file: 4 MiB for a project file and a `--config` file
+     (`maxProjectConfigSize`), and 32 MiB for a global file such as `~/.claude.json`
+     (`maxConfigSize`).
 
-   The pin rows, the LLM rows and the config rows are not capped by the row cap. A config file can
-   hold at most 10,000 servers (`maxServersPerFile` in `internal/discover`), so the number of
-   servers multiplies the bound. The field caps still cut the text of every row, but a hostile
-   32 MiB config file with a very large number of short env keys can give a very large number of
-   rows, and each row repeats the server name (up to 515 characters). The JSON can then be hundreds
-   of MB. A cap for the config findings is planned as a follow-up (issue #213).
+   The pin rows and the LLM rows are not capped by a row cap. A config file can hold at most 10,000
+   servers (`maxServersPerFile` in `internal/discover`), so the number of servers multiplies their
+   bound. The config rows have a cap for the whole scan too: at most 10,000 (`configRowsTotal`),
+   plus one `MOAT-T4-005` row for each server that lost rows. That last part is bounded by the
+   number of servers, as the server list is. The field caps still cut the text of every row, and
+   each row repeats the server name (up to 515 characters). [Limits](limits.md) has the row counts
+   and output sizes that were measured with and without the config caps (#213).
 3. Streaming writer. `WriteJSON` writes the document one list element at a time, through a
    buffered writer (`jsonStream`). It encodes each server, finding, diff and error on its own, so
    the memory follows the largest element and not the whole document. The output bytes are the
@@ -1052,9 +1241,11 @@ bound the whole document: the config findings, the pin findings and the LLM find
    in the middle, `w` may already hold the first part of the document. `WriteJSON` returns the
    error, and `scan` reports it and exits with 2.
 
-The tests prove the bound of the writer and of the tool rows. The exact measured numbers are in the
-comments of the tests, so they stay with the code. The limits have headroom of about 2 times, so a change that makes the output or the allocations grow with the
-size of a name fails them. No test covers the config rows, because they have no cap.
+The tests prove the bound of the writer, of the tool rows and of the config rows. The exact measured
+numbers are in the comments of the tests, so they stay with the code. For the config rows, they are
+in [docs/limits.md](limits.md) and in the comments of `TestScanJSONConfigBound`. The limits have
+headroom of about 2 times, so a change that makes the output or the allocations grow with the size
+of a name fails them.
 
 - `TestWriteJSONBoundsOutputAndMemory` (`internal/report/json_bound_test.go`) tests the writer
   alone. The hostile report has a server name of 1 MiB and 10,000 findings. In each finding, the
@@ -1074,6 +1265,15 @@ size of a name fails them. No test covers the config rows, because they have no 
   output (`maxScanAllocBytes` and `maxJSONAllocFactor`). Under `-race` the race detector makes `regexp`
   allocate far more, so the check could not catch a regression there. The test skips the check and
   uses fewer tools in that mode.
+- `TestScanJSONConfigBound` (`cmd/mcpmoat/scan_json_bound_test.go`) runs `scan --no-connect` on
+  hostile 4 MiB project files (1 MiB under `-race`), with server names of 600 characters. It checks
+  the row count, the output size (at most 256 KiB for one server, 16 MiB for many servers), the
+  `MOAT-T4-005` rows and, only without `-race`, an allocation bound of 384 MiB plus a multiple of
+  the output. The caps bound the rows and the output, not the memory before the cut: discovery
+  decodes the whole file, and `rules.CheckConfig` makes one finding for each key first. So the
+  scan gives at most 10,000 config rows plus one `MOAT-T4-005` row for each cut server. The JSON
+  and terminal output of a 4 MiB file stay under about 10 MB, and the scan still allocates about
+  200 to 250 MiB. The measured numbers are in [docs/limits.md](limits.md).
 
 ## The `--llm` classifier
 
@@ -1180,56 +1380,69 @@ What is sent: `internal/llm` builds one request for each tool from the fixed sys
 with `tool_name`, `tool_description`, `truncated` and, only after a replacement, `redacted`. The
 description goes into it as a JSON string value, never into the system prompt, so it cannot change
 the instructions of the model.
-`cmd/mcpmoat` gives `internal/llm` only the name, the description and the secret values of the
-server (see [Import direction](#import-direction)).
+`cmd/mcpmoat` gives `internal/llm` only the name, the description and the credential values of
+the server (see [Import direction](#import-direction)).
 
 Secret values: a server gets the env values, the header values, the URL secrets and the expanded
 placeholder values from its config, and a stdio server also gets its expanded argv. It can echo
-all of them in its tool text. So the path is:
+all of them in its tool text. `inspect` gives two lists: the wide `Result.Secrets` for the local
+report, and its subset `Result.Credentials` for the request. So the path is:
 
 1. On success, `inspect` puts these values in `inspect.Result.Secrets` (`resultSecrets` in
    `internal/inspect/secrets.go`). For a stdio server, `argSecrets` adds the secrets in the
    expanded command and args: the text that `discover.RedactArgs` masks, from
-   `discover.ArgSecrets`, which runs the same code. That is the value of a secret-like flag, the
-   value in `-e NAME=V`, a header line and its credential, an arg masked whole (a DSN,
-   `user:pass`, a token-like value), the secret URL parts and the masked path segments.
-   `ArgSecrets` also returns the smaller parts that a server can echo alone: each value after `=`
-   (or after `:` in JSON-like text) in a masked text, the query values and the password of a URL
-   masked whole (such as a JDBC URL), the bare token in `-p<token>`, `--<token>` and `<token>=1`,
-   and a user name next to a password in a URL when `discover.IsSecretUserName` says so (a
-   token-like name, or 8 bytes or more with a digit). Package names and plain args are not in the
-   list. `RedactArgs` fails closed, so some text that is not secret is in the list too (a long
-   random-looking path segment, a nix hash, a UUID, a name with spaces), and `--llm` replaces it
-   in the tool text. The inner values over-match on purpose: they can add a plain word of 8 bytes
-   or more from a masked arg, such as `Negotiate` after a header colon. The limits of `RedactArgs`
-   (such as `--db mypassword` or a positional value) are in its doc comment in `internal/discover`.
+   `discover.ArgSecrets`, which runs the same code, and the smaller parts of it that a server can
+   echo alone. For the env values, the expanded values and the header values, `valueCredentials`
+   (in `secrets.go`) adds the credential pieces that `discover.ArgCredentials` finds inside each
+   value. `cookieSecrets` (in `remote.go`) adds the cookie pieces, and `urlCredentials` the URL
+   credentials. A piece under 8 bytes goes only to the whole-word scrub list of the failure text.
    Each value has at least 8 bytes and is in the list one time, longest first. The values are
-   `discover.Secret`, so they print and encode only as the mask.
-2. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the slice of each server into
-   `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
-   the tools of that server.
-3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`discover.MinSecretBytes`) with
-   `discover.Mask` (`********`) in the name and the description, before the cut, so a cut cannot
-   leave a part of a secret. `secretValues` adds, for a value that is not valid UTF-8, the form
-   that the JSON decoder of the SDK gives (one U+FFFD for each invalid byte), because a server
-   that echoes the value sends that form. `redactWindow` marks every byte of every match first,
-   also of matches that overlap, then writes one mask for each run of marked bytes. To bound the
-   work, `redactPrefix` redacts only a window of the first limit+1 bytes (the limit is
-   `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and doubles it while the masks make the
-   result too short. Its result is always a prefix of the full redaction, so the text and the cut
-   are the same. The message has `redacted: true` when a mask starts in the first limit+1 bytes of
-   the redacted name or description, also when the cut then removes it. The field is omitted
-   otherwise. A secret that starts or ends with `*`, or holds a whole mask, can show again across
-   a mask (a documented limit). The system prompt tells the model that the mask is removed text,
-   not an instruction.
+   `discover.Secret`, so they print and encode only as the mask. The doc comment of
+   `inspect.Result.Secrets` lists every value and piece, and the doc comment of `RedactArgs` holds
+   its limits (such as `--db mypassword` or a positional value).
+2. `inspect` also puts the values of `Result.Secrets` that look like a credential in
+   `inspect.Result.Credentials` (`resultCredentials` in `internal/inspect/secrets.go`), in the
+   same order. `isCredential`, `holdsCredential`, `headerCredentials` and `urlCredentials` decide,
+   with `discover.IsSecretName`, `discover.TokenLike`, `discover.IsAuthScheme` and
+   `discover.ArgCredentials`. The doc comment of `inspect.Result.Credentials` holds the rule for the
+   code, and [What is sent](llm.md) holds it for users. Plain words such as `NODE_ENV=production`
+   are not credentials, and the check fails closed.
+3. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the `Result.Credentials` slice of
+   each server into `llm.Input.Credentials` of each tool of that server. So a value of one server is
+   removed only from the tools of that server, and a plain config value that the server echoes
+   reaches the provider (issues #229 and #235). Each job also gets a `discover.TextRedactor` of
+   the wide `Result.Secrets` of its server (`llmJob.redactor`), for the `key` of its row.
+4. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes
+   (`discover.MinSecretBytes`) with `discover.Mask` (`********`) in the name and the description,
+   before the cut, so a cut cannot leave a part of a secret. The code is in
+   `internal/discover/redact_text.go`, so that the local report (`maskedToolKey` and `compareMask`
+   in `cmd/mcpmoat`) uses the same code without a dependency on the LLM package, and
+   `internal/report` and `internal/pins` cannot import `internal/llm` (the `llm-only-in-cmd` rule of
+   depguard). `internal/llm` and `cmd/mcpmoat` already import `internal/discover`, and
+   `internal/pins` gets only a mask function, so the import table does not change.
+   `discover.NewTextRedactor` adds, for a value that is not valid UTF-8, the form that the JSON
+   decoder of the SDK gives (one U+FFFD for each invalid byte), because a server that echoes the
+   value sends that form. `redactWindow` marks every byte of every match first, also of matches that
+   overlap, then writes one mask for each run of marked bytes. The search for each value is a
+   Knuth-Morris-Pratt search, linear in the length of the text and of the value, also for a periodic
+   value (issue #231). To bound the work, `TextRedactor.Prefix` redacts only a window of the
+   first limit+1 bytes (the limit is `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and
+   doubles it while the masks make the result too short. Its result is always a prefix of the full
+   redaction, so the text and the cut are the same. The message has `redacted: true` when a mask
+   starts in the first limit+1 bytes of the redacted name or description, also when the cut then
+   removes it. The field is omitted otherwise. A secret that starts or ends with `*`, or holds a
+   whole mask, can show again across a mask (a documented limit). The system prompt tells the model
+   that the mask is removed text, not an instruction.
 
-The report and the JSON output do not use `Result.Secrets`: they print the tool names as the
-server sent them. docs/llm.md lists the limits of the replacement.
+The report and the JSON output mask the wide `Result.Secrets` in the tool names and the pin diffs
+(see Redaction in [JSON output](#json-output)). The `key` of an LLM row also uses that mask
+(`llmJob.redactor`), because the request hides fewer values than the report must. docs/llm.md
+lists the limits of the replacement.
 
 The cuts are made at a rune boundary: `llm.MaxToolNameBytes`, `llm.MaxDescriptionBytes` and, for
 the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
 `Verdict.Truncated` when it cut the name or the description, and `Verdict.Redacted` when
-`toolMessage` removed a configured value (the `redacted` field of the message). The flags never
+`toolMessage` removed a credential (the `redacted` field of the message). The flags never
 come from the model output. A cut name or description is a sign of risk, because the part that is not shown can hold
 the payload. The system prompt tells the model to rate it at least `medium`, but the code does not
 trust the model for this (see the verdict below).
@@ -1247,19 +1460,21 @@ builders in `cmd/mcpmoat/scan_llm_rows.go`:
   `Verdict.Redacted` set: part of its text was not rated. For such a tool, `llmRow` returns
   `floorRow` when `belowMedium` is true for the risk or the answer is unusable. That row is
   `MOAT-LLM-001`, `medium`, category `other`, with the fixed text `llm.TruncatedText` for a cut
-  text and `llm.RedactedText` when only a configured value was removed. A cut text wins when both
+  text and `llm.RedactedText` when only a credential was removed. A cut text wins when both
   are true. A rating of `medium` or `high` stays. The code enforces the rule, not only the system
   prompt, because a prompt injection in the part before the cut could ask the model for `none`,
-  and a hostile config can choose which text mcpmoat removes. docs/llm.md owns the rule that the
-  user sees: see [`--llm`](llm.md).
-- An answer that cannot be used for a tool that was not cut and had no value removed gives `MOAT-LLM-002` (medium). That is
-  an invalid answer, a refusal of the model or an answer cut at the token limit
-  (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider refused
-  (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
+  and a hostile config can choose which text mcpmoat removes (through a value under a secret-like
+  key; a phrase under a plain key is not removed, so the model reads it). docs/llm.md owns the
+  rule that the user sees: see [`--llm`](llm.md).
+- An answer that cannot be used for a tool that was not cut and had no credential removed gives
+  `MOAT-LLM-002` (medium). That is an invalid answer, a refusal of the model or an answer cut at the
+  token limit (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider
+  refused (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
   `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so an unrated tool (cut or
-  redacted) gets the floor row in both cases. Only these two errors give this finding. So a
-  hostile server that makes the provider refuse its own tool description, or makes the answer
-  unusable, keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule findings still apply.
+  redacted) gets the floor row in both cases. Only these two errors give this finding. So a hostile
+  server that makes the provider refuse its own tool description, or makes the answer unusable,
+  keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule
+  findings still apply.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 

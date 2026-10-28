@@ -51,6 +51,15 @@ func TestAcceptAdvice(t *testing.T) {
 		{name: "ambiguous with project", hint: acceptHint{name: "srv", digest: testDigest, ambiguous: true, project: "/p"}, config: "/c.json"},
 		{name: "config problem", hint: acceptHint{name: "srv", digest: testDigest}, configProblem: true},
 		{name: "config problem with config", hint: acceptHint{name: "srv", digest: testDigest}, config: "/c.json", configProblem: true},
+
+		// pins.json has no room for the tools: pin --accept would refuse the
+		// command, so the hint gives the prose steps with the digest.
+		{name: "pins file full", hint: acceptHint{name: "srv", digest: testDigest, full: fileFull},
+			wantText: "run pin --accept with this server name and --expect " + testDigest},
+		{name: "pins file full with config", hint: acceptHint{name: "srv", digest: testDigest, full: fileFull}, config: "/c.json",
+			wantText: "run pin --accept with this server name, --config with the file of this scan, and --expect " + testDigest},
+		{name: "pins file full with project", hint: acceptHint{name: "srv", digest: testDigest, project: "/p", full: fileFull},
+			wantText: "run pin --accept with this server name, --project with its project path, and --expect " + testDigest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,6 +112,10 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 		{name: "all", digest: testDigest, truncated: true, ignored: true, noText: true},
 		{name: "ambig", digest: testDigest, ambiguous: true},
 		{name: "badproject", digest: testDigest, project: "/my p"},
+		{name: "full", digest: testDigest, full: fileFull},
+		{name: "fullcut", digest: testDigest, truncated: true, full: fileFull},
+		{name: "share", digest: testDigest, full: shareFull},
+		{name: "sharecut", digest: testDigest, truncated: true, full: shareFull},
 	}
 	tests := []struct {
 		name          string
@@ -138,10 +151,121 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 				if h.noText {
 					want += hintNoTextNote
 				}
+				want += h.full.hintNote()
 				if lines[i] != want {
 					t.Errorf("line %d = %q, want %q", i, lines[i], want)
 				}
 			}
 		})
 	}
+}
+
+// TestWriteAcceptHintsStoreFull checks the exact "To accept" lines when
+// pins.json has no room for the tools of a server (full is fileFull, #220): the line
+// gives the prose steps and the digest, no "mcpmoat pin --accept" command, and
+// ends with fileFull.hintNote(), after the notes for changes the user did not
+// see. A hint with full notFull keeps its command and gets no such note. The
+// name before the colon still goes through cutName: a name with control
+// characters is escaped, and a long name is cut.
+//
+// When only the share of the project servers is full (full is shareFull), the
+// line ends with shareFull.hintNote() instead. It must not tell the user to
+// remove servers of the user scope: removing one frees no room in the share,
+// and that server would then be pinned again with no alert (T2).
+func TestWriteAcceptHintsStoreFull(t *testing.T) {
+	t.Parallel()
+
+	const steps = "run pin --accept with this server name and --expect " + testDigest
+	hostile := "bad\x1b[31m\u202ename"
+	long := strings.Repeat("n", maxWarnNameRunes+20)
+	tests := []struct {
+		name string
+		hint acceptHint
+		want string
+	}{
+		{
+			name: "full",
+			hint: acceptHint{name: "srv", digest: testDigest, full: fileFull},
+			want: "To accept srv: " + steps + fileFull.hintNote(),
+		},
+		{
+			name: "not full keeps the command",
+			hint: acceptHint{name: "srv", digest: testDigest},
+			want: "To accept srv: mcpmoat pin --accept srv --expect " + testDigest,
+		},
+		{
+			name: "full after the notes of unseen changes",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true, ignored: true, noText: true, full: fileFull},
+			want: "To accept srv: " + steps + hintCutNote + hintIgnoredNote + hintNoTextNote + fileFull.hintNote(),
+		},
+		{
+			name: "cut diff without full has no full note",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true},
+			want: "To accept srv: " + steps + hintCutNote,
+		},
+		{
+			name: "control characters in the name",
+			hint: acceptHint{name: hostile, digest: testDigest, full: fileFull},
+			want: "To accept " + cutName(hostile) + ": " + steps + fileFull.hintNote(),
+		},
+		{
+			name: "long name",
+			hint: acceptHint{name: long, digest: testDigest, full: fileFull},
+			want: "To accept " + cutName(long) + ": " + steps + fileFull.hintNote(),
+		},
+		{
+			name: "project share full",
+			hint: acceptHint{name: "srv", digest: testDigest, full: shareFull},
+			want: "To accept srv: " + steps + shareFull.hintNote(),
+		},
+		{
+			name: "project share full after the notes of unseen changes",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true, ignored: true, noText: true, full: shareFull},
+			want: "To accept srv: " + steps + hintCutNote + hintIgnoredNote + hintNoTextNote + shareFull.hintNote(),
+		},
+		{
+			name: "project share full with control characters in the name",
+			hint: acceptHint{name: hostile, digest: testDigest, full: shareFull},
+			want: "To accept " + cutName(hostile) + ": " + steps + shareFull.hintNote(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var b strings.Builder
+			if err := writeAcceptHints(&b, []acceptHint{tt.hint}, "", false); err != nil {
+				t.Fatalf("writeAcceptHints() error = %v, want nil", err)
+			}
+			got := b.String()
+			if got != tt.want+"\n" {
+				t.Errorf("writeAcceptHints() = %q, want %q", got, tt.want+"\n")
+			}
+			assertTerminalSafe(t, got)
+			full := tt.hint.full != notFull
+			if full && strings.Contains(got, "mcpmoat pin --accept") {
+				t.Errorf("writeAcceptHints() = %q holds a command, want none when pins.json is full", got)
+			}
+			wantFile, wantShare := tt.hint.full == fileFull, tt.hint.full == shareFull
+			if n := strings.Count(got, fileFull.hintNote()); n != boolCount(wantFile) {
+				t.Errorf("writeAcceptHints() has the full note %d times, want %d", n, boolCount(wantFile))
+			}
+			if n := strings.Count(got, shareFull.hintNote()); n != boolCount(wantShare) {
+				t.Errorf("writeAcceptHints() has the share note %d times, want %d", n, boolCount(wantShare))
+			}
+			if wantShare && strings.Contains(got, fileFull.fix()) {
+				t.Errorf("writeAcceptHints() = %q tells the user to remove any server, want only project servers when the share is full", got)
+			}
+			if _, isCommand := acceptAdvice(tt.hint, "", false); full && isCommand {
+				t.Errorf("acceptAdvice() isCommand = true, want false when pins.json is full")
+			}
+		})
+	}
+}
+
+// boolCount returns 1 for true and 0 for false.
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

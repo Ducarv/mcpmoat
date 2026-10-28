@@ -49,14 +49,18 @@ func fakeGetenv(env map[string]string) func(string) string {
 // example with -race and the whole suite in parallel) and get an extra
 // MOAT-T1-023 row. A test of the budget sets c.toolBudget itself (see
 // scanWithBudget).
+//
+// toolStepBudget is one hour too. The default limit of the whole tool rule
+// step is 30 s, so a loaded machine could cut the analysis there.
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
-		stdout:     &stdout,
-		stderr:     &stderr,
-		getenv:     getenv,
-		build:      build,
-		toolBudget: time.Hour,
+		stdout:         &stdout,
+		stderr:         &stderr,
+		getenv:         getenv,
+		build:          build,
+		toolBudget:     time.Hour,
+		toolStepBudget: time.Hour,
 		homeDir: func() (string, error) {
 			return "", errors.New("test: home not set")
 		},
@@ -393,7 +397,12 @@ func TestUsageContent(t *testing.T) {
 		// The ignore file line is checked in two parts, so a comma between the
 		// listed rules does not break the test.
 		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		"the finding that config findings were left out (MOAT-T4-005)",
 		"the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them",
+		// The flag that turns the ignore file on, without the tabwriter
+		// padding.
+		"  --use-ignore-file ",
+		"Also ignore the findings that the .mcpmoat-ignore file in the working directory lists. Off by default\n",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
@@ -415,11 +424,29 @@ func TestUsageContent(t *testing.T) {
 		"Rules with target description or schema apply to the tools. Rules with target config are not applied\n",
 		"  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n",
 		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
-		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a finding (MOAT-T1-023):\n",
+		// The time limit of the whole rule step (30s) and the budget of
+		// one server (5s). The numbers are literal: this is the text that
+		// users see.
+		"  The rule analysis has a time limit of 30s for all servers. Each server gets a fair share of the time left,\n",
+		"  up to a time budget of 5s. A server that uses it up, or that scan reaches after the limit, is a finding (MOAT-T1-023):\n",
 		"  high, or critical when a description or schema rule from --rules is critical.\n",
+		// The part of an analysis that cannot be stopped also uses the
+		// limit for all servers (issue #210). The help says that a later
+		// server then gets MOAT-T1-023 and does not pass silently.
+		"  The part of an analysis that cannot be stopped at its deadline (one regex and one text conversion) also uses\n",
+		"  the limit for all servers. So servers early in the order can use up the time of later servers.\n",
+		"  Those later servers get MOAT-T1-023 too, never a silent pass.\n",
 		// The tool findings cap (MOAT-T1-024) has its own two lines.
 		fmt.Sprintf("  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer),
 		"  at least high.\n",
+		// The config findings caps (MOAT-T4-005, issue #213) have their own
+		// three lines. The numbers are literal (configRowsPerServer and
+		// configRowsTotal), so a change of a cap must change this test too.
+		// The third line says that the scan-wide cap keeps the most severe
+		// findings of all the servers, not the findings of the first servers.
+		"  scan lists at most 100 config findings for each server and 10000 for the whole scan. A server that loses\n",
+		"  config findings to a limit gets a finding (MOAT-T4-005), at least high. The limits do not count this finding.\n",
+		"  scan keeps the most severe config findings across the whole scan, not the findings of the first servers.\n",
 		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
@@ -472,7 +499,18 @@ func TestUsageContent(t *testing.T) {
 		// The ignore file line also names MOAT-T1-024, so the scan note is
 		// matched by its full phrase.
 		"gets one finding (MOAT-T1-024)",
+		// The ignore file line also names MOAT-T4-005, so the scan note is
+		// matched by its full phrase.
+		"gets a finding (MOAT-T4-005)",
+		// The --use-ignore-file flag has one flag line.
+		"Also ignore the findings that the .mcpmoat-ignore file",
 		"time budget",
+		"time limit of 30s",
+		// The note on the part of an analysis that cannot be stopped, and the
+		// note on the scan-wide config cap, are each said once.
+		"cannot be stopped at its deadline",
+		"never a silent pass",
+		"most severe config findings across the whole scan",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once
 		// in the flag list; the scan notes do not repeat it.
@@ -508,6 +546,9 @@ func TestUsageContent(t *testing.T) {
 		// Before issue #184 one server could use the whole --llm cap, and
 		// the line did not name the refusal of every tool.
 		"A provider error or more tools than that gives exit 2",
+		// An earlier draft of the config cap note did not say which findings
+		// the scan-wide cap keeps.
+		"at least high. scan keeps the most severe findings.\n",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
