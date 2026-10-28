@@ -98,12 +98,12 @@ func llmAnswerFor(in llm.Input) (llm.Verdict, error) {
 
 // llmSameInput reports whether a and b hold the same tool name, the same
 // description and the same secret values, in the same order. llm.Input holds
-// a slice (Secrets), so == cannot compare it. The values stay in memory: the
+// a slice (Credentials), so == cannot compare it. The values stay in memory: the
 // helper never prints them, and %+v of an llm.Input prints each secret as
 // discover.Mask.
 func llmSameInput(a, b llm.Input) bool {
 	return a.ToolName == b.ToolName && a.Description == b.Description &&
-		slices.EqualFunc(a.Secrets, b.Secrets, func(x, y discover.Secret) bool { return x.Reveal() == y.Reveal() })
+		slices.EqualFunc(a.Credentials, b.Credentials, func(x, y discover.Secret) bool { return x.Reveal() == y.Reveal() })
 }
 
 // llmFactory is the cli.newClassifier of a test. It counts its calls and keeps

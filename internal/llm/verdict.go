@@ -170,7 +170,7 @@ type Verdict struct {
 	// parseVerdict never sets it.
 	Truncated bool
 	// Redacted is true when toolMessage replaced one or more credentials
-	// (the values of Input.Secrets, the subset inspect.Result.Credentials)
+	// (the values of Input.Credentials, the subset inspect.Result.Credentials)
 	// in the tool name or description with discover.Mask, before the
 	// request. It is the same flag as the "redacted" field of the message
 	// (see toolMessage). Classify sets it, also with an error after the

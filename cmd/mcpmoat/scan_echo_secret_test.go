@@ -105,22 +105,23 @@ func setFakeSecrets(f *inspecttest.Fake, server string, credentials, secrets []s
 	// A map value is not addressable in Go, so copy the Result out, change
 	// it and put it back.
 	res := f.Results[server]
-	res.Secrets, res.Credentials = nil, nil
-	seen := map[string]bool{}
-	for _, v := range slices.Concat(credentials, secrets) {
-		if !seen[v] {
-			seen[v] = true
-			res.Secrets = append(res.Secrets, discover.NewSecret(v))
-		}
-	}
-	seen = map[string]bool{}
-	for _, v := range credentials {
-		if !seen[v] {
-			seen[v] = true
-			res.Credentials = append(res.Credentials, discover.NewSecret(v))
-		}
-	}
+	res.Secrets = uniqueSecrets(slices.Concat(credentials, secrets))
+	res.Credentials = uniqueSecrets(credentials)
 	f.Results[server] = res
+}
+
+// uniqueSecrets returns values as secrets, each value one time, in the order
+// of first occurrence. It returns nil for no value.
+func uniqueSecrets(values []string) []discover.Secret {
+	var out []discover.Secret
+	seen := map[string]bool{}
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, discover.NewSecret(v))
+		}
+	}
+	return out
 }
 
 // echoFake returns a fake inspector that gives the server "srv" the tools,

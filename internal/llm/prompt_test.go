@@ -365,7 +365,7 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 
 	// The secret is in the text, so the full message is redacted. An error
 	// return must still report redacted false.
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100), Secrets: newSecrets(canary)}
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100), Credentials: newSecrets(canary)}
 	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -408,7 +408,7 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 func TestBuildToolMessageTooLarge(t *testing.T) {
 	t.Parallel()
 
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000), Secrets: newSecrets(canary)}
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000), Credentials: newSecrets(canary)}
 	// The secret is removed, so the empty message has "redacted": true.
 	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
@@ -577,50 +577,50 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 	}{
 		{
 			name:     "in description",
-			in:       Input{ToolName: "read_file", Description: "Use the key " + secretCanary + " now.", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "read_file", Description: "Use the key " + secretCanary + " now.", Credentials: newSecrets(secretCanary)},
 			wantName: "read_file", wantDesc: "Use the key " + m + " now.", wantRedacted: true,
 		},
 		{
 			name:     "in name",
-			in:       Input{ToolName: "get_" + secretCanary, Description: "Reads a file.", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "get_" + secretCanary, Description: "Reads a file.", Credentials: newSecrets(secretCanary)},
 			wantName: "get_" + m, wantDesc: "Reads a file.", wantRedacted: true,
 		},
 		{
 			name:     "in name and description",
-			in:       Input{ToolName: secretCanary + "_tool", Description: "key=" + secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: secretCanary + "_tool", Description: "key=" + secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: m + "_tool", wantDesc: "key=" + m, wantRedacted: true,
 		},
 		{
 			// The mask comes first and the description is cut after it, so
 			// both flags are true.
 			name:     "redacted and truncated",
-			in:       Input{ToolName: "t", Description: secretCanary + " " + strings.Repeat("d", MaxDescriptionBytes), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary + " " + strings.Repeat("d", MaxDescriptionBytes), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m + " " + strings.Repeat("d", MaxDescriptionBytes-len(m)-1), wantRedacted: true, wantCut: true,
 		},
 		{
 			// A cut with no secret in the text is not a redaction.
 			name:     "truncated without a secret",
-			in:       Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: strings.Repeat("d", MaxDescriptionBytes), wantCut: true,
 		},
 		{
 			name:     "7 bytes is not removed",
-			in:       Input{ToolName: "t", Description: "x abcdefg y", Secrets: newSecrets("abcdefg")},
+			in:       Input{ToolName: "t", Description: "x abcdefg y", Credentials: newSecrets("abcdefg")},
 			wantName: "t", wantDesc: "x abcdefg y",
 		},
 		{
 			name:     "8 bytes is removed",
-			in:       Input{ToolName: "t", Description: "x abcdefgh y", Secrets: newSecrets("abcdefgh")},
+			in:       Input{ToolName: "t", Description: "x abcdefgh y", Credentials: newSecrets("abcdefgh")},
 			wantName: "t", wantDesc: "x " + m + " y", wantRedacted: true,
 		},
 		{
 			name:     "empty and zero secrets",
-			in:       Input{ToolName: "t", Description: "plain text", Secrets: []discover.Secret{discover.NewSecret(""), {}}},
+			in:       Input{ToolName: "t", Description: "plain text", Credentials: []discover.Secret{discover.NewSecret(""), {}}},
 			wantName: "t", wantDesc: "plain text",
 		},
 		{
 			name:     "secret not in the text",
-			in:       Input{ToolName: "t", Description: "plain text", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: "plain text", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: "plain text",
 		},
 		{
@@ -628,71 +628,71 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			// and "yy" of the longer one. The test also runs with the
 			// secrets in the other order.
 			name:     "secret inside another secret",
-			in:       Input{ToolName: "t", Description: "a xxCANARY12yy b CANARY12 c", Secrets: newSecrets("CANARY12", "xxCANARY12yy")},
+			in:       Input{ToolName: "t", Description: "a xxCANARY12yy b CANARY12 c", Credentials: newSecrets("CANARY12", "xxCANARY12yy")},
 			wantName: "t", wantDesc: "a " + m + " b " + m + " c", wantRedacted: true,
 		},
 		{
 			// A leftmost replacer removes "abcdefgh" and leaves the 9 bytes
 			// "XXXXXXXXX" of the second secret.
 			name:     "overlapping secrets",
-			in:       Input{ToolName: "t", Description: "abcdefghXXXXXXXXX", Secrets: newSecrets("abcdefgh", "hXXXXXXXXX")},
+			in:       Input{ToolName: "t", Description: "abcdefghXXXXXXXXX", Credentials: newSecrets("abcdefgh", "hXXXXXXXXX")},
 			wantName: "t", wantDesc: m, wantRedacted: true,
 		},
 		{
 			name:     "overlapping secrets inside text",
-			in:       Input{ToolName: "t", Description: "<abcdefghXXXXXXXXX>", Secrets: newSecrets("abcdefgh", "hXXXXXXXXX")},
+			in:       Input{ToolName: "t", Description: "<abcdefghXXXXXXXXX>", Credentials: newSecrets("abcdefgh", "hXXXXXXXXX")},
 			wantName: "t", wantDesc: "<" + m + ">", wantRedacted: true,
 		},
 		{
 			// A search that skips past a match leaves the last "ab".
 			name:     "overlapping occurrences of one secret",
-			in:       Input{ToolName: "t", Description: "xababababab y", Secrets: newSecrets("abababab")},
+			in:       Input{ToolName: "t", Description: "xababababab y", Credentials: newSecrets("abababab")},
 			wantName: "t", wantDesc: "x" + m + " y", wantRedacted: true,
 		},
 		{
 			name:     "secret is the whole description",
-			in:       Input{ToolName: "t", Description: secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m, wantRedacted: true,
 		},
 		{
 			name:     "same secret many times",
-			in:       Input{ToolName: "t", Description: secretCanary + " and " + secretCanary + ", " + secretCanary, Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: secretCanary + " and " + secretCanary + ", " + secretCanary, Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: m + " and " + m + ", " + m, wantRedacted: true,
 		},
 		{
 			// Each run of removed bytes becomes one mask.
 			name:     "same secret twice in a row",
-			in:       Input{ToolName: "t", Description: "<" + secretCanary + secretCanary + ">", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: "<" + secretCanary + secretCanary + ">", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: "<" + m + ">", wantRedacted: true,
 		},
 		{
 			name:     "JSON special and non-ASCII characters",
-			in:       Input{ToolName: "t" + jsonSpecial, Description: "a " + jsonSpecial + " b", Secrets: newSecrets(jsonSpecial)},
+			in:       Input{ToolName: "t" + jsonSpecial, Description: "a " + jsonSpecial + " b", Credentials: newSecrets(jsonSpecial)},
 			wantName: "t" + m, wantDesc: "a " + m + " b", wantRedacted: true,
 		},
 		{
 			name:     "invalid UTF-8 outside the secret",
-			in:       Input{ToolName: "\xfe", Description: "\xff" + secretCanary + "\xc3", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "\xfe", Description: "\xff" + secretCanary + "\xc3", Credentials: newSecrets(secretCanary)},
 			wantName: "�", wantDesc: "�" + m + "�", wantRedacted: true,
 		},
 		{
 			name:     "invalid UTF-8 inside the secret",
-			in:       Input{ToolName: "t", Description: "a\xffCANARY\xfe\xfdb", Secrets: newSecrets("\xffCANARY\xfe\xfd")},
+			in:       Input{ToolName: "t", Description: "a\xffCANARY\xfe\xfdb", Credentials: newSecrets("\xffCANARY\xfe\xfd")},
 			wantName: "t", wantDesc: "a" + m + "b", wantRedacted: true,
 		},
 		{
 			name:     "description cut through the secret",
-			in:       Input{ToolName: "t", Description: cutDesc + secretCanary + " tail", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: cutDesc + secretCanary + " tail", Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: cutDesc + m[:5], wantRedacted: true, wantCut: true,
 		},
 		{
 			name:     "name cut through the secret",
-			in:       Input{ToolName: cutName + secretCanary, Description: "d", Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: cutName + secretCanary, Description: "d", Credentials: newSecrets(secretCanary)},
 			wantName: cutName + m[:3], wantDesc: "d", wantRedacted: true, wantCut: true,
 		},
 		{
 			name:     "escapes cut through the secret",
-			in:       Input{ToolName: "t", Description: quotes + secretCanary + strings.Repeat(`"`, 5000), Secrets: newSecrets(secretCanary)},
+			in:       Input{ToolName: "t", Description: quotes + secretCanary + strings.Repeat(`"`, 5000), Credentials: newSecrets(secretCanary)},
 			wantName: "t", wantDesc: quotes + m[:room], wantRedacted: true, wantCut: true,
 		},
 	}
@@ -725,12 +725,12 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			if len(msg) > MaxToolMessageBytes {
 				t.Errorf("len(toolMessage()) = %d, want <= %d", len(msg), MaxToolMessageBytes)
 			}
-			checkNoSecret(t, msg, p, tt.in.Secrets)
+			checkNoSecret(t, msg, p, tt.in.Credentials)
 
 			// The order of the secrets does not change the message.
 			rev := tt.in
-			rev.Secrets = slices.Clone(tt.in.Secrets)
-			slices.Reverse(rev.Secrets)
+			rev.Credentials = slices.Clone(tt.in.Credentials)
+			slices.Reverse(rev.Credentials)
 			rMsg, rTruncated, _, rErr := toolMessage(rev)
 			if rErr != nil || rMsg != msg || rTruncated != truncated {
 				t.Errorf("toolMessage() with the secrets reversed = (%d bytes, %v, %v), want (%d bytes, %v, nil)", len(rMsg), rTruncated, rErr, len(msg), truncated)
@@ -739,7 +739,7 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 	}
 }
 
-// TestToolMessageSecretsNotEncoded checks that Input.Secrets never reaches the
+// TestToolMessageSecretsNotEncoded checks that Input.Credentials never reaches the
 // message. toolPayload has only the four known keys, and secrets that are not
 // in the text leave the message byte for byte the same as no secrets.
 func TestToolMessageSecretsNotEncoded(t *testing.T) {
@@ -789,7 +789,7 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 			}
 			for name, secrets := range secretLists {
 				in := tt.in
-				in.Secrets = secrets
+				in.Credentials = secrets
 				msg, cut, _, err := toolMessage(in)
 				if err != nil || msg != base || cut != baseCut {
 					t.Errorf("%s: toolMessage() = (%d bytes, %v, %v), want the message without secrets (%d bytes, %v, nil)", name, len(msg), cut, err, len(base), baseCut)
@@ -829,7 +829,7 @@ func TestToolMessageRedactsRandomText(t *testing.T) {
 		shuffled := slices.Clone(secrets)
 		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 
-		msg, _, gotRedacted, err := toolMessage(Input{ToolName: "t", Description: desc, Secrets: shuffled})
+		msg, _, gotRedacted, err := toolMessage(Input{ToolName: "t", Description: desc, Credentials: shuffled})
 		if err != nil {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
@@ -965,7 +965,7 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 		{name: "two invalid bytes, raw form", secret: "abc\xff\xfedefgh", desc: "x abc\xff\xfedefgh y", wantDesc: "x " + m + " y", wantRedacted: true},
 		{name: "one invalid byte", secret: "abcd\xffefgh", desc: "x abcd" + ffd + "efgh y", wantDesc: "x " + m + " y", wantRedacted: true},
 		{name: "run of three invalid bytes", secret: "ab\xff\xfe\xfdcdefgh", desc: "x ab" + ffd + ffd + ffd + "cdefgh y", wantDesc: "x " + m + " y", wantRedacted: true},
-		// Known limit (see discover.SecretTextValues): one U+FFFD for a whole run is another
+		// Known limit (see discover.NewTextRedactor): one U+FFFD for a whole run is another
 		// encoded form, and it is not matched.
 		{name: "one U+FFFD for the run", secret: "abc\xff\xfedefgh", desc: "x abc" + ffd + "defgh y", wantDesc: "x abc" + ffd + "defgh y"},
 		{name: "valid UTF-8 secret", secret: "abcdéfgh", desc: "x abcdéfgh y", wantDesc: "x " + m + " y", wantRedacted: true},
@@ -981,7 +981,7 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(tt.secret)
-			msg, truncated, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Credentials: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -993,9 +993,9 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 				return
 			}
 			checkNoSecret(t, msg, p, secrets)
-			// SecretTextValues gives the raw value and, for invalid UTF-8,
-			// its decoded form (pinned by the discover tests).
-			for _, v := range discover.SecretTextValues(secrets) {
+			// The raw value and, for invalid UTF-8, its decoded form: one
+			// U+FFFD for each invalid byte, as []rune gives it.
+			for _, v := range []string{tt.secret, string([]rune(tt.secret))} {
 				if strings.Contains(p.ToolDescription, v) || strings.Contains(msg, v) {
 					t.Error("toolMessage() holds the secret or its decoded form")
 				}
@@ -1038,7 +1038,7 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(secretCanary)
-			msg, truncated, _, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Credentials: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -1055,13 +1055,12 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 
 			// The reference: redact all of the text, cut, apply the flag rule.
 			// The discover tests check TextRedactor.Text and the flag of
-			// RedactTextPrefix against a plain oracle.
-			values := discover.SecretTextValues(secrets)
+			// TextRedactor.Prefix against a plain oracle.
 			ref := discover.NewTextRedactor(secrets)
 			refName := ref.Text(tt.toolName)
 			refDesc := ref.Text(tt.desc)
-			_, nameFlag := discover.RedactTextPrefix(tt.toolName, values, n)
-			_, descFlag := discover.RedactTextPrefix(tt.desc, values, d)
+			_, nameFlag := ref.Prefix(tt.toolName, n)
+			_, descFlag := ref.Prefix(tt.desc, d)
 			wantName, nameCut := cutUTF8(refName, n)
 			wantDesc, descCut := cutUTF8(refDesc, d)
 			want, err := encodeToolPayload(encodeJSON, toolPayload{
@@ -1079,7 +1078,7 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 }
 
 // TestToolMessageLargeText checks that a description of 4 MiB with a secret
-// of 4 KiB stays fast: with no match in the first window, discover.RedactTextPrefix reads
+// of 4 KiB stays fast: with no match in the first window, TextRedactor.Prefix reads
 // only that window. The bound is generous on purpose; it catches only a
 // quadratic search.
 func TestToolMessageLargeText(t *testing.T) {
@@ -1100,7 +1099,7 @@ func TestToolMessageLargeText(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			start := time.Now()
-			msg, _, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: newSecrets(secret)})
+			msg, _, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Credentials: newSecrets(secret)})
 			if elapsed := time.Since(start); elapsed > 20*time.Second {
 				t.Errorf("toolMessage() took %v, want well under 20s", elapsed)
 			}

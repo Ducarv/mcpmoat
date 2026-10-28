@@ -14,8 +14,8 @@ import (
 // names in the row keys and the pin diffs. The code is here and not in
 // internal/llm because only cmd/mcpmoat may import internal/llm.
 
-// SecretTextValues returns the values that [TextRedactor] and
-// [RedactTextPrefix] must remove for secrets: each secret value of at least
+// secretTextValues returns the values that [TextRedactor] and
+// [redactTextPrefix] must remove for secrets: each secret value of at least
 // [MinSecretBytes] bytes and, for a value that is not valid UTF-8, also its
 // decoded form (see [PerByteForm]). It skips shorter values (see
 // MinSecretBytes) and a value that is in the result already. The minimum
@@ -23,7 +23,7 @@ import (
 // MinSecretBytes gives no decoded form either, even when that form is
 // longer. The result keeps the order of the first occurrence.
 //
-// The result holds secret values: pass it only to RedactTextPrefix, never to
+// The result holds secret values: pass it only to redactTextPrefix, never to
 // fmt, a logger, an error or an encoder.
 //
 // The decoded form is necessary because a value from the OS environment can
@@ -36,7 +36,7 @@ import (
 // not give that form: it writes one U+FFFD for a whole run of invalid bytes.
 // A server that encodes the value in another way (for example with one
 // U+FFFD for a run) can still send it, as with any other encoded form.
-func SecretTextValues(secrets []Secret) []string {
+func secretTextValues(secrets []Secret) []string {
 	var values []string
 	// seen holds the values in the result. A map lookup keeps the dedupe
 	// linear in the number of secrets. A search of values for each value
@@ -69,7 +69,7 @@ func SecretTextValues(secrets []Secret) []string {
 
 // PerByteForm returns the form of v that a JSON decoder gives: one U+FFFD for
 // each byte of v that is not part of a valid UTF-8 rune (see
-// [SecretTextValues] for why). It returns that form and true only when v is
+// [secretTextValues] for why). It returns that form and true only when v is
 // not valid UTF-8. For valid UTF-8 the form is v itself, so it returns "" and
 // false.
 //
@@ -82,9 +82,9 @@ func PerByteForm(v string) (string, bool) {
 	return decodedPerByte(v), true
 }
 
-// RedactTextPrefix replaces each occurrence of each value in values with
+// redactTextPrefix replaces each occurrence of each value in values with
 // [Mask] in s, and returns the start of the result, and whether that start
-// holds a Mask. The values normally come from [SecretTextValues]. "The whole
+// holds a Mask. The values normally come from [secretTextValues]. "The whole
 // result" below is the redaction of all of s (the text that
 // [TextRedactor.Text] gives for the same values). A negative limit counts as
 // 0.
@@ -104,7 +104,7 @@ func PerByteForm(v string) (string, bool) {
 // replace more bytes than it has, so the redacted text can be shorter than
 // limit although the uncut redacted text is longer, and a value that crosses
 // the pre-cut would not match and could leave a part of a secret. Instead,
-// RedactTextPrefix redacts a window s[:end] with redactWindow, which also
+// redactTextPrefix redacts a window s[:end] with redactWindow, which also
 // finds the occurrences that go on past end, so the result of the window is
 // always a prefix of the whole result. The first window has limit+1 bytes.
 // When its result has limit bytes or less (the Masks made it shorter) and s
@@ -113,20 +113,20 @@ func PerByteForm(v string) (string, bool) {
 // limit+1 bytes plus the length of the value. Only text that holds secrets
 // can make the window grow, at most to all of s.
 //
-// The values must not be empty (SecretTextValues gives only values of at
+// The values must not be empty (secretTextValues gives only values of at
 // least [MinSecretBytes] bytes). An empty value is skipped.
 //
-// RedactTextPrefix builds the search tables of the values for each window.
+// redactTextPrefix builds the search tables of the values for each window.
 // To redact many texts with the same values, use a [TextRedactor], which
 // builds them once.
-func RedactTextPrefix(s string, values []string, limit int) (string, bool) {
+func redactTextPrefix(s string, values []string, limit int) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
 	}
 	return redactPrefix(s, values, nil, limit)
 }
 
-// redactPrefix is RedactTextPrefix for a non-empty s and values. tables is
+// redactPrefix is redactTextPrefix for a non-empty s and values. tables is
 // nil or holds the border table of each value (see redactWindow).
 func redactPrefix(s string, values []string, tables [][]int, limit int) (string, bool) {
 	limit = max(limit, 0)
@@ -151,7 +151,7 @@ var (
 
 // TextRedactor removes the secret values of one set of secrets (for example
 // the secrets of one server) from many texts. Its Prefix gives the same
-// results as [RedactTextPrefix] with the values of [SecretTextValues], and its
+// results as [redactTextPrefix] with the values of [secretTextValues], and its
 // Text gives the redaction of all of a text. It reads the secrets and builds
 // the search table of each value once, in [NewTextRedactor], not once for
 // each text. This matters when the same values go over many short texts, such
@@ -167,7 +167,7 @@ var (
 type TextRedactor struct {
 	// redact keeps the values and their tables inside a closure: redact(s,
 	// -1) redacts all of s, and redact(s, limit) with limit >= 0 gives the
-	// start that RedactTextPrefix gives.
+	// start that redactTextPrefix gives.
 	//
 	// It is a func, not a pointer to a struct with the values. fmt prints a
 	// struct in an unexported field by reflection, and for a verb that does
@@ -177,13 +177,13 @@ type TextRedactor struct {
 }
 
 // NewTextRedactor returns a TextRedactor for the values that
-// SecretTextValues gives for secrets. It returns nil when no value is long
+// secretTextValues gives for secrets. It returns nil when no value is long
 // enough (see MinSecretBytes); a nil TextRedactor redacts nothing.
 //
 // It builds the border table (see borders) of each value: one int for each
 // byte of the value.
 func NewTextRedactor(secrets []Secret) *TextRedactor {
-	values := SecretTextValues(secrets)
+	values := secretTextValues(secrets)
 	if len(values) == 0 {
 		return nil
 	}
@@ -205,7 +205,7 @@ func NewTextRedactor(secrets []Secret) *TextRedactor {
 }
 
 // Text returns all of s with each occurrence of each value of
-// SecretTextValues(secrets), for the secrets of NewTextRedactor, replaced
+// secretTextValues(secrets), for the secrets of NewTextRedactor, replaced
 // with Mask. It reads all of s. For a long text of which only the start is
 // shown, use Prefix, which bounds the work.
 func (r *TextRedactor) Text(s string) string {
@@ -216,10 +216,10 @@ func (r *TextRedactor) Text(s string) string {
 	return out
 }
 
-// Prefix returns the same result as RedactTextPrefix(s,
-// SecretTextValues(secrets), limit) for the secrets of NewTextRedactor: the
+// Prefix returns the same result as redactTextPrefix(s,
+// secretTextValues(secrets), limit) for the secrets of NewTextRedactor: the
 // start of the redacted text, and whether that start holds a Mask. A
-// negative limit counts as 0. See RedactTextPrefix for which start and for
+// negative limit counts as 0. See redactTextPrefix for which start and for
 // the flag.
 func (r *TextRedactor) Prefix(s string, limit int) (string, bool) {
 	if r == nil || r.redact == nil || s == "" {
@@ -254,7 +254,7 @@ func (TextRedactor) LogValue() slog.Value {
 
 // decodedPerByte returns s with each byte that is not part of a valid UTF-8
 // rune replaced with U+FFFD: one U+FFFD for each byte, the same as the JSON
-// decoders (see SecretTextValues). A range loop over a string gives
+// decoders (see secretTextValues). A range loop over a string gives
 // utf8.RuneError (U+FFFD) for each such byte, and the rune as it is for
 // valid UTF-8.
 func decodedPerByte(s string) string {
@@ -279,16 +279,16 @@ func decodedPerByte(s string) string {
 //
 // It finds every occurrence that starts in s[:end], also one that goes on
 // past end, so the result is always a prefix of the redaction of all of s
-// (see RedactTextPrefix).
+// (see redactTextPrefix).
 //
 // The search reads each value once for each window, and for each value it
 // reads at most end+len(value)-1 bytes of s, each byte once (see markValue).
 // So the work is linear in the length of the window and of the values, also
 // for a periodic value (such as 4096 times "a") that the text repeats (NFR-03).
 // There is no cap on the number of values. This is accepted: the window is
-// bounded (see RedactTextPrefix).
+// bounded (see redactTextPrefix).
 //
-// The values must not be empty (SecretTextValues gives only values of at
+// The values must not be empty (secretTextValues gives only values of at
 // least MinSecretBytes bytes). An empty value is skipped: it would match at
 // every byte, and it marks nothing.
 //

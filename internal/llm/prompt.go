@@ -87,14 +87,14 @@ func verdictSchema() json.RawMessage {
 }
 
 // Input is the tool text to rate. Only the tool name and the tool
-// description go to the provider, after toolMessage removes the Secrets
+// description go to the provider, after toolMessage removes the Credentials
 // from them. The name and the description are untrusted.
 type Input struct {
 	// ToolName is the name of the tool, as the server gives it.
 	ToolName string
 	// Description is the description of the tool, as the server gives it.
 	Description string
-	// Secrets are the credential values that mcpmoat gave to the server:
+	// Credentials are the credential values that mcpmoat gave to the server:
 	// for example a token in an env value or in an auth header, a URL
 	// password or a secret-like arg value. cmd/mcpmoat copies them from
 	// inspect.Result.Credentials, the subset of the wide
@@ -107,12 +107,12 @@ type Input struct {
 	//
 	// A server that got a token can put it in its tool text, so toolMessage
 	// replaces each value of at least discover.MinSecretBytes bytes (and its
-	// decoded form, see discover.SecretTextValues) with discover.Mask in the
+	// decoded form, see discover.NewTextRedactor) with discover.Mask in the
 	// name and the description (FR-17), and sets the "redacted" flag. The
-	// redaction code is in package discover (discover.RedactTextPrefix). The
+	// redaction code is in package discover (discover.TextRedactor). The
 	// values are never sent, logged or encoded, and they are not part of
 	// toolPayload.
-	Secrets []discover.Secret
+	Credentials []discover.Secret
 }
 
 // toolPayload is the JSON object of the user message. Redacted has
@@ -144,12 +144,11 @@ type encodeFunc func(v any) ([]byte, error)
 // {"tool_name": ..., "tool_description": ..., "truncated": ...}, with
 // "redacted": true added when a secret was removed.
 //
-// First, every occurrence of a value in in.Secrets (the credential subset,
-// see Input.Secrets; the code is discover.SecretTextValues and
-// discover.RedactTextPrefix) is replaced with
-// discover.Mask in the name and the description, before any cut, so a cut
-// can never leave a part of a secret. To bound the work,
-// discover.RedactTextPrefix makes only the start of each redacted text that
+// First, every occurrence of a value in in.Credentials (the credential
+// subset, see Input.Credentials; the code is discover.TextRedactor) is
+// replaced with discover.Mask in the name and the description, before any
+// cut, so a cut can never leave a part of a secret. To bound the work,
+// TextRedactor.Prefix makes only the start of each redacted text that
 // the cut below reads, with the same result as a redaction of the whole text.
 // "redacted" is true when a Mask starts in the first
 // MaxToolNameBytes+1 bytes of the redacted name or in the first
@@ -180,9 +179,9 @@ func toolMessage(in Input) (msg string, truncated, redacted bool, err error) {
 // errEncodeMessage and errMessageTooLarge, which cannot happen with the
 // values of toolMessage.
 func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, truncated, redacted bool, err error) {
-	values := discover.SecretTextValues(in.Secrets)
-	rawName, nameRedacted := discover.RedactTextPrefix(in.ToolName, values, MaxToolNameBytes)
-	rawDesc, descRedacted := discover.RedactTextPrefix(in.Description, values, MaxDescriptionBytes)
+	redactor := discover.NewTextRedactor(in.Credentials)
+	rawName, nameRedacted := redactor.Prefix(in.ToolName, MaxToolNameBytes)
+	rawDesc, descRedacted := redactor.Prefix(in.Description, MaxDescriptionBytes)
 	redacted = nameRedacted || descRedacted
 
 	name, nameCut := cutUTF8(rawName, MaxToolNameBytes)

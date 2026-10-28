@@ -74,8 +74,8 @@ docs/                   PRD and other documentation
   `OpenIfExistsInRoot` in the same root, so the checked directory is the one that it reads from.
   `pins.Load` and `pins.LoadLocked` do this.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
-  It also holds the shared redaction of tool text (`redact_text.go`: `TextRedactor`,
-  `SecretTextValues`, `RedactTextPrefix`) and the credential checks (`ArgCredentials`, `TokenLike`,
+  It also holds the shared redaction of tool text (`redact_text.go`: `NewTextRedactor`
+  and its `Text` and `Prefix` methods) and the credential checks (`ArgCredentials`, `TokenLike`,
   `IsAuthScheme`) that `inspect`, `llm` and `cmd/mcpmoat` use.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
@@ -138,7 +138,7 @@ This direction is allowed: `inspect` does not import `rules`, so there is no cyc
 `internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name, the
 description and the credential values of the server (`llm.Input`). `internal/llm` imports
 `discover` for the `discover.Secret` type of these values and of the API key, for the text
-redaction (`discover.SecretTextValues`, `discover.RedactTextPrefix`), for `discover.Mask` and for
+redaction (`discover.NewTextRedactor`), for `discover.Mask` and for
 `discover.IsLoopbackHost`. It imports `github.com/cenkalti/backoff/v7` (v7.0.1, MIT licence, no
 dependencies of its own) only for the backoff of its retries. No error text of that module leaves
 `internal/llm`.
@@ -420,7 +420,7 @@ step 5 and step 6:
 - 5e. Only with `--llm` (FR-17), `llmStep` in `cmd/mcpmoat/scan_llm.go` runs after the tool rule
   step: `planLLMJobs` builds the jobs, and `classifyPlan` runs them. It sends the name and
   description of each tool of each server with status `StatusOK` to the classifier, with the
-  credential values of that server (`inspect.Result.Credentials` goes to `llm.Input.Secrets`, and
+  credential values of that server (`inspect.Result.Credentials` goes to `llm.Input.Credentials`, and
   `internal/llm` replaces them before the request). For a stdio server, these values include the
   credentials in its expanded argv. The wide `inspect.Result.Secrets` stays for the local report:
   it masks the `key` of each LLM row (see Secret values in [The `--llm`
@@ -1302,7 +1302,7 @@ report, and its subset `Result.Credentials` for the request. So the path is:
    code, and [What is sent](llm.md) holds it for users. Plain words such as `NODE_ENV=production`
    are not credentials, and the check fails closed.
 3. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the `Result.Credentials` slice of
-   each server into `llm.Input.Secrets` of each tool of that server. So a value of one server is
+   each server into `llm.Input.Credentials` of each tool of that server. So a value of one server is
    removed only from the tools of that server, and a plain config value that the server echoes
    reaches the provider (issues #229 and #235). Each job also gets a `discover.TextRedactor` of
    the wide `Result.Secrets` of its server (`llmJob.redactor`), for the `key` of its row.
@@ -1314,12 +1314,12 @@ report, and its subset `Result.Credentials` for the request. So the path is:
    `internal/report` and `internal/pins` cannot import `internal/llm` (the `llm-only-in-cmd` rule of
    depguard). `internal/llm` and `cmd/mcpmoat` already import `internal/discover`, and
    `internal/pins` gets only a mask function, so the import table does not change.
-   `discover.SecretTextValues` adds, for a value that is not valid UTF-8, the form that the JSON
+   `discover.NewTextRedactor` adds, for a value that is not valid UTF-8, the form that the JSON
    decoder of the SDK gives (one U+FFFD for each invalid byte), because a server that echoes the
    value sends that form. `redactWindow` marks every byte of every match first, also of matches that
    overlap, then writes one mask for each run of marked bytes. The search for each value is a
    Knuth-Morris-Pratt search, linear in the length of the text and of the value, also for a periodic
-   value (issue #231). To bound the work, `discover.RedactTextPrefix` redacts only a window of the
+   value (issue #231). To bound the work, `TextRedactor.Prefix` redacts only a window of the
    first limit+1 bytes (the limit is `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and
    doubles it while the masks make the result too short. Its result is always a prefix of the full
    redaction, so the text and the cut are the same. The message has `redacted: true` when a mask

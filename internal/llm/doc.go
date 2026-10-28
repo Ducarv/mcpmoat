@@ -31,11 +31,10 @@
 //   - a flag that tells the model whether one of the two was cut;
 //   - a "redacted" flag, only when a secret value was removed (see below).
 //
-// Before the cut, toolMessage replaces each value in [Input.Secrets] of at
+// Before the cut, toolMessage replaces each value in [Input.Credentials] of at
 // least [discover.MinSecretBytes] bytes with [discover.Mask] in the name and
 // the description. The redaction code is in package discover
-// (internal/discover/redact_text.go): [discover.SecretTextValues] and
-// [discover.RedactTextPrefix]. For a value that is not valid UTF-8, it also
+// ([discover.TextRedactor]). For a value that is not valid UTF-8, it also
 // removes the form that a JSON decoder gives, with one U+FFFD for each
 // invalid byte. It marks every byte of every match first, also of matches
 // that overlap, so no byte of a match stays.
@@ -53,7 +52,7 @@
 // (base64, URL-encoded, split across words), is not removed. A value that
 // starts or ends with "*", or that holds a whole [discover.Mask], can show up
 // again across a Mask, from text that the server wrote next to another
-// secret (see discover.RedactTextPrefix).
+// secret (see discover.TextRedactor).
 //
 // Nothing else is sent. In particular the request never holds the client
 // config, the server command, its arguments, env values or names, header

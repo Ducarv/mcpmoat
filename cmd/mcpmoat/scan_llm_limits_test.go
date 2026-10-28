@@ -467,7 +467,7 @@ func TestSendingNotice(t *testing.T) {
 				in: llm.Input{
 					ToolName:    nameCanary,
 					Description: descCanary + "\x1b[31m\u202e",
-					Secrets:     []discover.Secret{discover.NewSecret(hiddenCanary)},
+					Credentials: []discover.Secret{discover.NewSecret(hiddenCanary)},
 				},
 			}},
 			tools:   900,

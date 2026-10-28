@@ -43,7 +43,7 @@ type llmJob struct {
 	in llm.Input
 	// redactor hides the secret values of the server (all of
 	// inspect.Result.Secrets, the wide list) in the Key of the finding row
-	// (see llmRow and maskedToolKey). It is separate from in.Secrets, which
+	// (see llmRow and maskedToolKey). It is separate from in.Credentials, which
 	// only sets what the request to the provider hides: the local report
 	// hides more values than the request. The jobs of one server share one
 	// redactor, made once for the server. A nil redactor hides nothing.
@@ -167,7 +167,7 @@ func fairShare(counts []int, budget int) []int {
 // outcomes, so their order is not the order of the servers.
 //
 // Every job of a server gets the credential values of that server
-// (inspect.Result.Credentials) in llm.Input.Secrets, so that llm removes them
+// (inspect.Result.Credentials) in llm.Input.Credentials, so that llm removes them
 // from the tool text before the request (FR-17). A server that got a token
 // can put it in a tool name or description. Only the credentials go to llm,
 // not the wide inspect.Result.Secrets list: a plain config word such as
@@ -197,7 +197,7 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 					ToolName:    t.Name,
 					Description: t.Description,
 					// Only the credential subset: see the doc comment above.
-					Secrets: o.Result.Credentials,
+					Credentials: o.Result.Credentials,
 				},
 				redactor: redactor,
 			})

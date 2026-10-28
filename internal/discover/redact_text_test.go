@@ -31,7 +31,7 @@ func newSecrets(values ...string) []Secret {
 
 // cutUTF8 is a copy of the rune-boundary cut of internal/llm (which this
 // package cannot import): s cut to at most limit bytes at the start of a rune,
-// and whether it cut. A negative limit counts as 0. The RedactTextPrefix
+// and whether it cut. A negative limit counts as 0. The redactTextPrefix
 // contract promises the same cut for its result and for redactText.
 func cutUTF8(s string, limit int) (string, bool) {
 	limit = max(limit, 0)
@@ -48,14 +48,14 @@ func cutUTF8(s string, limit int) (string, bool) {
 
 // redactText replaces each occurrence of each value in values with Mask in
 // all of s, and reports whether it wrote a Mask. The values normally come
-// from SecretTextValues. See redactWindow for how the occurrences are found
+// from secretTextValues. See redactWindow for how the occurrences are found
 // and replaced.
 //
-// redactText reads all of s. The values must not be empty (SecretTextValues
+// redactText reads all of s. The values must not be empty (secretTextValues
 // gives only values of at least MinSecretBytes bytes). An empty value is
 // skipped.
 //
-// Only the tests use it, as the reference for RedactTextPrefix and
+// Only the tests use it, as the reference for redactTextPrefix and
 // TextRedactor. It builds the search tables of the values on each call. Code
 // outside the tests uses a TextRedactor, which builds the tables once.
 func redactText(s string, values []string) (string, bool) {
@@ -102,7 +102,7 @@ func redactOracleStarts(s string, values []string) (string, []int) {
 	return b.String(), starts
 }
 
-// wantRedactedFlag is the redacted rule of RedactTextPrefix: true when a Mask
+// wantRedactedFlag is the redacted rule of redactTextPrefix: true when a Mask
 // of the whole result starts in its first limit+1 bytes.
 func wantRedactedFlag(starts []int, limit int) bool {
 	return slices.ContainsFunc(starts, func(at int) bool { return at <= limit })
@@ -148,7 +148,7 @@ func FuzzRedactText(f *testing.F) {
 			}
 			values = append(values, b.String())
 		}
-		got, ok := redactText(s, SecretTextValues(newSecrets(v1, v2)))
+		got, ok := redactText(s, secretTextValues(newSecrets(v1, v2)))
 		want, wantOK := redactOracle(s, values)
 		if got != want || ok != wantOK {
 			t.Fatalf("redactText(%q, %q, %q) = (%q, %v), want (%q, %v)", s, v1, v2, got, ok, want, wantOK)
@@ -219,7 +219,7 @@ func TestPerByteForm(t *testing.T) {
 	}
 }
 
-// TestSecretTextValues pins which values SecretTextValues gives: each value of
+// TestSecretTextValues pins which values secretTextValues gives: each value of
 // at least MinSecretBytes bytes and, for a value that is not valid UTF-8, its
 // decoded form. MinSecretBytes applies to the raw value only, so a short value
 // gives no decoded form, even when that form has 8 bytes or more.
@@ -250,14 +250,14 @@ func TestSecretTextValues(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := SecretTextValues(newSecrets(tt.secrets...)); !slices.Equal(got, tt.want) {
-				t.Errorf("SecretTextValues(%q) = %q, want %q", tt.secrets, got, tt.want)
+			if got := secretTextValues(newSecrets(tt.secrets...)); !slices.Equal(got, tt.want) {
+				t.Errorf("secretTextValues(%q) = %q, want %q", tt.secrets, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestSecretTextValuesLarge checks SecretTextValues with many secrets: 50,000
+// TestSecretTextValuesLarge checks secretTextValues with many secrets: 50,000
 // unique values of 16 bytes (some not valid UTF-8), then each of them again
 // and the decoded forms as secrets of their own. The result must hold each
 // value and decoded form once, in the order of the first occurrence. The time
@@ -292,7 +292,7 @@ func TestSecretTextValuesLarge(t *testing.T) {
 	}
 
 	start := time.Now()
-	got := SecretTextValues(newSecrets(secrets...))
+	got := secretTextValues(newSecrets(secrets...))
 	elapsed := time.Since(start)
 
 	// The failure messages give counts and indexes only: the list is long.
@@ -300,26 +300,26 @@ func TestSecretTextValuesLarge(t *testing.T) {
 		t.Fatalf("test setup: %d wanted values, want %d", len(want), wantLen)
 	}
 	if len(got) != len(want) {
-		t.Fatalf("SecretTextValues() gives %d values, want %d", len(got), len(want))
+		t.Fatalf("secretTextValues() gives %d values, want %d", len(got), len(want))
 	}
 	seen := make(map[string]int, len(got))
 	for i, v := range got {
 		if j, ok := seen[v]; ok {
-			t.Fatalf("SecretTextValues() value %d is the same as value %d", i, j)
+			t.Fatalf("secretTextValues() value %d is the same as value %d", i, j)
 		}
 		seen[v] = i
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("SecretTextValues() value %d is not in first-occurrence order", i)
+			t.Fatalf("secretTextValues() value %d is not in first-occurrence order", i)
 		}
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("SecretTextValues() took %v for %d secrets, want less than 2s (a quadratic dedupe?)", elapsed, len(secrets))
+		t.Errorf("secretTextValues() took %v for %d secrets, want less than 2s (a quadratic dedupe?)", elapsed, len(secrets))
 	}
 }
 
-// secretValuesReference is a plain reference for SecretTextValues: the same
+// secretValuesReference is a plain reference for secretTextValues: the same
 // rules, with a linear search for the dedupe. It is slow for many values, so
 // use it only with short lists.
 func secretValuesReference(secrets []Secret) []string {
@@ -342,7 +342,7 @@ func secretValuesReference(secrets []Secret) []string {
 	return values
 }
 
-// TestSecretTextValuesMatchesReference compares SecretTextValues with
+// TestSecretTextValuesMatchesReference compares secretTextValues with
 // secretValuesReference for random lists of secrets. A small set of pieces
 // makes duplicates, values near MinSecretBytes and invalid UTF-8 frequent.
 // Some secrets repeat an earlier secret or its decoded form. The seed is
@@ -370,9 +370,9 @@ func TestSecretTextValuesMatchesReference(t *testing.T) {
 			}
 		}
 		secrets := newSecrets(values...)
-		got, want := SecretTextValues(secrets), secretValuesReference(secrets)
+		got, want := secretTextValues(secrets), secretValuesReference(secrets)
 		if !slices.Equal(got, want) {
-			t.Fatalf("SecretTextValues(%q) = %q, want %q", values, got, want)
+			t.Fatalf("secretTextValues(%q) = %q, want %q", values, got, want)
 		}
 
 		// Count the paths that the lists reach.
@@ -401,7 +401,7 @@ func TestSecretTextValuesMatchesReference(t *testing.T) {
 	}
 }
 
-// checkPrefixIdentity checks the contract of RedactTextPrefix for one input
+// checkPrefixIdentity checks the contract of redactTextPrefix for one input
 // against the reference redaction of all of s (redactText and
 // redactOracleStarts): the result is a prefix of the reference, it is the
 // whole reference or longer than limit, the cut gives the same text and flag,
@@ -410,31 +410,31 @@ func TestSecretTextValuesMatchesReference(t *testing.T) {
 func checkPrefixIdentity(t *testing.T, s string, values []string, limit int) (string, []int) {
 	t.Helper()
 
-	out, redacted := RedactTextPrefix(s, values, limit)
+	out, redacted := redactTextPrefix(s, values, limit)
 	ref, _ := redactText(s, values)
 	oracle, starts := redactOracleStarts(s, values)
 	if ref != oracle {
 		t.Fatalf("redactText(%q) = %q, want the oracle %q", s, ref, oracle)
 	}
 	if !strings.HasPrefix(ref, out) {
-		t.Fatalf("RedactTextPrefix(%q, %d) = %q, not a prefix of %q", s, limit, out, ref)
+		t.Fatalf("redactTextPrefix(%q, %d) = %q, not a prefix of %q", s, limit, out, ref)
 	}
 	if len(out) <= max(limit, 0) && out != ref {
-		t.Fatalf("RedactTextPrefix(%q, %d) = %q, want more than %d bytes or all of %q", s, limit, out, limit, ref)
+		t.Fatalf("redactTextPrefix(%q, %d) = %q, want more than %d bytes or all of %q", s, limit, out, limit, ref)
 	}
 	got, gotCut := cutUTF8(out, limit)
 	want, wantCut := cutUTF8(ref, limit)
 	if got != want || gotCut != wantCut {
-		t.Fatalf("cut of RedactTextPrefix(%q, %d) = (%q, %v), want (%q, %v)", s, limit, got, gotCut, want, wantCut)
+		t.Fatalf("cut of redactTextPrefix(%q, %d) = (%q, %v), want (%q, %v)", s, limit, got, gotCut, want, wantCut)
 	}
 	if wantFlag := wantRedactedFlag(starts, max(limit, 0)); redacted != wantFlag {
-		t.Fatalf("RedactTextPrefix(%q, %d) redacted = %v, want %v (Masks at %v)", s, limit, redacted, wantFlag, starts)
+		t.Fatalf("redactTextPrefix(%q, %d) redacted = %v, want %v (Masks at %v)", s, limit, redacted, wantFlag, starts)
 	}
 	return ref, starts
 }
 
 // TestRedactTextPrefix pins the result and the redacted flag of
-// RedactTextPrefix with a small limit, at the window end and around it.
+// redactTextPrefix with a small limit, at the window end and around it.
 func TestRedactTextPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -475,12 +475,12 @@ func TestRedactTextPrefix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, flag := RedactTextPrefix(tt.s, tt.values, tt.limit)
+			got, flag := redactTextPrefix(tt.s, tt.values, tt.limit)
 			if got != tt.want || flag != tt.wantFlag {
-				t.Errorf("RedactTextPrefix(%q, %d) = (%q, %v), want (%q, %v)", tt.s, tt.limit, got, flag, tt.want, tt.wantFlag)
+				t.Errorf("redactTextPrefix(%q, %d) = (%q, %v), want (%q, %v)", tt.s, tt.limit, got, flag, tt.want, tt.wantFlag)
 			}
 			if strings.Contains(got, "SEC") {
-				t.Errorf("RedactTextPrefix(%q, %d) = %q holds a part of the secret", tt.s, tt.limit, got)
+				t.Errorf("redactTextPrefix(%q, %d) = %q holds a part of the secret", tt.s, tt.limit, got)
 			}
 			checkPrefixIdentity(t, tt.s, tt.values, tt.limit)
 		})
@@ -528,21 +528,21 @@ func TestRedactTextMaskEdge(t *testing.T) {
 	if !strings.Contains(got, "abcdefg*") {
 		t.Error("the known limit is gone: update the doc of redactWindow and this test")
 	}
-	if pGot, _ := RedactTextPrefix("abcdefgSECRETxy", values, 100); pGot != got {
-		t.Errorf("RedactTextPrefix() = %q, want %q", pGot, got)
+	if pGot, _ := redactTextPrefix("abcdefgSECRETxy", values, 100); pGot != got {
+		t.Errorf("redactTextPrefix() = %q, want %q", pGot, got)
 	}
 }
 
-// TestRedactTextPrefixRandomText compares RedactTextPrefix with the reference
+// TestRedactTextPrefixRandomText compares redactTextPrefix with the reference
 // redaction of the whole text, for random text from a small alphabet, the
 // secrets and their decoded forms, and random small limits. The seed is fixed,
 // so a failure repeats.
 func TestRedactTextPrefixRandomText(t *testing.T) {
 	t.Parallel()
 
-	values := SecretTextValues(newSecrets("abcabcab", "cabbacab", "ab\xffcabca"))
+	values := secretTextValues(newSecrets("abcabcab", "cabbacab", "ab\xffcabca"))
 	if len(values) != 4 {
-		t.Fatalf("SecretTextValues() gives %d values, want 4 (with a decoded form)", len(values))
+		t.Fatalf("secretTextValues() gives %d values, want 4 (with a decoded form)", len(values))
 	}
 	m := Mask
 	pieces := []string{"a", "b", "c", "*", "\xff", ffd, "é", " ", m, "abcabcab", "cabbacab", "ab\xffcabca", "ab" + ffd + "cabca"}
@@ -627,7 +627,7 @@ func TestBorders(t *testing.T) {
 
 // TestRedactPeriodicValues pins redactText for values that have a border (a
 // prefix that is also a suffix), where the search must go on inside a match
-// or a partial match. It also compares redactText and RedactTextPrefix, for
+// or a partial match. It also compares redactText and redactTextPrefix, for
 // several limits, with the reference oracle (see checkPrefixIdentity).
 func TestRedactPeriodicValues(t *testing.T) {
 	t.Parallel()
@@ -692,11 +692,11 @@ func TestRedactLongPeriodicSecret(t *testing.T) {
 	}
 	// With a limit of 4 the result stops after the Mask: it is a prefix of
 	// want with more than 4 bytes.
-	if got, flag := RedactTextPrefix(text, values, 4); got != "x"+Mask || !flag {
-		t.Errorf("RedactTextPrefix(4) = (%d bytes, %v), want (%q, true)", len(got), flag, "x"+Mask)
+	if got, flag := redactTextPrefix(text, values, 4); got != "x"+Mask || !flag {
+		t.Errorf("redactTextPrefix(4) = (%d bytes, %v), want (%q, true)", len(got), flag, "x"+Mask)
 	}
-	if got, flag := RedactTextPrefix(text, values, 100); got != want || !flag {
-		t.Errorf("RedactTextPrefix(100) = (%d bytes, %v), want (%q, true)", len(got), flag, want)
+	if got, flag := redactTextPrefix(text, values, 100); got != want || !flag {
+		t.Errorf("redactTextPrefix(100) = (%d bytes, %v), want (%q, true)", len(got), flag, want)
 	}
 	// One byte short of a match: the text stays as it is.
 	short := strings.Repeat("a", 4095)
@@ -705,7 +705,7 @@ func TestRedactLongPeriodicSecret(t *testing.T) {
 	}
 }
 
-// TestRedactRandomPeriodic compares redactText and RedactTextPrefix with the
+// TestRedactRandomPeriodic compares redactText and redactTextPrefix with the
 // reference oracle for random text and random values over the small alphabet
 // "ab*". TestRedactTextPrefixRandomText uses fixed values. Here the values are
 // random too, and often a repeated unit ("abab", "aaa"), so the borders of the
@@ -812,7 +812,7 @@ func BenchmarkRedactNonPeriodicSecret(b *testing.B) {
 }
 
 // TestTextRedactorMatchesReference compares TextRedactor.Text and
-// TextRedactor.Prefix with the reference forms redactText and RedactTextPrefix
+// TextRedactor.Prefix with the reference forms redactText and redactTextPrefix
 // (which the tests above check against the oracle) for random secrets and
 // random text. The secrets are periodic or random over a small alphabet with
 // an invalid UTF-8 byte, so they match often, overlap, and get a decoded
@@ -843,7 +843,7 @@ func TestTextRedactorMatchesReference(t *testing.T) {
 			}
 		}
 		secrets := newSecrets(raw...)
-		values := SecretTextValues(secrets)
+		values := secretTextValues(secrets)
 		r := NewTextRedactor(secrets)
 
 		// The text is built from the values and their decoded forms, whole
@@ -870,7 +870,7 @@ func TestTextRedactorMatchesReference(t *testing.T) {
 			masked++
 		}
 		limit := rng.IntN(len(s)+4) - 2 // a few negative limits too
-		wantPrefix, wantPrefixFlag := RedactTextPrefix(s, values, limit)
+		wantPrefix, wantPrefixFlag := redactTextPrefix(s, values, limit)
 		if got, flag := r.Prefix(s, limit); got != wantPrefix || flag != wantPrefixFlag {
 			t.Fatalf("Prefix(%q, %d) with values %q = (%q, %v), want (%q, %v)", s, limit, values, got, flag, wantPrefix, wantPrefixFlag)
 		}
@@ -1002,7 +1002,7 @@ func TestTextRedactorConcurrent(t *testing.T) {
 					if got := r.Text(s); got != want {
 						t.Fatalf("Text(%q) = %q, want %q", s, got, want)
 					}
-					wantPrefix, wantFlag := RedactTextPrefix(s, values, 20)
+					wantPrefix, wantFlag := redactTextPrefix(s, values, 20)
 					if got, flag := r.Prefix(s, 20); got != wantPrefix || flag != wantFlag {
 						t.Fatalf("Prefix(%q, 20) = (%q, %v), want (%q, %v)", s, got, flag, wantPrefix, wantFlag)
 					}
