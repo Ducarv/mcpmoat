@@ -35,7 +35,9 @@ vuln_ver=$(current_pin GOVULNCHECK_VERSION)
 # check requires for a job with a goreleaser-action step.
 gr_ver=$(current_pin GORELEASER_VERSION)
 # An empty pin would make many cases fail with a text that hides the cause.
-[ -n "$vuln_ver" ] && [ -n "$gr_ver" ] || fail "cannot read the pins from $wfdir/ci.yml"
+if [ -z "$vuln_ver" ] || [ -z "$gr_ver" ]; then
+  fail "cannot read the pins from $wfdir/ci.yml"
+fi
 
 # sub edits a file of the copy with a sed expression. It works with GNU and
 # BSD sed. It fails when sed fails or when the expression changes nothing, so
