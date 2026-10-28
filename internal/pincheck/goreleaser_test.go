@@ -534,6 +534,143 @@ func TestGoreleaserLocalActions(t *testing.T) {
 	})
 }
 
+// TestGoreleaserActionYAML covers the decoded check of a YAML file under
+// .github/actions. A YAML escape such as \x2d hides the name from the raw bytes,
+// but the decoded scalars show it. Each case has one file, so the messages are
+// exact. The negative cases are the same escape in a file that is not YAML, a
+// file that names another action, and a file that does not name the action.
+func TestGoreleaserActionYAML(t *testing.T) {
+	t.Parallel()
+	const (
+		action = ".github/actions/build/action.yml"
+		// actionMsg is the message of action when it names the action.
+		actionMsg = action + ": names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"
+	)
+	tests := []struct {
+		name string
+		path string
+		data string
+		want []string // the exact messages, in order; nil means none
+	}{
+		{
+			name: "escaped hyphen in action.yml",
+			path: action,
+			data: `runs:
+  steps:
+    - uses: "goreleaser/goreleaser\x2daction@v6"
+`,
+			want: []string{actionMsg},
+		},
+		{
+			name: "escaped hyphen in action.yml, another action",
+			path: action,
+			data: `runs:
+  steps:
+    - uses: "goreleaser/goreleaser\x2dtool@v1"
+`,
+		},
+		{
+			name: "escaped hyphen in action.yaml",
+			path: ".github/actions/build/action.yaml",
+			data: `uses: "goreleaser/goreleaser\x2daction@v6"
+`,
+			want: []string{".github/actions/build/action.yaml: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+		},
+		{
+			name: "escaped hyphen in action.YML with an upper case extension",
+			path: ".github/actions/build/action.YML",
+			data: `uses: "goreleaser/goreleaser\x2daction@v6"
+`,
+			want: []string{".github/actions/build/action.YML: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+		},
+		{
+			// A backslash at the end of a line in a double-quoted scalar escapes the
+			// line break, so the two lines join into the name.
+			name: "name folded over two lines in a double-quoted scalar",
+			path: action,
+			data: `runs:
+  steps:
+    - uses: "goreleaser/goreleaser-\
+      action@v6"
+`,
+			want: []string{actionMsg},
+		},
+		{
+			name: "plain name in action.yml gives one message",
+			path: action,
+			data: `runs:
+  steps:
+    - uses: goreleaser/goreleaser-action@v6
+`,
+			want: []string{actionMsg},
+		},
+		{
+			name: "action.yml that does not name the action",
+			path: action,
+			data: `runs:
+  using: composite
+`,
+		},
+		{
+			// The escape is text in a file that is not YAML: only the raw check runs.
+			name: "escaped name in a text file",
+			path: ".github/actions/build/notes.txt",
+			data: `uses: "goreleaser/goreleaser\x2daction@v6"
+`,
+		},
+		{
+			name: "plain name in a shell file gives one message",
+			path: ".github/actions/build/run.sh",
+			data: "uses: goreleaser/goreleaser-action@v6\n",
+			want: []string{".github/actions/build/run.sh: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file"},
+		},
+		{
+			name: "unparsable action.yml fails closed",
+			path: action,
+			data: "steps: [unclosed\n",
+			want: []string{action + ": parse YAML: yaml: line 1: did not find expected ',' or ']'"},
+		},
+		{
+			name: "anchor in action.yml fails closed",
+			path: action,
+			data: `runs:
+  x: &a y
+`,
+			want: []string{action + ":2: an anchor (&a) is not allowed"},
+		},
+		{
+			name: "two documents in action.yml fail closed",
+			path: action,
+			data: `name: a
+---
+name: b
+`,
+			want: []string{action + ":2: the file has more than one YAML document"},
+		},
+		{
+			name: "empty action.yml fails closed",
+			path: action,
+			data: "",
+			want: []string{action + ": the file has no YAML document"},
+		},
+		{
+			name: "file over the limit",
+			path: action,
+			data: strings.Repeat("x", maxFileBytes+1),
+			want: []string{action + ": the file has more than 1048576 bytes, so the check does not read it"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := fstest.MapFS{tt.path: {Data: []byte(tt.data)}}
+			if got := grWalkActions(fsys, grActionsPath); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("grWalkActions() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestGoreleaserMissingWorkflow covers a missing ci.yml or release.yml. The
 // rules that need the workflow do not run and give no message: check reports
 // the missing file once. Each case also changes a pin, so a rule that still

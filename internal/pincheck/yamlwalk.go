@@ -212,6 +212,16 @@ func (w *workflow) checkKeys(m *yaml.Node) error {
 // the key node and the value node, or two nil nodes when m has no such key.
 // It returns an error when m is not a mapping. parseWorkflow rejected
 // duplicate keys, so there is at most one match.
+//
+// The key-matching policy. Three helpers read keys. Each rule uses the one
+// that fits it:
+//   - lookup ignores case. Use it for a rule that reads a value and must
+//     overmatch, so that a key GitHub may read as the name is still checked.
+//   - exactValue and exactPair (in govulncheck.go) match the exact case. Use
+//     them where finding the key SATISFIES a "must have" rule. GitHub reads
+//     keys case-sensitively, so a key in another case does not satisfy it.
+//   - keyIs ignores case and the spaces around the key. Use it for a rule that
+//     looks for a forbidden key, so that any spelling GitHub may read fails.
 func (w *workflow) lookup(m *yaml.Node, key string) (k, v *yaml.Node, err error) {
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil, nil, w.errorAt(m, "looking for %q: want a mapping, found %s", key, kindName(m))
@@ -308,7 +318,7 @@ func (w *workflow) steps(j job) ([]*yaml.Node, error) {
 
 // envProblems returns one problem for each mapping key named env (compared
 // case-insensitively) whose value is not a mapping, at any depth of the
-// workflow, in file order. GitHub reads env at the workflow, the job and the
+// workflow, in the order of allPairs. GitHub reads env at the workflow, the job and the
 // step level, and a lower level overrides a higher one. A value that is not a
 // mapping, such as an expression ${{ fromJSON(...) }}, a block scalar or an
 // empty value, can build a variable such as GORELEASER_VERSION at run time,
@@ -392,8 +402,9 @@ func pairs(m *yaml.Node) iter.Seq2[*yaml.Node, *yaml.Node] {
 }
 
 // allPairs returns the key and the value node of each entry of each mapping of
-// the workflow, in file order: a mapping comes before the mappings below it. It
-// walks the whole tree with walk, so a mapping at any depth is included. A
+// the workflow. All the pairs of a mapping come before the pairs of the mappings
+// below it, and the pairs of one mapping are in file order. It walks the whole
+// tree with walk, so a mapping at any depth is included. A
 // break in the range loop is safe: after the loop stops, no more pairs are
 // yielded, and the walk ends without a yield.
 func (w *workflow) allPairs() iter.Seq2[*yaml.Node, *yaml.Node] {

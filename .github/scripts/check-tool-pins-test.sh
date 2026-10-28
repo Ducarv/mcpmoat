@@ -34,6 +34,8 @@ vuln_ver=$(current_pin GOVULNCHECK_VERSION)
 # gr_ver is the GoReleaser pin of ci.yml. The new workflows define it, as the
 # check requires for a job with a goreleaser-action step.
 gr_ver=$(current_pin GORELEASER_VERSION)
+# An empty pin would make many cases fail with a text that hides the cause.
+[ -n "$vuln_ver" ] && [ -n "$gr_ver" ] || fail "cannot read the pins from $wfdir/ci.yml"
 
 # sub edits a file of the copy with a sed expression. It works with GNU and
 # BSD sed. It fails when sed fails or when the expression changes nothing, so
@@ -580,7 +582,14 @@ pins_case "actions: composite action with goreleaser-action" 1 ".github/actions/
   steps:
     - uses: goreleaser/goreleaser-action@x"
 pins_case "actions: other case" 1 "$in_action" actions_file "    - uses: GoReleaser/GoReleaser-Action@x"
-pins_case "actions: other action" 0 "" actions_file "    - uses: actions/checkout@x"
+pins_case "actions: other action" 0 "" actions_file "runs:
+  steps:
+    - uses: actions/checkout@x"
+# The YAML escape \x2d hides the name in the raw bytes, but the decoded value has it.
+pins_case "actions: escaped name in action.yml" 1 ".github/actions/x/action.yml: $in_action" actions_file 'runs:
+  using: composite
+  steps:
+    - uses: "goreleaser/goreleaser\x2daction@v6"'
 pins_case "actions: symlinked directory" 1 ".github/actions/y: is a symlink" symlinked_action
 
 # A # starts a comment only after a space.

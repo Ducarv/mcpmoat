@@ -113,6 +113,11 @@ func TestGovulncheckRules(t *testing.T) {
 	const notAllowed = `names govulncheck, but it is not the GOVULNCHECK_VERSION pin, the call or an allowed name`
 	const coe = `continue-on-error is not allowed in this file`
 	const others = `the workflow names govulncheck. Only ci.yml, release.yml and govulncheck.yml may`
+	// jobCall is the message when the job govulncheck of govulncheck.yml, which
+	// notify-failure waits for, does not run the call. Its key is on line 8.
+	const jobCall = `.github/workflows/govulncheck.yml:8: the job "govulncheck" must run the govulncheck call: notify-failure waits for it`
+	// jobMissing is the message when govulncheck.yml has no job govulncheck.
+	const jobMissing = `.github/workflows/govulncheck.yml: the job "govulncheck" is missing: notify-failure waits for it`
 	// jobIf is the message for a job-level if: key of the job job, which runs
 	// the call, in the file p at the line line.
 	jobIf := func(p string, line int, job string) string {
@@ -296,8 +301,8 @@ func TestGovulncheckRules(t *testing.T) {
 		{
 			name:   "call missing in govulncheck.yml",
 			mutate: replaceOnce(weeklyPath, gvTestRunLine, "        run: go test ./..."),
-			want:   []string{".github/workflows/govulncheck.yml: " + noCall},
-			n:      1,
+			want:   []string{".github/workflows/govulncheck.yml: " + noCall, jobCall},
+			n:      2,
 		},
 		{
 			name:   "call in a clip block has a trailing newline",
@@ -348,8 +353,8 @@ func TestGovulncheckRules(t *testing.T) {
 		{
 			name:   "run key with another case in govulncheck.yml",
 			mutate: replaceOnce(weeklyPath, gvTestRunLine, `        Run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`),
-			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
-			n:      2,
+			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed, jobCall},
+			n:      3,
 		},
 		{
 			name:   "steps key with another case in ci.yml",
@@ -366,8 +371,14 @@ func TestGovulncheckRules(t *testing.T) {
 		{
 			name:   "steps key with another case in govulncheck.yml",
 			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n    steps:\n", "  govulncheck:\n    runs-on: ubuntu-latest\n    Steps:\n"),
-			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
-			n:      2,
+			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed, jobCall},
+			n:      3,
+		},
+		{
+			// A job under the key Steps has no steps, so its scalar is not read as
+			// steps and gives no message. The job runs no call, so no rule reads it.
+			name:   "Steps key with a scalar is not read as steps",
+			mutate: extraJob("  other:\n    Steps: x"),
 		},
 
 		// (2) The call: structure errors.
@@ -489,8 +500,40 @@ func TestGovulncheckRules(t *testing.T) {
 				replaceOnce(weeklyPath, "needs: govulncheck", "needs: notify"),
 				replaceOnce(weeklyPath, "needs.govulncheck.result", "needs.notify.result"),
 			),
-			want: []string{`govulncheck.yml:8: "Govulncheck" ` + notAllowed},
+			want: []string{`govulncheck.yml:8: "Govulncheck" ` + notAllowed, jobMissing},
+			n:    2,
+		},
+		{
+			// notify-failure waits for the job govulncheck. The job that runs the
+			// call is scan, and the job govulncheck runs nothing: the rule reports it.
+			name: "call moved to job scan, job govulncheck runs nothing",
+			mutate: applyAll(
+				replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  scan:\n    runs-on: ubuntu-latest\n"),
+				replaceOnce(weeklyPath, "  notify-failure:\n", "  govulncheck:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo nothing\n  notify-failure:\n"),
+			),
+			want: []string{`.github/workflows/govulncheck.yml:15: the job "govulncheck" must run the govulncheck call: notify-failure waits for it`},
 			n:    1,
+		},
+		{
+			// The positive twin of the case above: the job govulncheck runs the
+			// call after another step, so the rule passes.
+			name:   "job govulncheck runs the call after another step",
+			mutate: replaceOnce(weeklyPath, "      - name: Check for known vulnerabilities\n", "      - run: echo start\n      - name: Check for known vulnerabilities\n"),
+		},
+		{
+			name:   "no job named govulncheck in govulncheck.yml",
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  scan:\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobMissing},
+			n:      1,
+		},
+		{
+			// The rule is for govulncheck.yml only. A job scan that runs the call
+			// is fine in ci.yml and release.yml, which have no job govulncheck.
+			name: "job scan runs the call in ci.yml and release.yml, no job govulncheck",
+			mutate: applyAll(
+				replaceOnce(ciPath, "  test:\n", "  scan:\n"),
+				replaceOnce(releasePath, "  test:\n", "  scan:\n"),
+			),
 		},
 		{
 			name:   "job ID govulncheck in ci.yml",
@@ -915,6 +958,50 @@ func TestExactValue(t *testing.T) {
 		w := mustParse(t, ciPath, "run: echo\n")
 		if got := exactValue(w.top.Content[0], "run"); got != nil {
 			t.Errorf("exactValue(scalar) = %v, want nil", got)
+		}
+	})
+}
+
+// TestExactPair checks that exactPair returns the key node and the value node
+// of a key with exactly the text name, and two nil nodes otherwise.
+func TestExactPair(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		src     string
+		key     string
+		wantKey string // the key text; "" when exactPair must return nil nodes
+		wantVal string // the value text
+	}{
+		{name: "exact key", src: "run: echo\n", key: "run", wantKey: "run", wantVal: "echo"},
+		{name: "other case is not found", src: "Run: x\n", key: "run"},
+		{name: "missing key", src: "steps: []\n", key: "run"},
+		{name: "key with spaces is not found by its name", src: "\" run \": y\n", key: "run"},
+		{name: "key with spaces, exact", src: "\" run \": y\n", key: " run ", wantKey: " run ", wantVal: "y"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := mustParse(t, ciPath, tt.src)
+			k, v := exactPair(w.top, tt.key)
+			if tt.wantKey == "" {
+				if k != nil || v != nil {
+					t.Errorf("exactPair(%q) = %v, %v, want two nil nodes", tt.key, k, v)
+				}
+				return
+			}
+			if k == nil || k.Value != tt.wantKey || v == nil || v.Value != tt.wantVal {
+				t.Errorf("exactPair(%q) = %v, %v, want the key %q and the value %q", tt.key, k, v, tt.wantKey, tt.wantVal)
+			}
+		})
+	}
+	t.Run("scalar has no pairs", func(t *testing.T) {
+		t.Parallel()
+		// The first Content node of the top mapping is the key "run", a scalar. A
+		// scalar has no pairs, so there is no key to find.
+		w := mustParse(t, ciPath, "run: echo\n")
+		if k, v := exactPair(w.top.Content[0], "run"); k != nil || v != nil {
+			t.Errorf("exactPair(scalar) = %v, %v, want two nil nodes", k, v)
 		}
 	})
 }

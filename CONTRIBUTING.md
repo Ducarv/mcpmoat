@@ -172,9 +172,11 @@ The GoReleaser rules:
 - `CONTRIBUTING.md` names at least one GoReleaser version (such as a `goreleaser/v2@` command).
   Each `goreleaser@` or `goreleaser/vN@` version in it is the pin of `ci.yml`.
 - A file under `.github/actions` that names the action (in any case) fails, so that a new local
-  action cannot skip the rules. A symlink there fails too, and so does any other entry that is not
-  a regular file or a directory. The name `.github/actions` matches in any case, for example
-  `.github/Actions`.
+  action cannot skip the rules. A YAML file there (`.yml` or `.yaml`) is read as decoded YAML, as
+  the workflows are, so an escape such as `\x2d` cannot hide the name. A YAML file that does not
+  parse fails. Other files are matched on their raw text. A symlink there fails too, and so does
+  any other entry that is not a regular file or a directory. The name `.github/actions` matches in
+  any case, for example `.github/Actions`.
 
 The govulncheck rules:
 
@@ -183,6 +185,8 @@ The govulncheck rules:
   the file.
 - Each of the three files has a step whose `run:` value is exactly
   `go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`.
+- `govulncheck.yml` has a job with the ID `govulncheck`, and that job has that step. The
+  `notify-failure` job waits for it, so the scan must be in that job.
 - In the three files, a job that has that step has no job-level `if:` key and no job-level
   `needs:` key. GitHub skips such a job when its `if:` is false. It also skips a job that waits
   (`needs:`) for a skipped job. Then the scan would not run.

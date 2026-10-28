@@ -132,6 +132,8 @@ func grScanWorkflow(w *workflow) grScan {
 		s.pins = append(s.pins, pins...)
 		s.msgs = append(s.msgs, msgs...)
 
+		// w.steps reads the key steps ignoring case, on purpose: a Steps: key is
+		// read as steps, so the rules below cover its steps too.
 		steps, err := w.steps(j)
 		if err != nil {
 			s.msgs = append(s.msgs, err.Error())
@@ -197,6 +199,9 @@ func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins
 // grVersionInput. It adds the uses value to okUses and an allowed version
 // input to okPin.
 func grCheckStep(w *workflow, step *yaml.Node, okPin, okUses map[*yaml.Node]bool) (isAction bool, msgs []string) {
+	// The keys uses and with are read with lookup, which ignores case. This is
+	// deliberate: a Uses: key is read as uses, so the GoReleaser rules overmatch
+	// and a key in another case cannot hide a step.
 	uses, err := w.scalarAt(step, "uses")
 	if err != nil {
 		return false, []string{err.Error()}
@@ -345,8 +350,8 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 			msgs = append(msgs, fmt.Sprintf("%s: %v", p, err))
 			return nil
 		}
-		if bytes.Contains(bytes.ToLower(data), []byte(grAction)) {
-			msgs = append(msgs, fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read %s. Extend the check before you add such a file", p, grActionsPath))
+		if msg := grActionProblem(p, data); msg != "" {
+			msgs = append(msgs, msg)
 		}
 		return nil
 	})
@@ -354,4 +359,41 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 		msgs = append(msgs, fmt.Sprintf("%s: walk: %v", dir, noPath(walkErr)))
 	}
 	return msgs
+}
+
+// grActionProblem returns the one problem of the file p under .github/actions,
+// with its bytes data, or "" when the file is fine. Every file is searched as
+// raw bytes, in any case. A file named .yml or .yaml is also parsed with
+// parseWorkflow, so that its decoded scalars are searched too. A YAML escape
+// such as \x2d can hide the name in the raw bytes, but not in the decoded text.
+// A YAML file that does not parse fails closed, with the error of parseWorkflow,
+// which starts with the path. The raw hit and the decoded hit give the same text.
+func grActionProblem(p string, data []byte) string {
+	if bytes.Contains(bytes.ToLower(data), []byte(grAction)) {
+		return grActionText(p)
+	}
+	if !grIsYAMLName(p) {
+		return ""
+	}
+	w, err := parseWorkflow(p, data)
+	if err != nil {
+		return err.Error()
+	}
+	for _, n := range w.scalars() {
+		if strings.Contains(strings.ToLower(n.Value), grAction) {
+			return grActionText(p)
+		}
+	}
+	return ""
+}
+
+// grActionText returns the problem of the file p, which names the action.
+func grActionText(p string) string {
+	return fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read %s. Extend the check before you add such a file", p, grActionsPath)
+}
+
+// grIsYAMLName reports whether the file name p ends in .yml or .yaml, in any case.
+func grIsYAMLName(p string) bool {
+	ext := strings.ToLower(path.Ext(p))
+	return ext == ".yml" || ext == ".yaml"
 }

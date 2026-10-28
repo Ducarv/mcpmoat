@@ -15,6 +15,8 @@ import (
 //     has the version of ci.yml.
 //   - Each of the three files has at least one step whose run value is
 //     exactly gvCall.
+//   - govulncheck.yml has a job with the ID gvName, and that job runs gvCall.
+//     notify-failure waits for that job.
 //   - In the three files, a job that has such a step has no job-level if: key
 //     and no job-level needs: key. GitHub skips a job whose if is false, and
 //     it skips a job that waits for a skipped job. Then the scan does not run.
@@ -127,6 +129,9 @@ func gvCheckListed(w *workflow, want string) []string {
 		msgs = append(msgs, w.problemAt(nil, "no step has the run value %s", gvCall))
 	}
 	msgs = append(msgs, gvJobSkipProblems(w, jobs)...)
+	if w.file == weeklyPath {
+		msgs = append(msgs, gvNameJobProblems(w, jobs)...)
+	}
 
 	// allowed holds the nodes that may name govulncheck. A map with pointer
 	// keys compares node identity, not text: the same text in another place
@@ -196,23 +201,26 @@ func gvScanJobs(w *workflow) ([]gvJob, []string) {
 }
 
 // gvJobCalls returns the run value nodes of the steps of the job j that are
-// exactly gvCall. It returns the error of w.steps when the steps of j are not
-// a list of mappings. A job that returns no call does not run govulncheck.
+// exactly gvCall. It returns an error when the steps of j are not a sequence of
+// mappings. A job that returns no call does not run govulncheck.
 //
 // GitHub reads the keys steps and run with their exact spelling. So a job with
 // the key Steps has no steps, and a step with the key Run has no run value. This
-// function reads only the exact keys, with exactValue. The name rule still
-// reports the text of such a call.
+// function reads only the exact keys, with exactPair and exactValue. The name
+// rule still reports the text of such a call.
 func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
-	steps, err := w.steps(j)
-	if err != nil {
-		return nil, err
-	}
-	if exactValue(j.body, "steps") == nil {
+	k, seq := exactPair(j.body, "steps")
+	if seq == nil {
 		return nil, nil
 	}
+	if seq.Kind != yaml.SequenceNode {
+		return nil, w.wrongKind(k, seq, yaml.SequenceNode)
+	}
 	var calls []*yaml.Node
-	for _, s := range steps {
+	for _, s := range seq.Content {
+		if s.Kind != yaml.MappingNode {
+			return nil, w.errorAt(s, "a step of the job %s must be a mapping, found %s", show(j.id), kindName(s))
+		}
 		run := exactValue(s, "run")
 		if run == nil || run.Kind != yaml.ScalarNode {
 			continue
@@ -224,16 +232,42 @@ func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
 	return calls, nil
 }
 
-// exactValue returns the value node of the key whose text is exactly name in the
-// mapping m, or nil when m has no such key. It is for the keys that GitHub reads
-// case-sensitively. lookup ignores case, so it is not used here.
-func exactValue(m *yaml.Node, name string) *yaml.Node {
+// exactPair returns the key node and the value node of the key whose text is
+// exactly name in the mapping m. It returns two nil nodes when m has no such key.
+// The caller must check first that m is a mapping. It is for the keys that
+// GitHub reads case-sensitively. lookup ignores case, so it is not used here.
+func exactPair(m *yaml.Node, name string) (*yaml.Node, *yaml.Node) {
 	for k, v := range pairs(m) {
 		if k.Value == name {
-			return v
+			return k, v
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+// exactValue returns the value node of the key whose text is exactly name in the
+// mapping m, or nil when m has no such key. See exactPair.
+func exactValue(m *yaml.Node, name string) *yaml.Node {
+	_, v := exactPair(m, name)
+	return v
+}
+
+// gvNameJobProblems returns one message when govulncheck.yml has no job with the
+// ID gvName, or when the job with that ID runs no call. notify-failure waits for
+// the job with that ID (needs: govulncheck). So the job with that ID must be the
+// job that runs the scan. Else a job renamed to scan, and a job named govulncheck
+// that runs nothing, would pass the other rules. jobs comes from gvScanJobs.
+func gvNameJobProblems(w *workflow, jobs []gvJob) []string {
+	for _, j := range jobs {
+		if j.id != gvName {
+			continue
+		}
+		if len(j.calls) == 0 {
+			return []string{w.problemAt(j.key, "the job %s must run the govulncheck call: notify-failure waits for it", show(gvName))}
+		}
+		return nil
+	}
+	return []string{w.problemAt(nil, "the job %s is missing: notify-failure waits for it", show(gvName))}
 }
 
 // gvJobSkipProblems returns one message for each job that runs the govulncheck
@@ -274,7 +308,7 @@ func gvJobSkipProblems(w *workflow, jobs []gvJob) []string {
 // a list or another value is not allowed. jobs comes from gvScanJobs.
 func gvWeeklyNames(w *workflow, jobs []gvJob) []*yaml.Node {
 	var out []*yaml.Node
-	if v := gvExactScalar(w, w.top, "name", gvName); v != nil {
+	if v := gvExactScalar(w.top, "name", gvName); v != nil {
 		out = append(out, v)
 	}
 	for _, j := range jobs {
@@ -284,10 +318,10 @@ func gvWeeklyNames(w *workflow, jobs []gvJob) []*yaml.Node {
 		if len(j.calls) > 0 {
 			continue // a job that runs the call may not name needs or if
 		}
-		if v := gvExactScalar(w, j.body, "needs", gvName); v != nil {
+		if v := gvExactScalar(j.body, "needs", gvName); v != nil {
 			out = append(out, v)
 		}
-		if v := gvExactScalar(w, j.body, "if", gvFailureIf); v != nil {
+		if v := gvExactScalar(j.body, "if", gvFailureIf); v != nil {
 			out = append(out, v)
 		}
 	}
@@ -296,21 +330,18 @@ func gvWeeklyNames(w *workflow, jobs []gvJob) []*yaml.Node {
 
 // gvExactScalar returns the value node of key in the mapping m when the key
 // has exactly that case and the value is a scalar with exactly the text want.
-// Else it returns nil.
-func gvExactScalar(w *workflow, m *yaml.Node, key, want string) *yaml.Node {
-	k, v, err := w.lookup(m, key)
-	if err != nil || k == nil || k.Value != key {
-		return nil
-	}
-	if v.Kind != yaml.ScalarNode || v.Value != want {
+// Else it returns nil. m must be a mapping.
+func gvExactScalar(m *yaml.Node, key, want string) *yaml.Node {
+	v := exactValue(m, key)
+	if v == nil || v.Kind != yaml.ScalarNode || v.Value != want {
 		return nil
 	}
 	return v
 }
 
 // gvContinueOnError returns one message for each continue-on-error key of w,
-// in file order. The compare is keyIs: it ignores case and the spaces around
-// the key.
+// in the order of allPairs. The compare is keyIs: it ignores case and the spaces
+// around the key.
 func gvContinueOnError(w *workflow) []string {
 	var msgs []string
 	for k := range w.allPairs() {
