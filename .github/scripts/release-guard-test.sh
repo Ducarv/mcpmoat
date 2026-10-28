@@ -36,7 +36,6 @@ repo=$tmp/repo
 [ -r "$workflow" ] || fail "Cannot read the workflow $workflow."
 extract_run_block "$workflow" "$step" release >"$tmp/run.sh" ||
   fail "$workflow has no run block in the step '$step'."
-grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step '$step' is empty."
 
 # The run body is inline shell in the workflow, and `shellcheck
 # .github/scripts/*.sh` does not see it.

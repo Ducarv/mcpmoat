@@ -221,12 +221,37 @@ jobs:
         run: |
           echo LEAK twice
 YAML
-# A line of only tabs and spaces is blank: in a run block, and before a job
-# key, where it must not end the jobs mapping.
-printf '  tabs:\n    steps:\n      - name: Tab\n        run: |\n          echo one\n\t\n \t \n          echo two\n\t\n  after:\n    steps:\n      - name: Tab\n        run: |\n          echo after tab\n' >>"$tmp/fixture.yml"
-# A run: | block with no body: the next line is a key of the step, and the last
-# block has only blank lines before the end of the file.
-printf '  empty:\n    steps:\n      - name: Empty\n        run: |\n        shell: bash\n      - name: Blank only\n        run: |\n\n' >>"$tmp/fixture.yml"
+# More jobs for the fixture, in one group of appends.
+{
+  # A line of only tabs and spaces is blank: in a run block, and before a job
+  # key, where it must not end the jobs mapping.
+  printf '  tabs:\n    steps:\n      - name: Tab\n        run: |\n          echo one\n\t\n \t \n          echo two\n\t\n  after:\n    steps:\n      - name: Tab\n        run: |\n          echo after tab\n'
+  # A run: | block with no body: the next line is a key of the step, and the
+  # last block has only blank lines before the next job.
+  printf '  empty:\n    steps:\n      - name: Empty\n        run: |\n        shell: bash\n      - name: Blank only\n        run: |\n\n'
+  # The body of an earlier step holds text that looks like a step with a run
+  # block (a heredoc). It is not a step, so the extractor must skip it.
+  cat <<'YAML'
+  decoy:
+    steps:
+      - name: Setup
+        run: |
+          cat <<'EOF'
+          - name: Guard
+            run: |
+              echo DECOY
+          EOF
+      - name: Folded
+        with:
+          text: >-
+            - name: Guard
+              run: |
+                echo DECOY folded
+      - name: Guard
+        run: |
+          echo real
+YAML
+} >>"$tmp/fixture.yml"
 
 target=$'echo "a ${{ github.sha }} \'q\'"\n\n  indented line\necho "end \\$x \\\\ done"   # trailing\n'
 check_cmd "extractor: block with blank lines, \${{ }} and quotes, byte for byte" block_is "$target" Target
@@ -240,6 +265,8 @@ check_cmd "extractor: a line of tabs and spaces is a blank line of the block" bl
 check_cmd "extractor: a line of tabs before a job key keeps the job" block_is $'echo after tab\n' Tab after
 check_case "extractor: a step with no run block exits 3" 3 "" extract "$tmp/fixture.yml" "No run"
 check_case "extractor: the first step with the name has no run block" 3 "" extract "$tmp/fixture.yml" Twice
+check_cmd "extractor: text in a run block or a folded block of an earlier step is not a step" block_is $'echo real\n' Guard decoy
+check_cmd "extractor: the same without the job argument" block_is $'echo real\n' Guard
 check_case "extractor: a run block with no body exits 3" 3 "" extract "$tmp/fixture.yml" Empty
 check_case "extractor: a run block of only blank lines exits 3" 3 "" extract "$tmp/fixture.yml" "Blank only"
 check_case "extractor: a missing step exits 3" 3 "" extract "$tmp/fixture.yml" Missing

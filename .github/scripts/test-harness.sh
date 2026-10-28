@@ -197,6 +197,13 @@ extract_run_block() {
       next
     }
     /^[[:space:]]*(#.*)?$/ { next }
+    # The body of a block scalar (| or >) of another key is text, not YAML:
+    # skip its lines, so a heredoc that holds "- name:" cannot look like a step.
+    skipbody {
+      match($0, /^ */)
+      if (RLENGTH > skipind) next
+      skipbody = 0
+    }
     { match($0, /^ */); ind = RLENGTH }
     ind == 0 { injobs = ($1 == "jobs:"); injob = 0 }
     ind == 2 && injobs { injob = ($1 == (job ":")) }
@@ -214,6 +221,11 @@ extract_run_block() {
       next
     }
     instep && ind == keyindent && /^ *run: *[|][-+]? *(#.*)?$/ { inrun = 1; found = 1 }
+    !inrun && /: *[|>][-+0-9]* *(#.*)?$/ {
+      match($0, /^ *(- +)*/)
+      skipbody = 1
+      skipind = RLENGTH # the column of the key: its body is indented more
+    }
     END { exit (found && printed) ? 0 : 3 }
   ' "$1"
 }
