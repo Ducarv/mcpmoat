@@ -62,7 +62,28 @@ func redactText(s string, values []string) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
 	}
-	return redactWindow(s, values, nil, len(s), -1)
+	return redactWindow(s, values, bordersOf(values), len(s), -1)
+}
+
+// bordersOf returns the border table of each value, as NewTextRedactor builds
+// them. An empty value gets no table: redactWindow skips it.
+func bordersOf(values []string) [][]int {
+	tables := make([][]int, len(values))
+	for i, v := range values {
+		if v != "" {
+			tables[i] = borders(v, nil)
+		}
+	}
+	return tables
+}
+
+// redactTextPrefix is redactPrefix for any s and values, with the tables built
+// on each call. The tests use it as the reference for TextRedactor.Prefix.
+func redactTextPrefix(s string, values []string, limit int) (string, bool) {
+	if len(values) == 0 || s == "" {
+		return s, false
+	}
+	return redactPrefix(s, values, bordersOf(values), limit)
 }
 
 // redactOracle is a slow, plain form of redactText for the tests. It tries
@@ -505,7 +526,7 @@ func TestRedactWindowEmptyValue(t *testing.T) {
 		// With no stop (-1) the result is all of it; with a stop after 5
 		// bytes it is a prefix that still holds the Mask at offset 2.
 		for _, limit := range []int{-1, 5} {
-			got, flag := redactWindow("abcdefghij", tt.values, nil, 10, limit)
+			got, flag := redactWindow("abcdefghij", tt.values, bordersOf(tt.values), 10, limit)
 			if (limit < 0 && got != tt.want) || !strings.HasPrefix(tt.want, got) || flag != tt.wantFlag {
 				t.Errorf("redactWindow(%q, %d) = (%q, %v), want a prefix of %q and %v", tt.values, limit, got, flag, tt.want, tt.wantFlag)
 			}
