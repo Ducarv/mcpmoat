@@ -214,13 +214,23 @@ Not covered:
 - The `ci-scripts` job of `ci.yml` runs this check (the step `run: .github/scripts/check-tool-pins.sh`)
   and the test of the check (the step `run: .github/scripts/check-tool-pins-test.sh`). The check does
   not read those steps, so a change that removes them is not caught.
+- A job-level `if:` on the `ci-scripts` job itself. GitHub skips a job whose `if:` is false, and a
+  skipped required check counts as passing. The check does not read that key.
 - `defaults.run.shell` of the workflow or the job, `strategy`, `runs-on` and the trigger filters
   under `on:`.
+- `defaults.run.working-directory` of the workflow or the job. The call can then scan another
+  directory.
 - Go variables in any `env:`, such as `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GOINSECURE`,
   `GOFLAGS` and `GOTOOLCHAIN`. A fake proxy can make an old govulncheck look clean.
+- The keys `BASH_ENV`, `ENV` and `PATH` in a plain `env:` mapping. They can change what runs.
 - Other ways to install or run govulncheck, such as
   `go install golang.org/x/vuln/cmd/...@latest`, or a tool name that a step builds from pieces. The
   name rule sees only the text `govulncheck` in one piece.
+- A job-level `container:` whose image has its own `go`. The call then runs with the Go of that
+  image.
+- An earlier step in the job that changes `$GITHUB_PATH`, edits `go.mod` or `go.sum`, or checks out
+  another ref. The check also does not read the `ref:` of a checkout step. A `$GITHUB_PATH` write can
+  put another `go` first on the path.
 
 Review must catch those. A follow-up issue tracks a stricter check.
 

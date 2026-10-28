@@ -330,6 +330,46 @@ func TestGovulncheckRules(t *testing.T) {
 			want:   []string{"release.yml: " + noCall, "release.yml:12: "},
 		},
 
+		// (2) The keys steps and run are read with their exact case, as GitHub
+		// reads them. A call under the key Run is not a call, and a job under
+		// the key Steps has no steps. The name rule still reports the text.
+		{
+			name:   "run key with another case in ci.yml",
+			mutate: replaceOnce(ciPath, gvTestRunLine, `        Run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`),
+			want:   []string{".github/workflows/ci.yml: " + noCall, `.github/workflows/ci.yml:15: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+		{
+			name:   "run key with another case in release.yml",
+			mutate: releaseRun(`        Run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`),
+			want:   []string{".github/workflows/release.yml: " + noCall, `.github/workflows/release.yml:12: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+		{
+			name:   "run key with another case in govulncheck.yml",
+			mutate: replaceOnce(weeklyPath, gvTestRunLine, `        Run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`),
+			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+		{
+			name:   "steps key with another case in ci.yml",
+			mutate: replaceOnce(ciPath, "    steps:\n", "    Steps:\n"),
+			want:   []string{".github/workflows/ci.yml: " + noCall, `.github/workflows/ci.yml:15: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+		{
+			name:   "steps key with another case in release.yml",
+			mutate: replaceOnce(releasePath, "    steps:\n", "    Steps:\n"),
+			want:   []string{".github/workflows/release.yml: " + noCall, `.github/workflows/release.yml:12: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+		{
+			name:   "steps key with another case in govulncheck.yml",
+			mutate: replaceOnce(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n    steps:\n", "  govulncheck:\n    runs-on: ubuntu-latest\n    Steps:\n"),
+			want:   []string{".github/workflows/govulncheck.yml: " + noCall, `.github/workflows/govulncheck.yml:14: "go run \"golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION\" ./..." ` + notAllowed},
+			n:      2,
+		},
+
 		// (2) The call: structure errors.
 		{
 			name:   "no jobs mapping",
@@ -830,4 +870,51 @@ func TestGvListedNames(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(got[0], "Only "+want+" may") {
 		t.Errorf("gvCheckOthers() = %q, want one message with %q", got, "Only "+want+" may")
 	}
+}
+
+// TestExactValue checks that exactValue matches a key only with its exact
+// text. GitHub reads steps and run with their exact case, so a key with another
+// case, or with spaces around it, is not a match.
+func TestExactValue(t *testing.T) {
+	t.Parallel()
+	// The parser rejects two keys that differ only in case, so each source
+	// holds one spelling of run. The key " run " has spaces around it.
+	tests := []struct {
+		name string
+		src  string
+		key  string
+		want string // the value text; "" when exactValue must return nil
+	}{
+		{name: "exact key", src: "run: echo\n", key: "run", want: "echo"},
+		{name: "other case of the key", src: "Run: x\n", key: "run", want: ""},
+		{name: "other case, found by its own spelling", src: "Run: x\n", key: "Run", want: "x"},
+		{name: "upper case of the key", src: "run: echo\n", key: "RUN", want: ""},
+		{name: "key with spaces around it", src: "\" run \": y\n", key: "run", want: ""},
+		{name: "key with spaces, exact", src: "\" run \": y\n", key: " run ", want: "y"},
+		{name: "missing key", src: "steps: []\n", key: "run", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := mustParse(t, ciPath, tt.src)
+			got := exactValue(w.top, tt.key)
+			if tt.want == "" {
+				if got != nil {
+					t.Errorf("exactValue(%q) = %q, want nil", tt.key, got.Value)
+				}
+				return
+			}
+			if got == nil || got.Value != tt.want {
+				t.Errorf("exactValue(%q) = %v, want the value %q", tt.key, got, tt.want)
+			}
+		})
+	}
+	t.Run("scalar has no keys", func(t *testing.T) {
+		t.Parallel()
+		// The first Content node of the top mapping is the key "run", a scalar.
+		w := mustParse(t, ciPath, "run: echo\n")
+		if got := exactValue(w.top.Content[0], "run"); got != nil {
+			t.Errorf("exactValue(scalar) = %v, want nil", got)
+		}
+	})
 }

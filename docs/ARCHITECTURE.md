@@ -96,7 +96,9 @@ docs/                   PRD and other documentation
   [The `--llm` classifier](#the---llm-classifier).
 - `internal/pincheck`: the CI-only check of the tool version pins in the workflows and in
   `CONTRIBUTING.md`. It is package `main`, and `.github/scripts/check-tool-pins.sh` runs it. It is
-  not part of the mcpmoat binary: GoReleaser builds only `./cmd/mcpmoat`. The rules are in
+  not part of the mcpmoat binary: GoReleaser builds only `./cmd/mcpmoat`. It is under `internal/`,
+  not `cmd/pincheck`, because `cmd/` holds only the programs that ship. `internal/` keeps the tool out
+  of the release build, and `./...` still covers it with build, vet and lint. The rules are in
   [CONTRIBUTING.md](../CONTRIBUTING.md#checks).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.

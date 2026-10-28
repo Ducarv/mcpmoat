@@ -371,6 +371,10 @@ pins_case "invalid YAML fails closed: key after the call" 1 "govulncheck.yml: pa
 pins_case "job ID govulncheck in ci.yml" 1 "$vuln_name" append "$wfdir/ci.yml" '  govulncheck:
     runs-on: ubuntu-latest'
 pins_case "call: no call in release.yml" 1 "release.yml: $no_call" sub "$wfdir/release.yml" '/govulncheck@/d'
+# GitHub reads the keys steps and run with their exact case, so a call under
+# the key Run, or a job under the key Steps, runs nothing.
+pins_case "call: Run key in govulncheck.yml" 1 "govulncheck.yml: $no_call" sub "$wfdir/govulncheck.yml" 's/^( +)run: go run/\1Run: go run/'
+pins_case "call: Steps key in the govulncheck job" 1 "govulncheck.yml: $no_call" sub "$wfdir/govulncheck.yml" '/^  govulncheck:/,/^  notify-failure:/ s/^    steps:/    Steps:/'
 pins_case "comment names govulncheck@v1.2.3" 0 "" append "$wfdir/release.yml" '# see govulncheck@v1.2.3'
 
 # A workflow outside the list.

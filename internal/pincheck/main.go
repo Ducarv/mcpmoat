@@ -9,9 +9,9 @@
 //	go run ./internal/pincheck [-root DIR]
 //
 // Exit codes: 0 when there is no problem, 1 when there is at least one
-// problem, 2 on a usage or setup error (a bad flag, or a root that cannot be
-// opened). Through .github/scripts/check-tool-pins.sh (go run), every non-zero
-// exit shows as exit 1. See CONTRIBUTING.md.
+// problem, 2 on an error (a bad flag, an unexpected argument, or a root that
+// cannot be opened). Through .github/scripts/check-tool-pins.sh (go run), every
+// non-zero exit shows as exit 1. See CONTRIBUTING.md.
 //
 // When the environment variable GITHUB_ACTIONS is exactly "true", as GitHub
 // Actions sets it, each problem is an ::error:: workflow command on stdout.
@@ -43,7 +43,7 @@ import (
 const (
 	exitOK       = 0 // no problem
 	exitProblems = 1 // at least one problem
-	exitUsage    = 2 // a bad flag or a setup error
+	exitError    = 2 // a bad flag, an unexpected argument or a setup error
 )
 
 // githubDir is the .github directory, relative to the root.
@@ -113,25 +113,25 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK // -h or -help: the FlagSet printed the usage
 		}
-		return exitUsage // the FlagSet printed the error and the usage
+		return exitError // the FlagSet printed the error and the usage
 	}
 	if flags.NArg() > 0 {
 		out.problem(fmt.Sprintf("unexpected argument %s. Usage: pincheck [-root DIR]", termsafe.QuoteIf(flags.Arg(0), true)))
-		return exitUsage
+		return exitError
 	}
 
 	problems, err := checkRoot(*root)
 	if err != nil {
 		out.problem(err.Error())
-		return exitUsage
+		return exitError
 	}
-	return report(out, problems)
+	return reportProblems(out, problems)
 }
 
-// report writes the first maxProblems problems with out, in their order, and
-// then one line that counts the problems it did not write. It returns
+// reportProblems writes the first maxProblems problems with out, in their order,
+// and then one line that counts the problems it did not write. It returns
 // exitProblems when there is at least one problem, else exitOK.
-func report(out reporter, problems []string) int {
+func reportProblems(out reporter, problems []string) int {
 	for i, p := range problems {
 		if i == maxProblems {
 			out.problem(moreProblems(len(problems) - maxProblems))
@@ -189,17 +189,21 @@ func check(fsys fs.FS) []string {
 	return dedupe(problems)
 }
 
-// checkEnv returns the envProblems of every workflow in wfs, in the sorted
-// order of the paths. The rule runs on every workflow, so it does not depend
-// on which tool rule reads a file. Go visits a map in a random order, so
-// slices.Sorted(maps.Keys(wfs)) makes the output stable. maps.Keys returns an
-// iterator over the keys, and slices.Sorted collects them into a sorted slice.
+// checkEnv returns the envProblems of every workflow in wfs, in the order of
+// sortedPaths. The rule runs on every workflow, so it does not depend on which
+// tool rule reads a file.
 func checkEnv(wfs map[string]*workflow) []string {
 	var problems []string
-	for _, p := range slices.Sorted(maps.Keys(wfs)) {
+	for _, p := range sortedPaths(wfs) {
 		problems = append(problems, wfs[p].envProblems()...)
 	}
 	return problems
+}
+
+// sortedPaths returns the paths of wfs in sorted order. Go visits a map in a
+// random order, so sort for stable output.
+func sortedPaths(wfs map[string]*workflow) []string {
+	return slices.Sorted(maps.Keys(wfs))
 }
 
 // checkRequired returns one problem for each file of requiredFiles that is
@@ -208,7 +212,8 @@ func checkEnv(wfs map[string]*workflow) []string {
 // a regular file inside the root (the os.Root of checkRoot stops a link that
 // leaves the root). A symlinked CONTRIBUTING.md is a normal file for its
 // readers. loadWorkflows still fails a symlinked workflow, because this check
-// does not follow symlinks in workflowDir.
+// does not follow symlinks in workflowDir, unless checkRequired already named
+// that file.
 func checkRequired(fsys fs.FS, reported map[string]bool) []string {
 	var problems []string
 	for _, name := range requiredFiles() {
@@ -231,8 +236,7 @@ func checkRequired(fsys fs.FS, reported map[string]bool) []string {
 }
 
 // notRegular returns the problem for the path p that is not a regular file.
-// checkRequired and loadWorkflows both use it, so a required workflow that is
-// a directory gives the same text twice, and dedupe keeps one copy.
+// checkRequired and loadWorkflows both use it, so the text is the same in both.
 func notRegular(p string) string {
 	return p + ": is not a regular file"
 }
@@ -283,6 +287,11 @@ func loadWorkflows(fsys fs.FS, reported map[string]bool) (map[string]*workflow, 
 			continue
 		}
 		p := path.Join(workflowDir, e.Name())
+		// checkRequired already named this required file, so a second problem
+		// would repeat the same fault. The file is not in wfs, and the rules skip it.
+		if reported[p] {
+			continue
+		}
 		// The type comes from the directory entry, so a symlink is not
 		// followed. GitHub reads only the files of the repository, and this
 		// check fails closed on anything else.
@@ -317,7 +326,7 @@ func isWorkflowName(name string) bool {
 
 // readWorkflow reads the file p of fsys with readLimited and parses it.
 func readWorkflow(fsys fs.FS, p string) (*workflow, error) {
-	data, err := readLimited(fsys, p, maxFileBytes)
+	data, err := readLimited(fsys, p)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
@@ -325,22 +334,23 @@ func readWorkflow(fsys fs.FS, p string) (*workflow, error) {
 }
 
 // readLimited reads the file name of fsys. It fails when the file has more
-// than limit bytes. io.LimitReader stops after one byte more than the limit,
-// so a large file is never read in full. The error does not name the file:
-// the caller adds the name. noPath removes the path of the file system error.
-func readLimited(fsys fs.FS, name string, limit int64) ([]byte, error) {
+// than maxFileBytes bytes. io.LimitReader stops after one byte more than the
+// limit, so a large file is never read in full. The error does not name the
+// file: the caller adds the name. noPath removes the path of the file system
+// error.
+func readLimited(fsys fs.FS, name string) ([]byte, error) {
 	f, err := fsys.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", noPath(err))
 	}
 	// The file is only read, so a Close error tells nothing new.
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read: %w", noPath(err))
 	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("the file has more than %d bytes, so the check does not read it", limit)
+	if int64(len(data)) > maxFileBytes {
+		return nil, fmt.Errorf("the file has more than %d bytes, so the check does not read it", maxFileBytes)
 	}
 	return data, nil
 }
@@ -362,11 +372,12 @@ func noPath(err error) error {
 }
 
 // onlyVersion looks for exactly one distinct version in versions (the same
-// version may repeat). When there is one, it returns it, and found is "".
-// Otherwise version is "" and found tells what there is, for a message:
-// "none", or the distinct versions in sorted order, joined with ", " and cut
-// to maxShown bytes (a file can hold many long versions).
-func onlyVersion(versions []string) (version, found string) {
+// version may repeat). When there is one, it returns it and ok is true, and
+// found is "". Otherwise version is "" and ok is false, and found tells what
+// there is, for a message: "none", or the distinct versions in sorted order,
+// joined with ", " and cut to maxShown bytes (a file can hold many long
+// versions).
+func onlyVersion(versions []string) (version string, ok bool, found string) {
 	seen := make(map[string]bool)
 	for _, v := range versions {
 		seen[v] = true
@@ -375,11 +386,11 @@ func onlyVersion(versions []string) (version, found string) {
 	distinct := slices.Sorted(maps.Keys(seen))
 	switch len(distinct) {
 	case 0:
-		return "", "none"
+		return "", false, "none"
 	case 1:
-		return distinct[0], ""
+		return distinct[0], true, ""
 	default:
-		return "", cutText(strings.Join(distinct, ", "), maxShown)
+		return "", false, cutText(strings.Join(distinct, ", "), maxShown)
 	}
 }
 

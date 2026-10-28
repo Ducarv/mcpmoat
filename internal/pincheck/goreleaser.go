@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"path"
 	"regexp"
-	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -50,7 +48,6 @@ type grPin struct {
 
 // grScan is what grScanWorkflow found in one workflow.
 type grScan struct {
-	path string
 	w    *workflow
 	pins []grPin  // the pins with a full version, in file order
 	msgs []string // the problems that do not need the pin of ci.yml
@@ -62,10 +59,9 @@ type grScan struct {
 // checkRequired or notLoaded.
 func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 	var msgs []string
-	// Go visits a map in a random order, so sort the paths for stable output.
 	var scans []grScan
-	for _, p := range slices.Sorted(maps.Keys(wfs)) {
-		scans = append(scans, grScanWorkflow(p, wfs[p]))
+	for _, p := range sortedPaths(wfs) {
+		scans = append(scans, grScanWorkflow(wfs[p]))
 	}
 
 	want, msg := grWant(scans)
@@ -82,7 +78,7 @@ func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 				msgs = append(msgs, s.w.problemAt(pin.node, "GORELEASER_VERSION is %s, expected %s (the pin in %s)", show(pin.value), show(want), ciName))
 			}
 		}
-		if s.path == releasePath && len(s.pins) == 0 {
+		if s.w.file == releasePath && len(s.pins) == 0 {
 			msgs = append(msgs, s.w.problemAt(nil, "the workflow has no full GORELEASER_VERSION pin in the env of a job, expected %s (the pin in %s)", show(want), ciName))
 		}
 	}
@@ -98,15 +94,15 @@ func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 // because check reports a missing workflow.
 func grWant(scans []grScan) (want, msg string) {
 	for _, s := range scans {
-		if s.path != ciPath {
+		if s.w.file != ciPath {
 			continue
 		}
 		var versions []string
 		for _, pin := range s.pins {
 			versions = append(versions, pin.value)
 		}
-		version, found := onlyVersion(versions)
-		if found == "" {
+		version, ok, found := onlyVersion(versions)
+		if ok {
 			return version, ""
 		}
 		return "", s.w.problemAt(nil, "%s must pin one full version of GoReleaser (GORELEASER_VERSION in the env of a job). Found: %s", ciName, found)
@@ -115,9 +111,9 @@ func grWant(scans []grScan) (want, msg string) {
 }
 
 // grScanWorkflow applies the rules that need no pin of ci.yml to the workflow
-// w, and collects its pins.
-func grScanWorkflow(p string, w *workflow) grScan {
-	s := grScan{path: p, w: w}
+// w, and collects its pins. w.file is the path of the workflow.
+func grScanWorkflow(w *workflow) grScan {
+	s := grScan{w: w}
 	// The two sets hold the nodes that a rule accepts. A map with pointer keys
 	// is a set of nodes: the key is the address of a node, not its text, so a
 	// copy of the same text in another place is not in the set.
@@ -265,7 +261,7 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	data, err := readLimited(fsys, docPath, maxFileBytes)
+	data, err := readLimited(fsys, docPath)
 	if err != nil {
 		return []string{fmt.Sprintf("%s: %v", docPath, err)}
 	}
@@ -344,7 +340,7 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 			msgs = append(msgs, fmt.Sprintf("%s: is not a regular file. This check reads only regular files under %s", p, grActionsPath))
 			return nil
 		}
-		data, err := readLimited(fsys, p, maxFileBytes)
+		data, err := readLimited(fsys, p)
 		if err != nil {
 			msgs = append(msgs, fmt.Sprintf("%s: %v", p, err))
 			return nil

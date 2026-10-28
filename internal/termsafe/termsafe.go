@@ -142,10 +142,9 @@ func Escape(s string) string {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
-		case r == utf8.RuneError && size == 1:
+		case size == 1 && (r == utf8.RuneError || NeedsEscape(r)):
+			// An invalid byte and an ASCII control character both show as \xNN.
 			_, _ = fmt.Fprintf(&b, `\x%02x`, s[i]) // a strings.Builder write never fails
-		case r < utf8.RuneSelf && NeedsEscape(r):
-			_, _ = fmt.Fprintf(&b, `\x%02x`, r)
 		case NeedsEscape(r):
 			writeRuneEscape(&b, r)
 		default:

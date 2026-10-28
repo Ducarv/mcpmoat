@@ -315,16 +315,11 @@ func (w *workflow) steps(j job) ([]*yaml.Node, error) {
 // and no check can read its name. So the rule fails closed on any such value.
 func (w *workflow) envProblems() []string {
 	var out []string
-	walk(w.top, func(n *yaml.Node) {
-		if n.Kind != yaml.MappingNode {
-			return
+	for k, v := range w.allPairs() {
+		if strings.EqualFold(k.Value, "env") && v.Kind != yaml.MappingNode {
+			out = append(out, w.wrongKind(k, v, yaml.MappingNode).Error())
 		}
-		for k, v := range pairs(n) {
-			if strings.EqualFold(k.Value, "env") && v.Kind != yaml.MappingNode {
-				out = append(out, w.wrongKind(k, v, yaml.MappingNode).Error())
-			}
-		}
-	})
+	}
 	return out
 }
 
@@ -393,6 +388,28 @@ func pairs(m *yaml.Node) iter.Seq2[*yaml.Node, *yaml.Node] {
 				return
 			}
 		}
+	}
+}
+
+// allPairs returns the key and the value node of each entry of each mapping of
+// the workflow, in file order: a mapping comes before the mappings below it. It
+// walks the whole tree with walk, so a mapping at any depth is included. A
+// break in the range loop is safe: after the loop stops, no more pairs are
+// yielded, and the walk ends without a yield.
+func (w *workflow) allPairs() iter.Seq2[*yaml.Node, *yaml.Node] {
+	return func(yield func(*yaml.Node, *yaml.Node) bool) {
+		stopped := false
+		walk(w.top, func(n *yaml.Node) {
+			if stopped || n.Kind != yaml.MappingNode {
+				return
+			}
+			for k, v := range pairs(n) {
+				if !yield(k, v) {
+					stopped = true
+					return
+				}
+			}
+		})
 	}
 }
 

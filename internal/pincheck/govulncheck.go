@@ -1,9 +1,7 @@
 package main
 
 import (
-	"maps"
 	"path"
-	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -80,7 +78,7 @@ func checkGovulncheck(wfs map[string]*workflow) []string {
 	}
 	want, msgs := gvReferencePin(wfs[ciPath])
 	for _, p := range gvListedPaths() {
-		msgs = append(msgs, gvCheckListed(p, wfs[p], want)...)
+		msgs = append(msgs, gvCheckListed(wfs[p], want)...)
 	}
 	return append(msgs, others...)
 }
@@ -92,21 +90,21 @@ func gvReferencePin(w *workflow) (string, []string) {
 	for _, p := range gvPins(w) {
 		versions = append(versions, p.version)
 	}
-	version, found := onlyVersion(versions)
-	if found == "" {
+	version, ok, found := onlyVersion(versions)
+	if ok {
 		return version, nil
 	}
 	return "", []string{w.problemAt(nil, "the file must pin one version of govulncheck in %s (a full version such as v1.2.3), found: %s", gvPinKey, found)}
 }
 
-// gvCheckListed applies the rules for one of the listed workflows. p is its
-// key in the map, want is the pin of ci.yml ("" when ci.yml has no single
-// pin; gvReferencePin reported that).
-func gvCheckListed(p string, w *workflow, want string) []string {
+// gvCheckListed applies the rules for one of the listed workflows. w.file is
+// its path, and want is the pin of ci.yml ("" when ci.yml has no single pin;
+// gvReferencePin reported that).
+func gvCheckListed(w *workflow, want string) []string {
 	var msgs []string
 	pins := gvPins(w)
 	// ci.yml is the reference, so gvReferencePin checked its pins.
-	if p != ciPath {
+	if w.file != ciPath {
 		if len(pins) == 0 {
 			msgs = append(msgs, w.problemAt(nil, "the file has no %s pin (a full version such as v1.2.3)", gvPinKey))
 		}
@@ -140,7 +138,7 @@ func gvCheckListed(p string, w *workflow, want string) []string {
 	for _, c := range calls {
 		allowed[c] = true
 	}
-	if p == weeklyPath {
+	if w.file == weeklyPath {
 		for _, n := range gvWeeklyNames(w, jobs) {
 			allowed[n] = true
 		}
@@ -159,16 +157,11 @@ func gvCheckListed(p string, w *workflow, want string) []string {
 // Its key names govulncheck, so the name rule of gvCheckListed reports it.
 func gvPins(w *workflow) []gvPin {
 	var pins []gvPin
-	walk(w.top, func(n *yaml.Node) {
-		if n.Kind != yaml.MappingNode {
-			return
+	for k, v := range w.allPairs() {
+		if k.Value == gvPinKey && v.Kind == yaml.ScalarNode && fullVersion.MatchString(v.Value) {
+			pins = append(pins, gvPin{version: v.Value, key: k})
 		}
-		for k, v := range pairs(n) {
-			if k.Value == gvPinKey && v.Kind == yaml.ScalarNode && fullVersion.MatchString(v.Value) {
-				pins = append(pins, gvPin{version: v.Value, key: k})
-			}
-		}
-	})
+	}
 	return pins
 }
 
@@ -205,15 +198,23 @@ func gvScanJobs(w *workflow) ([]gvJob, []string) {
 // gvJobCalls returns the run value nodes of the steps of the job j that are
 // exactly gvCall. It returns the error of w.steps when the steps of j are not
 // a list of mappings. A job that returns no call does not run govulncheck.
+//
+// GitHub reads the keys steps and run with their exact spelling. So a job with
+// the key Steps has no steps, and a step with the key Run has no run value. This
+// function reads only the exact keys, with exactValue. The name rule still
+// reports the text of such a call.
 func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
 	steps, err := w.steps(j)
 	if err != nil {
 		return nil, err
 	}
+	if exactValue(j.body, "steps") == nil {
+		return nil, nil
+	}
 	var calls []*yaml.Node
 	for _, s := range steps {
-		run, err := w.scalarAt(s, "run")
-		if err != nil || run == nil {
+		run := exactValue(s, "run")
+		if run == nil || run.Kind != yaml.ScalarNode {
 			continue
 		}
 		if run.Value == gvCall {
@@ -221,6 +222,18 @@ func gvJobCalls(w *workflow, j job) ([]*yaml.Node, error) {
 		}
 	}
 	return calls, nil
+}
+
+// exactValue returns the value node of the key whose text is exactly name in the
+// mapping m, or nil when m has no such key. It is for the keys that GitHub reads
+// case-sensitively. lookup ignores case, so it is not used here.
+func exactValue(m *yaml.Node, name string) *yaml.Node {
+	for k, v := range pairs(m) {
+		if k.Value == name {
+			return v
+		}
+	}
+	return nil
 }
 
 // gvJobSkipProblems returns one message for each job that runs the govulncheck
@@ -300,16 +313,11 @@ func gvExactScalar(w *workflow, m *yaml.Node, key, want string) *yaml.Node {
 // the key.
 func gvContinueOnError(w *workflow) []string {
 	var msgs []string
-	walk(w.top, func(n *yaml.Node) {
-		if n.Kind != yaml.MappingNode {
-			return
+	for k := range w.allPairs() {
+		if keyIs(k, "continue-on-error") {
+			msgs = append(msgs, w.problemAt(k, "continue-on-error is not allowed in this file: a step that cannot fail would hide a vulnerability"))
 		}
-		for k := range pairs(n) {
-			if keyIs(k, "continue-on-error") {
-				msgs = append(msgs, w.problemAt(k, "continue-on-error is not allowed in this file: a step that cannot fail would hide a vulnerability"))
-			}
-		}
-	})
+	}
 	return msgs
 }
 
@@ -323,8 +331,7 @@ func gvCheckOthers(wfs map[string]*workflow) []string {
 	}
 	names := gvListedNames()
 	var msgs []string
-	// Go visits a map in a random order, so sort the paths for stable output.
-	for _, p := range slices.Sorted(maps.Keys(wfs)) {
+	for _, p := range sortedPaths(wfs) {
 		if listed[p] {
 			continue
 		}

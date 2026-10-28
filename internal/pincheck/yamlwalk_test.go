@@ -661,6 +661,51 @@ func TestWalkVisitsInFileOrder(t *testing.T) {
 	walk(nil, func(*yaml.Node) { t.Error("walk(nil) called visit") })
 }
 
+// allPairsSrc has mappings at the top, below a key, and in a sequence. Its
+// keys in file order are the value of allPairsKeys.
+const allPairsSrc = "name: CI\njobs:\n  a:\n    steps:\n      - run: echo\n        env: {A: b}\nlast: 1\n"
+
+// allPairsKeys is the key of each pair of allPairsSrc, in file order. A
+// mapping comes before the mappings below it, so last follows jobs.
+var allPairsKeys = []string{"name", "jobs", "last", "a", "steps", "run", "env", "A"}
+
+// TestAllPairsFileOrder checks that allPairs gives every pair of every mapping
+// in file order: top-level keys, nested mappings and mappings in a sequence.
+func TestAllPairsFileOrder(t *testing.T) {
+	t.Parallel()
+	w := mustParse(t, testFile, allPairsSrc)
+	var got []string
+	for k := range w.allPairs() {
+		got = append(got, k.Value)
+	}
+	if !reflect.DeepEqual(got, allPairsKeys) {
+		t.Errorf("allPairs() keys = %q, want %q", got, allPairsKeys)
+	}
+}
+
+// TestAllPairsBreak checks that a break in the range loop stops allPairs. The
+// pairs after the break are in other mappings, so a walk that went on would
+// yield them, and the range loop would panic.
+func TestAllPairsBreak(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{1, 4, 7} {
+		t.Run(allPairsKeys[n-1], func(t *testing.T) {
+			t.Parallel()
+			w := mustParse(t, testFile, allPairsSrc)
+			var got []string
+			for k := range w.allPairs() {
+				got = append(got, k.Value)
+				if len(got) == n {
+					break
+				}
+			}
+			if want := allPairsKeys[:n]; !reflect.DeepEqual(got, want) {
+				t.Errorf("allPairs() with a break after %d pairs gave %q, want %q", n, got, want)
+			}
+		})
+	}
+}
+
 func TestWalkDepthBound(t *testing.T) {
 	t.Parallel()
 	// A hand-built chain of nodes, deeper than parseWorkflow allows: each

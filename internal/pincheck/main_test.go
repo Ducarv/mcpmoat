@@ -126,11 +126,11 @@ func TestRunExitCodes(t *testing.T) {
 		{name: "real repo", args: []string{"-root", "../.."}, want: exitOK},
 		{name: "real repo with = form", args: []string{"-root=../.."}, want: exitOK},
 		{name: "problems", args: []string{"-root", emptyRoot}, want: exitProblems, wantStderr: msgPrefix + ".github/workflows/ci.yml: the file is missing"},
-		{name: "unknown flag", args: []string{"-nope"}, want: exitUsage, wantStderr: "flag provided but not defined: -nope"},
-		{name: "flag without value", args: []string{"-root"}, want: exitUsage, wantStderr: "flag needs an argument"},
-		{name: "extra argument", args: []string{"-root", "../..", "extra"}, want: exitUsage, wantStderr: msgPrefix + "unexpected argument"},
-		{name: "argument without flag", args: []string{"extra"}, want: exitUsage, wantStderr: "unexpected argument"},
-		{name: "missing root", args: []string{"-root", missingRoot}, want: exitUsage, wantStderr: msgPrefix + "open the repository root"},
+		{name: "unknown flag", args: []string{"-nope"}, want: exitError, wantStderr: "flag provided but not defined: -nope"},
+		{name: "flag without value", args: []string{"-root"}, want: exitError, wantStderr: "flag needs an argument"},
+		{name: "extra argument", args: []string{"-root", "../..", "extra"}, want: exitError, wantStderr: msgPrefix + "unexpected argument"},
+		{name: "argument without flag", args: []string{"extra"}, want: exitError, wantStderr: "unexpected argument"},
+		{name: "missing root", args: []string{"-root", missingRoot}, want: exitError, wantStderr: msgPrefix + "open the repository root"},
 		{name: "help -h", args: []string{"-h"}, want: exitOK, wantStderr: "Usage of pincheck"},
 		{name: "help -help", args: []string{"-help"}, want: exitOK, wantStderr: "Usage of pincheck"},
 	}
@@ -329,6 +329,74 @@ func TestDedupe(t *testing.T) {
 			t.Parallel()
 			if got := dedupe(tt.in); !slices.Equal(got, tt.want) {
 				t.Errorf("dedupe(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSortedPaths checks that sortedPaths gives the keys of a map in sorted
+// order, and no path for an empty or a nil map. The map has 20 keys, so an
+// unsorted result is not a pass by chance.
+func TestSortedPaths(t *testing.T) {
+	t.Parallel()
+	many := make(map[string]*workflow)
+	var wantMany []string
+	for i := 19; i >= 0; i-- {
+		p := fmt.Sprintf(".github/workflows/w%02d.yml", i)
+		many[p] = nil
+	}
+	for i := range 20 {
+		wantMany = append(wantMany, fmt.Sprintf(".github/workflows/w%02d.yml", i))
+	}
+	tests := []struct {
+		name string
+		wfs  map[string]*workflow
+		want []string
+	}{
+		{name: "unsorted map", wfs: many, want: wantMany},
+		{name: "empty map", wfs: map[string]*workflow{}, want: nil},
+		{name: "nil map", wfs: nil, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sortedPaths(tt.wfs); !slices.Equal(got, tt.want) {
+				t.Errorf("sortedPaths() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOnlyVersion checks the one version of a list. A list with two distinct
+// versions gives ok false and the sorted versions in found, however many times
+// each one repeats.
+func TestOnlyVersion(t *testing.T) {
+	t.Parallel()
+	// long sorts first, so found starts with its first 80 bytes, then the marker.
+	long := "v1.0.0-" + strings.Repeat("a", 100)
+	tests := []struct {
+		name        string
+		versions    []string
+		wantVersion string
+		wantOK      bool
+		wantFound   string
+	}{
+		{name: "no version", versions: nil, wantOK: false, wantFound: "none"},
+		{name: "empty list", versions: []string{}, wantOK: false, wantFound: "none"},
+		{name: "one version", versions: []string{"v1.9.0"}, wantVersion: "v1.9.0", wantOK: true},
+		{name: "one version many times", versions: []string{"v1.9.0", "v1.9.0", "v1.9.0"}, wantVersion: "v1.9.0", wantOK: true},
+		{name: "two versions", versions: []string{"v1.9.0", "v1.8.0"}, wantOK: false, wantFound: "v1.8.0, v1.9.0"},
+		{name: "two versions, one repeated", versions: []string{"v2.0.0", "v1.9.0", "v2.0.0"}, wantOK: false, wantFound: "v1.9.0, v2.0.0"},
+		{name: "many versions", versions: []string{"v1.3.0", "v1.0.0", "v1.2.0", "v1.1.0"}, wantOK: false, wantFound: "v1.0.0, v1.1.0, v1.2.0, v1.3.0"},
+		{name: "long versions are cut", versions: []string{"v1.0.0-b", long}, wantOK: false, wantFound: "v1.0.0-" + strings.Repeat("a", 73) + termsafe.CutMarker},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotVersion, gotOK, gotFound := onlyVersion(tt.versions)
+			if gotVersion != tt.wantVersion || gotOK != tt.wantOK || gotFound != tt.wantFound {
+				t.Errorf("onlyVersion(%q) = (%q, %v, %q), want (%q, %v, %q)",
+					tt.versions, gotVersion, gotOK, gotFound, tt.wantVersion, tt.wantOK, tt.wantFound)
 			}
 		})
 	}
@@ -721,78 +789,69 @@ func TestCheckNotRegularWorkflow(t *testing.T) {
 	}
 }
 
-func TestCheckDedupesSameProblem(t *testing.T) {
-	t.Parallel()
-	// Both the GoReleaser and the govulncheck rules read release.yml, and
-	// both report a jobs value that is not a mapping with the same text.
-	fsys := repoCopyFS(t)
-	fsys[wf("release.yml")] = &fstest.MapFile{Data: []byte("name: r\non: push\njobs: 5\n")}
-	got := check(fsys)
-	if len(got) == 0 {
-		t.Fatal("check() = no problem, want the jobs problem")
-	}
-	seen := make(map[string]bool)
-	for _, p := range got {
-		if seen[p] {
-			t.Errorf("check() has %q more than once: %q", p, got)
-		}
-		seen[p] = true
-	}
-	if countPrefix(got, wf("release.yml")+":3:") == 0 {
-		t.Errorf("check() = %q, want a problem at release.yml:3", got)
-	}
-}
-
 // TestCheckSameProblemOneLine checks that a problem that two rules find gives
 // one line. The rules build the text with one shared helper (wrongKind, or
 // jobsAndProblems for a job), and dedupe keeps one copy. A rule that wrote
-// its own text would give a second line here.
+// its own text would give a second line here. Each case also checks that the
+// output repeats no line at all.
 func TestCheckSameProblemOneLine(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		old   string // the text in the real release.yml
-		repl  string
-		about string // a text that every line about the problem holds
-		want  string // the one line, after the file name and the line
+		name   string
+		mutate mutation // changes release.yml
+		about  string   // a text that every line about the problem holds
+		want   string   // the one line, after the file name and the line
+		line   int      // when > 0, the line number of the one line
 	}{
 		{
 			// The GoReleaser rule and the govulncheck rule both read every
 			// job of release.yml with jobsAndProblems.
-			name:  "job that is not a mapping",
-			old:   "jobs:\n",
-			repl:  "jobs:\n  broken: text\n",
-			about: `the job "broken"`,
-			want:  `the job "broken" must be a mapping, found a scalar`,
+			name:   "job that is not a mapping",
+			mutate: replaceOnce(releasePath, "jobs:\n", "jobs:\n  broken: text\n"),
+			about:  `the job "broken"`,
+			want:   `the job "broken" must be a mapping, found a scalar`,
 		},
 		{
 			// The GoReleaser rule (grJobPins) and the env rule (envProblems)
 			// read the env of a job.
-			name:  "job env that is not a mapping",
-			old:   "jobs:\n",
-			repl:  "jobs:\n  broken:\n    env: ${{ fromJSON(vars.X) }}\n",
-			about: `the value of "env"`,
-			want:  `the value of "env" must be a mapping, found a scalar`,
+			name:   "job env that is not a mapping",
+			mutate: replaceOnce(releasePath, "jobs:\n", "jobs:\n  broken:\n    env: ${{ fromJSON(vars.X) }}\n"),
+			about:  `the value of "env"`,
+			want:   `the value of "env" must be a mapping, found a scalar`,
+		},
+		{
+			// The GoReleaser and govulncheck rules both read the jobs value.
+			// A scalar jobs value has no job body, so the file is replaced
+			// whole. Its text is at line 3.
+			name:   "jobs value that is not a mapping",
+			mutate: setFile(releasePath, &fstest.MapFile{Data: []byte("name: r\non: push\njobs: 5\n")}),
+			about:  `the value of "jobs"`,
+			want:   `the value of "jobs" must be a mapping, found a scalar`,
+			line:   3,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fsys := repoCopyFS(t)
-			rel := fsys[releasePath]
-			src := string(rel.Data)
-			if n := strings.Count(src, tt.old); n != 1 {
-				t.Fatalf("release.yml has %d copies of %q, want 1", n, tt.old)
-			}
-			rel.Data = []byte(strings.Replace(src, tt.old, tt.repl, 1))
+			tt.mutate(t, fsys)
+			got := check(fsys)
 			var lines []string // the problems of release.yml about this problem
-			for _, p := range check(fsys) {
+			seen := make(map[string]bool)
+			for _, p := range got {
+				if seen[p] {
+					t.Errorf("check() has %q more than once: %q", p, got)
+				}
+				seen[p] = true
 				if strings.HasPrefix(p, releasePath+":") && strings.Contains(p, tt.about) {
 					lines = append(lines, p)
 				}
 			}
 			if len(lines) != 1 || !strings.HasSuffix(lines[0], ": "+tt.want) {
 				t.Errorf("check() lines with %q = %q, want one line that ends in %q", tt.about, lines, tt.want)
+			}
+			if tt.line > 0 && len(lines) == 1 && !strings.HasPrefix(lines[0], fmt.Sprintf("%s:%d: ", releasePath, tt.line)) {
+				t.Errorf("check() line = %q, want the line %d of %s", lines[0], tt.line, releasePath)
 			}
 		})
 	}
@@ -942,14 +1001,14 @@ func TestReadLimitedNoHostPath(t *testing.T) {
 	t.Cleanup(func() { _ = root.Close() })
 
 	t.Run("directory", func(t *testing.T) {
-		_, err := readLimited(root.FS(), "sub", maxFileBytes)
+		_, err := readLimited(root.FS(), "sub")
 		if err == nil {
 			t.Fatal("readLimited() error = nil, want an error for a directory")
 		}
 		assertNoHostPath(t, []string{err.Error()}, dir)
 	})
 	t.Run("missing", func(t *testing.T) {
-		_, err := readLimited(root.FS(), "nope.yml", maxFileBytes)
+		_, err := readLimited(root.FS(), "nope.yml")
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("readLimited() error = %v, want it to wrap fs.ErrNotExist", err)
 		}
@@ -957,7 +1016,7 @@ func TestReadLimitedNoHostPath(t *testing.T) {
 	})
 	t.Run("unreadable", func(t *testing.T) {
 		unreadable(t, locked)
-		_, err := readLimited(root.FS(), "locked.yml", maxFileBytes)
+		_, err := readLimited(root.FS(), "locked.yml")
 		if !errors.Is(err, fs.ErrPermission) {
 			t.Errorf("readLimited() error = %v, want it to wrap fs.ErrPermission", err)
 		}
@@ -1164,6 +1223,108 @@ func TestCheckRootSymlinkWorkflow(t *testing.T) {
 	}
 }
 
+// TestCheckRootSymlinkReportedOnce checks that a symlink that is a workflow
+// gives one problem. A required workflow that links outside the root is named
+// by checkRequired, and loadWorkflows skips it, so the path has no second
+// problem. A workflow that is not required gives the symlink problem of
+// loadWorkflows, once.
+func TestCheckRootSymlinkReportedOnce(t *testing.T) {
+	t.Parallel()
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outside, []byte("name: outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		link   string   // the workflow file that becomes a symlink
+		target string   // the link target: outside the root, or inside it
+		want   []string // the exact problems of checkRoot
+	}{
+		{
+			name:   "required ci.yml links outside the root",
+			link:   ciPath,
+			target: outside,
+			want:   []string{ciPath + ": path escapes from parent"},
+		},
+		{
+			name:   "required release.yml links outside the root",
+			link:   releasePath,
+			target: outside,
+			want:   []string{releasePath + ": path escapes from parent"},
+		},
+		{
+			// Negative twin: a workflow that is not required, linked inside
+			// the root, still gives the symlink problem exactly once.
+			name:   "not required evil.yml links inside the root",
+			link:   wf("evil.yml"),
+			target: ciName,
+			want:   []string{symlinkMsg(wf("evil.yml"))},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := repoCopyDir(t)
+			link := filepath.Join(root, filepath.FromSlash(tt.link))
+			if err := os.Remove(link); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(tt.target, link); err != nil {
+				t.Skipf("symlinks are not supported: %v", err)
+			}
+			got, err := checkRoot(root)
+			if err != nil {
+				t.Fatalf("checkRoot() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("checkRoot() = %q, want %q", got, tt.want)
+			}
+			assertNoHostPath(t, got, root)
+		})
+	}
+}
+
+// TestLoadWorkflowsSkipsReported checks that loadWorkflows gives no problem for
+// a path that reported already holds, because checkRequired named it. Without
+// that path in reported, the same symlink gives the symlink problem.
+func TestLoadWorkflowsSkipsReported(t *testing.T) {
+	t.Parallel()
+	link := &fstest.MapFile{Data: []byte("ci.yml"), Mode: fs.ModeSymlink | 0o777}
+	tests := []struct {
+		name     string
+		reported map[string]bool
+		want     []string
+	}{
+		{
+			name:     "path already reported",
+			reported: map[string]bool{ciPath: true},
+			want:     nil,
+		},
+		{
+			name:     "path not reported",
+			reported: map[string]bool{},
+			want:     []string{symlinkMsg(ciPath)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wfs, problems := loadWorkflows(fstest.MapFS{ciPath: link}, tt.reported)
+			if !slices.Equal(problems, tt.want) {
+				t.Errorf("loadWorkflows() problems = %q, want %q", problems, tt.want)
+			}
+			if len(wfs) != 0 {
+				t.Errorf("loadWorkflows() loaded %d files, want none", len(wfs))
+			}
+		})
+	}
+}
+
+// symlinkMsg is the problem that loadWorkflows gives for the symlink p.
+func symlinkMsg(p string) string {
+	return p + ": is a symlink. This check does not follow symlinks in " + workflowDir
+}
+
 func TestLoadWorkflowsMissingDir(t *testing.T) {
 	t.Parallel()
 	reported := make(map[string]bool)
@@ -1255,18 +1416,18 @@ func manyProblemsFS(n int) fstest.MapFS {
 	return fstest.MapFS{wf("ci.yml"): {Data: []byte(b.String())}}
 }
 
-// reportLines runs report on problems in one output mode and returns the
+// reportLines runs reportProblems on problems in one output mode and returns the
 // exit code and the output lines without the line prefix of the mode.
 func reportLines(t *testing.T, problems []string, actions bool) (int, []string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := report(reporter{stdout: &stdout, stderr: &stderr, actions: actions}, problems)
+	code := reportProblems(reporter{stdout: &stdout, stderr: &stderr, actions: actions}, problems)
 	out, prefix, other := stderr.String(), msgPrefix, stdout.String()
 	if actions {
 		out, prefix, other = stdout.String(), "::error::", stderr.String()
 	}
 	if other != "" {
-		t.Errorf("report() wrote %q to the other stream, want nothing", other)
+		t.Errorf("reportProblems() wrote %q to the other stream, want nothing", other)
 	}
 	assertNoRawControl(t, out)
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
@@ -1311,10 +1472,10 @@ func TestReportCapsProblems(t *testing.T) {
 				t.Parallel()
 				code, lines := reportLines(t, msgs(tt.n), actions)
 				if code != tt.wantCode {
-					t.Errorf("report() = %d, want %d", code, tt.wantCode)
+					t.Errorf("reportProblems() = %d, want %d", code, tt.wantCode)
 				}
 				if len(lines) != tt.wantN {
-					t.Fatalf("report() wrote %d lines, want %d", len(lines), tt.wantN)
+					t.Fatalf("reportProblems() wrote %d lines, want %d", len(lines), tt.wantN)
 				}
 				if tt.wantN > 0 && lines[len(lines)-1] != tt.wantLast {
 					t.Errorf("last line = %q, want %q", lines[len(lines)-1], tt.wantLast)
@@ -1341,10 +1502,10 @@ func TestCheckManyProblemsAreCapped(t *testing.T) {
 			t.Parallel()
 			code, lines := reportLines(t, problems, actions)
 			if code != exitProblems {
-				t.Errorf("report() = %d, want %d", code, exitProblems)
+				t.Errorf("reportProblems() = %d, want %d", code, exitProblems)
 			}
 			if len(lines) != maxProblems+1 {
-				t.Fatalf("report() wrote %d lines, want %d", len(lines), maxProblems+1)
+				t.Fatalf("reportProblems() wrote %d lines, want %d", len(lines), maxProblems+1)
 			}
 			for i := range maxProblems {
 				if want := termsafe.Escape(problems[i]); lines[i] != want {
