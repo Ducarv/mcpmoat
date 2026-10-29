@@ -106,6 +106,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["digest"],
+      "oneOf": [
+        {"required": ["command"], "not": {"required": ["reason"]}},
+        {"required": ["reason"], "not": {"required": ["command"]}}
+      ],
       "properties": {
         "digest": {
           "description": "The pin digest that the terminal hint shows: \"pd1:\" and 64 lowercase hex digits. It is never cut.",

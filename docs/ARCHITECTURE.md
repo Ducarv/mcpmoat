@@ -47,7 +47,7 @@ docs/                   PRD and other documentation
   that both commands use (`serverIdentity`, `readPins`, `readPinsLocked`, `printNewPinsFile`,
   `pinnable`, `appendDiff`). `scan_pins.go`
   holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line and its one
-  decision function (`acceptAdvice`). `argscrub.go` hides the `--llm-base-url` values and the URL
+  decision function (`acceptDecision`). `argscrub.go` hides the `--llm-base-url` values and the URL
   user info in the text of argument errors (`argHider`, `newBaseURLHider`, `hideUserinfo`).
   `scan.go` holds the parts of `scan`: `runScan` calls
   `parseScanArgs` (the flags, in a `scanArgs`), `buildScanSetup` (the notices and the `scanSetup`)
@@ -353,18 +353,20 @@ step 5 and step 6:
   `CheckSet` refuses with `pins.ErrProjectShareFull`, it sets `storeFull` and `shareFull`. When it
   refuses with `pins.ErrStoreFull` only, it sets `storeFull`.
   - The JSON `accept` object (`scan --json`, since schema version 3) comes from the same hint and the same
-    decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
-    of the line and `isCommand`, which is true only when the text is the `pin --accept` command
-    (`acceptCommand`) and false when it is the prose steps (`acceptSteps`). The terminal prints
-    `text`. The JSON gets `digest` (the digest of the hint) and, only when `isCommand` is true,
-    `command` (the same `text`). It never gets the prose, so a program cannot run a line that the
-    terminal shows as steps. `acceptDecision` is the one decision behind `acceptAdvice`: it also
-    returns the `reason`, the first cause that stops the command (see `report.AcceptReason*`). It
-    is empty when the text is a command. `acceptOf` (`cmd/mcpmoat/scan_json.go`) puts it in
-    `accept.reason` (since schema version 5). It finds the hint of a server by its identity (`serverIdentity`); a server with no hint has no `accept` key. When two servers
-    have the same identity (the same client, source, project path and name), the pin step compares
-    only the first one, so `scan` has one hint and prints one "To accept" line. `acceptOf` matches
-    by identity, so the JSON gives both servers the same `accept` object, with the same digest.
+    decision as the terminal line. `acceptDecision` (`cmd/mcpmoat/accept_hint.go`) is that one
+    decision. It returns the `text` of the line and the `reason`, the first cause that stops the
+    command (see `report.AcceptReason*`). The `reason` is empty only when `text` is the
+    `pin --accept` command (`acceptCommand`). Else `text` is the prose steps (`acceptSteps`).
+    `acceptAdvice` is a thin wrapper that the terminal uses: it returns `text` and `isCommand`
+    (`reason` is empty). The terminal prints `text`. `acceptOf` (`cmd/mcpmoat/scan_json.go`) calls
+    `acceptDecision` directly. The JSON gets `digest` (the digest of the hint) and exactly one of
+    `command` (the same `text`, only when the `reason` is empty) and `reason` (since schema
+    version 5). It never gets the prose, so a program cannot run a line that the terminal shows as
+    steps. `acceptOf` finds the hint of a server by its identity (`serverIdentity`); a server with
+    no hint has no `accept` key. When two servers have the same identity (the same client,
+    source, project path and name), the pin step compares only the first one, so `scan` has one
+    hint and prints one "To accept" line. `acceptOf` matches by identity, so the JSON gives both
+    servers the same `accept` object, with the same digest.
     `WriteJSON` never cuts `digest`, `command` or `reason`.
 - 5d. The tool rule step (`toolRulesStep` in `cmd/mcpmoat/scan_tools.go`) runs after the pin step
   and before the LLM step, on each server with status `StatusOK`, in config order. It does not run
@@ -1060,7 +1062,8 @@ one.
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
 [docs/schema/scan-output.v5.json](schema/scan-output.v5.json). The schema files of the older
 versions, [version 1](schema/scan-output.v1.json), [version 2](schema/scan-output.v2.json),
-[version 3](schema/scan-output.v3.json) and [version 4](schema/scan-output.v4.json), stay unchanged. The Go types are in
+[version 3](schema/scan-output.v3.json) and [version 4](schema/scan-output.v4.json), stay
+unchanged. The Go types are in
 `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
 terminal report, in the same order. The one difference: `findings` keeps the order of the rows, and
 the terminal report groups them by severity. The report types hold plain strings, bools and ints,
@@ -1182,6 +1185,12 @@ server names are cut (see [Size bound](#size-bound)), so two servers can have th
 text. The index tells them apart. It is an added field, so it needs a bump: every object in the
 schema sets `additionalProperties: false`. The other fields keep their names and types. The schema
 files of version 1, version 2 and version 3 stay as they were released.
+
+Version 5 adds the optional field `accept.reason` (#249). It says why `accept` has no `command`,
+with one of six fixed words. It is an added field, so it needs a bump: every object in the schema
+sets `additionalProperties: false`. The schema also requires exactly one of `command` and
+`reason`. The other fields keep their names and types. The schema files of version 1 to
+version 4 stay as they were released.
 
 Not in version 5: a summary, `pin --json` and `--fail-on` (#65).
 

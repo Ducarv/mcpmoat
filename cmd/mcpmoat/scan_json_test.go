@@ -1242,7 +1242,7 @@ func TestScanJSONAccept(t *testing.T) {
 			servers: oneServer("srv"),
 			first:   map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": cut},
 			wantAccepts: []string{"srv"},
-			wantReason:  report.AcceptReasonReview,
+			wantReason:  report.AcceptReasonReviewFirst,
 		},
 		{
 			// MOAT-T2-002 (a new tool) is dropped by --ignore, so the report
@@ -1252,7 +1252,7 @@ func TestScanJSONAccept(t *testing.T) {
 			first:   map[string][]inspect.Tool{"srv": short},
 			current: map[string][]inspect.Tool{"srv": {mkTool("a", "Add. Changed."), mkTool("b", "New.")}},
 			flags:   []string{"--ignore", "MOAT-T2-002"}, wantAccepts: []string{"srv"},
-			wantReason: report.AcceptReasonReview,
+			wantReason: report.AcceptReasonReviewFirst,
 		},
 		{
 			// A name with a space is not a bare shell word.

@@ -114,9 +114,9 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 // and configPath are bare shell words, the user saw every change, the name
 // selects the server, no config file has a problem, and pins.json has room for
 // the tools. A command that pin refuses would mislead the user, so a full
-// pins.json gives the prose steps; they still hold the digest. The JSON output
-// reuses this function, so the terminal and the JSON cannot disagree. It does
-// no I/O.
+// pins.json gives the prose steps; they still hold the digest. It is a thin
+// wrapper over acceptDecision, which the JSON output also uses, so the terminal
+// and the JSON cannot disagree. It does no I/O.
 func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
 	text, reason := acceptDecision(h, configPath, configProblem)
 	return text, reason == ""
@@ -128,7 +128,7 @@ func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text str
 // checked in this order:
 //
 //  1. the user did not see every change (a cut diff, a change that --ignore
-//     hid, or a diff that is a fixed note): report.AcceptReasonReview;
+//     hid, or a diff that is a fixed note): report.AcceptReasonReviewFirst;
 //  2. pins.json has no room for the tools: report.AcceptReasonPinsFull;
 //  3. only the share of the project servers has no room:
 //     report.AcceptReasonProjectShareFull;
@@ -143,7 +143,7 @@ func acceptDecision(h acceptHint, configPath string, configProblem bool) (text, 
 	command, wordsOK := acceptCommand(h.name, h.project, configPath, h.digest)
 	switch {
 	case !h.fullyReviewed():
-		reason = report.AcceptReasonReview
+		reason = report.AcceptReasonReviewFirst
 	case h.full == fileFull:
 		reason = report.AcceptReasonPinsFull
 	case h.full == shareFull:

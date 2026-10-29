@@ -296,9 +296,9 @@ func TestAcceptDecisionReason(t *testing.T) {
 		want          string
 	}{
 		{name: "command", hint: ok},
-		{name: "cut diff", hint: with(func(h *acceptHint) { h.truncated = true }), want: report.AcceptReasonReview},
-		{name: "ignored change", hint: with(func(h *acceptHint) { h.ignored = true }), want: report.AcceptReasonReview},
-		{name: "change with no text", hint: with(func(h *acceptHint) { h.noText = true }), want: report.AcceptReasonReview},
+		{name: "cut diff", hint: with(func(h *acceptHint) { h.truncated = true }), want: report.AcceptReasonReviewFirst},
+		{name: "ignored change", hint: with(func(h *acceptHint) { h.ignored = true }), want: report.AcceptReasonReviewFirst},
+		{name: "change with no text", hint: with(func(h *acceptHint) { h.noText = true }), want: report.AcceptReasonReviewFirst},
 		{name: "pins file full", hint: with(func(h *acceptHint) { h.full = fileFull }), want: report.AcceptReasonPinsFull},
 		{name: "project share full", hint: with(func(h *acceptHint) { h.full = shareFull }), want: report.AcceptReasonProjectShareFull},
 		{name: "unknown full kind fails closed", hint: with(func(h *acceptHint) { h.full = fullKind(99) }), want: report.AcceptReasonPinsFull},
@@ -312,7 +312,7 @@ func TestAcceptDecisionReason(t *testing.T) {
 		{
 			name: "review comes before full",
 			hint: with(func(h *acceptHint) { h.truncated, h.full = true, fileFull }),
-			want: report.AcceptReasonReview,
+			want: report.AcceptReasonReviewFirst,
 		},
 		{
 			name: "full comes before config problem",
@@ -372,9 +372,9 @@ func TestAcceptOfReason(t *testing.T) {
 	}{
 		{name: "no hint", hints: nil, wantNil: true},
 		{name: "command", hints: hint(func(*acceptHint) {}), wantCommand: true},
-		{name: "cut diff", hints: hint(func(h *acceptHint) { h.truncated = true }), wantReason: report.AcceptReasonReview},
-		{name: "ignored", hints: hint(func(h *acceptHint) { h.ignored = true }), wantReason: report.AcceptReasonReview},
-		{name: "no diff text", hints: hint(func(h *acceptHint) { h.noText = true }), wantReason: report.AcceptReasonReview},
+		{name: "cut diff", hints: hint(func(h *acceptHint) { h.truncated = true }), wantReason: report.AcceptReasonReviewFirst},
+		{name: "ignored", hints: hint(func(h *acceptHint) { h.ignored = true }), wantReason: report.AcceptReasonReviewFirst},
+		{name: "no diff text", hints: hint(func(h *acceptHint) { h.noText = true }), wantReason: report.AcceptReasonReviewFirst},
 		{name: "pins file full", hints: hint(func(h *acceptHint) { h.full = fileFull }), wantReason: report.AcceptReasonPinsFull},
 		{name: "project share full", hints: hint(func(h *acceptHint) { h.full = shareFull }), wantReason: report.AcceptReasonProjectShareFull},
 		{name: "ambiguous name", hints: hint(func(h *acceptHint) { h.ambiguous = true }), wantReason: report.AcceptReasonAmbiguousName},

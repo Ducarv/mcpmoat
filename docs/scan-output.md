@@ -73,8 +73,8 @@ MEDIUM (1)
   list. `scan` keeps the most severe findings, first for each server and then across the whole
   scan, so many weak findings cannot push a severe one out. A server that loses findings gets one
   `MOAT-T4-005` summary finding. Its `Reason:` line (in place of `Where:`) holds the text `N more
-  config findings are not listed; limit M`. M is 100, or 10000 when the limit of the whole scan cut the findings of that
-  server. `scan` also prints one line on stderr, for example `mcpmoat scan: warning: config
+  config findings are not listed; limit M`. M is 100, or 10000 when the limit of the whole scan
+  cut the findings of that server. `scan` also prints one line on stderr, for example `mcpmoat scan: warning: config
   findings were left out for 2 servers; see MOAT-T4-005`. Only `--ignore` drops the finding. A
   `.mcpmoat-ignore` file cannot. See [Limits](limits.md).
 - **Counts:** the tool rule findings, `MOAT-T1-023`, `MOAT-T1-024` and `MOAT-T4-005` count in the

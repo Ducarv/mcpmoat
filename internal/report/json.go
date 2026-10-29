@@ -111,10 +111,10 @@ type JSONIgnored struct {
 // terminal hint from showing a command. The set is fixed: the schema lists the
 // same words, and a test checks that the two agree.
 const (
-	// AcceptReasonReview means that the user did not see every change: a diff
+	// AcceptReasonReviewFirst means that the user did not see every change: a diff
 	// was cut, --ignore hid a change, or a diff is only a fixed note. Review
 	// the tools first.
-	AcceptReasonReview = "review_first"
+	AcceptReasonReviewFirst = "review_first"
 	// AcceptReasonPinsFull means that pins.json has no room for the tools, so
 	// "pin --accept" would fail.
 	AcceptReasonPinsFull = "pins_full"
@@ -136,7 +136,7 @@ const (
 // AcceptReasons lists the values of JSONAccept.Reason.
 func AcceptReasons() []string {
 	return []string{
-		AcceptReasonReview,
+		AcceptReasonReviewFirst,
 		AcceptReasonPinsFull,
 		AcceptReasonProjectShareFull,
 		AcceptReasonConfigProblem,
