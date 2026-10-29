@@ -261,6 +261,52 @@ func decodeAny(t *testing.T, b []byte) any {
 	return v
 }
 
+// TestSchemaAcceptReason checks the "reason" of the accept object. The enum of
+// the schema must list exactly the values of report.AcceptReasons, and a
+// report with each value must match the schema.
+func TestSchemaAcceptReason(t *testing.T) {
+	t.Parallel()
+
+	var root map[string]any
+	if err := json.Unmarshal(reporttest.SchemaBytes(t), &root); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	accept := mapOf(mapOf(root["$defs"])["accept"])
+	reason := mapOf(mapOf(accept["properties"])["reason"])
+	var gotEnum []string
+	enum, _ := reason["enum"].([]any)
+	for _, v := range enum {
+		w, ok := v.(string)
+		if !ok {
+			t.Fatalf("reason enum entry %v is not a string", v)
+		}
+		gotEnum = append(gotEnum, w)
+	}
+	want := report.AcceptReasons()
+	if d := setDiff(want, gotEnum); d != "" {
+		t.Errorf("reason enum of the schema differs from report.AcceptReasons: %s", d)
+	}
+	if reason["type"] != "string" {
+		t.Errorf("reason type = %v, want string", reason["type"])
+	}
+
+	rs := reporttest.Schema(t)
+	for _, w := range want {
+		t.Run(w, func(t *testing.T) {
+			t.Parallel()
+			r := richReport()
+			r.Servers[0].Accept = &report.JSONAccept{Digest: testDigest, Reason: w}
+			out := writeJSON(t, r)
+			if err := rs.Validate(decodeAny(t, out)); err != nil {
+				t.Errorf("reason %q does not match the schema: %v\n%s", w, err, out)
+			}
+			if !strings.Contains(string(out), `"reason": "`+w+`"`) {
+				t.Errorf("output has no reason %q:\n%s", w, out)
+			}
+		})
+	}
+}
+
 func TestWriteJSONValidatesAgainstSchema(t *testing.T) {
 	t.Parallel()
 	rs := reporttest.Schema(t)
@@ -393,6 +439,10 @@ func TestSchemaRejectsBadDocuments(t *testing.T) {
 		{"accept digest in upper case", func(d map[string]any) { accept(d)["digest"] = "pd1:" + strings.Repeat("AB", 32) }},
 		{"unknown field in accept", func(d map[string]any) { accept(d)["extra"] = "x" }},
 		{"accept command is not a string", func(d map[string]any) { accept(d)["command"] = 1 }},
+		{"accept reason is not a string", func(d map[string]any) { accept(d)["reason"] = 1 }},
+		{"accept reason is empty", func(d map[string]any) { accept(d)["reason"] = "" }},
+		{"accept reason is unknown", func(d map[string]any) { accept(d)["reason"] = "other" }},
+		{"accept reason in capitals", func(d map[string]any) { accept(d)["reason"] = "PINS_FULL" }},
 		{"accept is null", func(d map[string]any) { first(d, "servers")["accept"] = nil }},
 		{"server name over 515 characters", func(d map[string]any) { first(d, "servers")["name"] = strings.Repeat("n", 516) }},
 		{"server source over 4099 characters", func(d map[string]any) { first(d, "servers")["source"] = strings.Repeat("s", 4100) }},

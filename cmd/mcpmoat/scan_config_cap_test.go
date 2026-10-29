@@ -1009,6 +1009,12 @@ func cfgCapCheckText(t *testing.T, stdout string, wantCap bool, envRelated, hdrR
 		}
 	}
 	assertContainsAll(t, "stdout", stdout, []string{envRelated, hdrRelated})
+	// The row is about the whole server: it has a Reason line and no Where line.
+	for _, f := range capRows {
+		if f.Reason == "" || f.Where != "" || f.Tool != "" {
+			t.Errorf("cap finding of %s has Reason %q, Where %q, Tool %q; want a Reason line only", f.Name, f.Reason, f.Where, f.Tool)
+		}
+	}
 	// The summary counts the cap row as a finding of the server.
 	for _, row := range summaryRows(t, stdout) {
 		want := map[string]int{"env-srv": 3, "hdr-srv": 3, "small-srv": 1}[row.Name]

@@ -72,8 +72,8 @@ MEDIUM (1)
   for each server and 10,000 for the whole scan. The limits count the findings after the ignore
   list. `scan` keeps the most severe findings, first for each server and then across the whole
   scan, so many weak findings cannot push a severe one out. A server that loses findings gets one
-  `MOAT-T4-005` summary finding. Its `Where:` line holds the text `N more config findings are not
-  listed; limit M`. M is 100, or 10000 when the limit of the whole scan cut the findings of that
+  `MOAT-T4-005` summary finding. Its `Reason:` line (in place of `Where:`) holds the text `N more
+  config findings are not listed; limit M`. M is 100, or 10000 when the limit of the whole scan cut the findings of that
   server. `scan` also prints one line on stderr, for example `mcpmoat scan: warning: config
   findings were left out for 2 servers; see MOAT-T4-005`. Only `--ignore` drops the finding. A
   `.mcpmoat-ignore` file cannot. See [Limits](limits.md).
@@ -163,7 +163,16 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   remove servers you no longer use from pins.json)`. A project server whose new tools do not fit in
   the project share gets the same hint with the digest only, and its terminal line ends with `(the
   project share of pins.json has no room for these tools: pin --accept fails until you remove
-  project servers you no longer use from pins.json)`. The `To accept` line itself is not in the JSON. When two
+  project servers you no longer use from pins.json)`. The `To accept` line itself is not in the JSON.
+  When `accept` has no `command`, it has `reason`, the first cause that stops the command, from
+  this fixed set (checked in this order): `review_first` (a diff was cut, `--ignore` hid a change,
+  or a diff is only a fixed note: review the tools first), `pins_full` (`pins.json` has no room for
+  the tools), `project_share_full` (the project share of `pins.json` has no room), `config_problem`
+  (a config file has a problem, so `pin` refuses to run), `ambiguous_name` (the server name does
+  not select this server alone, so `pin` needs `--config`) and `not_shell_safe` (the server name,
+  the project path or the `--config` path is not a bare shell word). When more than one cause
+  applies, `reason` names the first one; the terminal line shows a note for each of them. `reason`
+  is never present together with `command`. When two
   servers have the same identity (the same client, source, project path and name), `scan` prints one
   `To accept` line, and the JSON gives both servers the same `accept` object, with the same digest.
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at
@@ -209,10 +218,11 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   without `-r` to keep the escapes.
 - Each finding has a `source`: `rule` for a rule finding, `llm` for an advisory finding of
   `--llm`.
-- The format has a `schema_version` (now `4`; version 2 added `source`, version 3 added `ignored`,
-  `accept` and `fields_truncated`, version 4 added `server_index` to each finding and each diff).
-  The schema is [schema/scan-output.v4.json](schema/scan-output.v4.json). Files of version 1, 2 and
-  3 stay as they are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version
+- The format has a `schema_version` (now `5`; version 2 added `source`, version 3 added `ignored`,
+  `accept` and `fields_truncated`, version 4 added `server_index` to each finding and each diff,
+  version 5 added `reason` to `accept`).
+  The schema is [schema/scan-output.v5.json](schema/scan-output.v5.json). Files of version 1 to 4
+  stay as they are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version
   policy.
 
 ## See also

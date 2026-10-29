@@ -108,16 +108,19 @@ func jsonIgnored(ignored map[string]int, fileEntries int) report.JSONIgnored {
 // tools, or no pin finding kept). It finds the hint by identity, like the
 // terminal does: serverIdentity(s) must be a key of hints (see hintsByID).
 // Digest is the string that the terminal hint prints. Command is set only when
-// acceptAdvice says that the terminal text is a command, never for the prose
-// steps.
+// acceptDecision says that the terminal text is a command, never for the prose
+// steps. When it is not, Reason holds the first cause (a report.AcceptReason*
+// word), so a program knows why there is no command.
 func acceptOf(s discover.Server, hints map[pins.Identity]acceptHint, configPath string, configProblem bool) *report.JSONAccept {
 	h, ok := hints[serverIdentity(s)]
 	if !ok {
 		return nil
 	}
 	a := &report.JSONAccept{Digest: h.digest}
-	if text, isCommand := acceptAdvice(h, configPath, configProblem); isCommand {
+	if text, reason := acceptDecision(h, configPath, configProblem); reason == "" {
 		a.Command = text
+	} else {
+		a.Reason = reason
 	}
 	return a
 }
