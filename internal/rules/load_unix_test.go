@@ -10,6 +10,20 @@ import (
 	"testing"
 )
 
+// loadDirWithin calls LoadDir and fails the test if it does not return in time.
+func loadDirWithin(t *testing.T, dir string) ([]Rule, []*LoadError) {
+	t.Helper()
+	type result struct {
+		rules []Rule
+		errs  []*LoadError
+	}
+	r := within(t, "LoadDir", func() result {
+		rules, errs := LoadDir(dir)
+		return result{rules, errs}
+	})
+	return r.rules, r.errs
+}
+
 func TestLoadDirFIFO(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

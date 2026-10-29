@@ -97,20 +97,6 @@ func within[T any](t *testing.T, what string, f func() T) T {
 	}
 }
 
-// loadDirWithin calls LoadDir and fails the test if it does not return in time.
-func loadDirWithin(t *testing.T, dir string) ([]Rule, []*LoadError) {
-	t.Helper()
-	type result struct {
-		rules []Rule
-		errs  []*LoadError
-	}
-	r := within(t, "LoadDir", func() result {
-		rules, errs := LoadDir(dir)
-		return result{rules, errs}
-	})
-	return r.rules, r.errs
-}
-
 // Builtin and LoadDir share loadEntries, so the folder cap (maxFolderErrors)
 // is tested through LoadDir (TestLoadDirFolderCap and
 // TestLoadDirFolderCapBoundary). The embedded file system cannot get extra
