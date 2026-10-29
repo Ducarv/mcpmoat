@@ -25,7 +25,9 @@ import (
 //
 // Version 4 adds JSONFinding.ServerIndex and JSONDiff.ServerIndex
 // (server_index).
-const SchemaVersion = 4
+//
+// Version 5 adds JSONAccept.Reason (reason).
+const SchemaVersion = 5
 
 // Mode tells if a scan connected to the servers. It is the type of
 // ScanReport.Mode.
@@ -105,14 +107,54 @@ type JSONIgnored struct {
 	FileEntries int            `json:"file_entries"`
 }
 
+// The values of JSONAccept.Reason. Each one is the first cause that stops the
+// terminal hint from showing a command. The set is fixed: the schema lists the
+// same words, and a test checks that the two agree.
+const (
+	// AcceptReasonReviewFirst means that the user did not see every change: a diff
+	// was cut, --ignore hid a change, or a diff is only a fixed note. Review
+	// the tools first.
+	AcceptReasonReviewFirst = "review_first"
+	// AcceptReasonPinsFull means that pins.json has no room for the tools, so
+	// "pin --accept" would fail.
+	AcceptReasonPinsFull = "pins_full"
+	// AcceptReasonProjectShareFull means that the project share of pins.json
+	// has no room for the tools, so "pin --accept" would fail.
+	AcceptReasonProjectShareFull = "project_share_full"
+	// AcceptReasonConfigProblem means that a config file has a problem, so
+	// "pin" refuses to run until the file is fixed.
+	AcceptReasonConfigProblem = "config_problem"
+	// AcceptReasonAmbiguousName means that the server name does not select
+	// this server alone, so "pin" needs --config.
+	AcceptReasonAmbiguousName = "ambiguous_name"
+	// AcceptReasonNotShellSafe means that the server name, the project path or
+	// the --config path is not a bare shell word, so mcpmoat prints no command
+	// that a shell could misread.
+	AcceptReasonNotShellSafe = "not_shell_safe"
+)
+
+// AcceptReasons lists the values of JSONAccept.Reason.
+func AcceptReasons() []string {
+	return []string{
+		AcceptReasonReviewFirst,
+		AcceptReasonPinsFull,
+		AcceptReasonProjectShareFull,
+		AcceptReasonConfigProblem,
+		AcceptReasonAmbiguousName,
+		AcceptReasonNotShellSafe,
+	}
+}
+
 // JSONAccept is the hint that tells how to accept the changes of a server. The
 // terminal report shows the same hint. Digest is the pin digest that the
 // terminal hint shows. Command is set only when the terminal hint shows a
-// command, never when it shows prose steps. WriteJSON never cuts Digest or
-// Command.
+// command, never when it shows prose steps. Reason is set only when Command is
+// empty: it is one of the AcceptReason* words, the first cause that stops the
+// command. WriteJSON never cuts Digest, Command or Reason.
 type JSONAccept struct {
 	Digest  string `json:"digest"`
 	Command string `json:"command,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // ToolInfo names the program that made the report.

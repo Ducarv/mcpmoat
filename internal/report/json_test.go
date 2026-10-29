@@ -309,6 +309,7 @@ func TestWriteJSONAccept(t *testing.T) {
 		srv("none", nil),
 		srv("with-command", &report.JSONAccept{Digest: digest, Command: "mcpmoat pin --accept s --expect " + digest}),
 		srv("digest-only", &report.JSONAccept{Digest: digest}),
+		srv("with-reason", &report.JSONAccept{Digest: digest, Reason: report.AcceptReasonPinsFull}),
 	}, nil))
 
 	var raw struct {
@@ -328,6 +329,10 @@ func TestWriteJSONAccept(t *testing.T) {
 	wantDigest := map[string]any{"digest": digest}
 	if got := raw.Servers[2]["accept"]; !reflect.DeepEqual(got, wantDigest) {
 		t.Errorf("accept with digest only = %#v, want %#v", got, wantDigest)
+	}
+	wantReason := map[string]any{"digest": digest, "reason": "pins_full"}
+	if got := raw.Servers[3]["accept"]; !reflect.DeepEqual(got, wantReason) {
+		t.Errorf("accept with reason = %#v, want %#v", got, wantReason)
 	}
 }
 

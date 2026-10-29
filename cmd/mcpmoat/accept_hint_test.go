@@ -1,8 +1,13 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // TestAcceptAdvice checks when acceptAdvice gives a command and when it gives
@@ -268,4 +273,142 @@ func boolCount(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// TestAcceptDecisionReason checks the reason of acceptDecision for each cause
+// that stops the command, the order of the causes when more than one applies,
+// and that the reason is empty exactly when acceptAdvice gives a command. The
+// JSON "accept.reason" comes from it (see acceptOf).
+func TestAcceptDecisionReason(t *testing.T) {
+	t.Parallel()
+
+	ok := acceptHint{name: "srv", digest: testDigest}
+	with := func(f func(h *acceptHint)) acceptHint {
+		h := ok
+		f(&h)
+		return h
+	}
+	tests := []struct {
+		name          string
+		hint          acceptHint
+		config        string
+		configProblem bool
+		want          string
+	}{
+		{name: "command", hint: ok},
+		{name: "cut diff", hint: with(func(h *acceptHint) { h.truncated = true }), want: report.AcceptReasonReviewFirst},
+		{name: "ignored change", hint: with(func(h *acceptHint) { h.ignored = true }), want: report.AcceptReasonReviewFirst},
+		{name: "change with no text", hint: with(func(h *acceptHint) { h.noText = true }), want: report.AcceptReasonReviewFirst},
+		{name: "pins file full", hint: with(func(h *acceptHint) { h.full = fileFull }), want: report.AcceptReasonPinsFull},
+		{name: "project share full", hint: with(func(h *acceptHint) { h.full = shareFull }), want: report.AcceptReasonProjectShareFull},
+		{name: "unknown full kind fails closed", hint: with(func(h *acceptHint) { h.full = fullKind(99) }), want: report.AcceptReasonPinsFull},
+		{name: "config problem", hint: ok, configProblem: true, want: report.AcceptReasonConfigProblem},
+		{name: "ambiguous name", hint: with(func(h *acceptHint) { h.ambiguous = true }), want: report.AcceptReasonAmbiguousName},
+		{name: "name with a space", hint: with(func(h *acceptHint) { h.name = "my srv" }), want: report.AcceptReasonNotShellSafe},
+		{name: "empty name", hint: with(func(h *acceptHint) { h.name = "" }), want: report.AcceptReasonNotShellSafe},
+		{name: "project with a quote", hint: with(func(h *acceptHint) { h.project = "/p'q" }), want: report.AcceptReasonNotShellSafe},
+		{name: "config with a space", hint: ok, config: "/my c.json", want: report.AcceptReasonNotShellSafe},
+		// More than one cause: the first of the order in acceptDecision wins.
+		{
+			name: "review comes before full",
+			hint: with(func(h *acceptHint) { h.truncated, h.full = true, fileFull }),
+			want: report.AcceptReasonReviewFirst,
+		},
+		{
+			name: "full comes before config problem",
+			hint: with(func(h *acceptHint) { h.full = shareFull }), configProblem: true,
+			want: report.AcceptReasonProjectShareFull,
+		},
+		{
+			name: "config problem comes before ambiguous name",
+			hint: with(func(h *acceptHint) { h.ambiguous = true }), configProblem: true,
+			want: report.AcceptReasonConfigProblem,
+		},
+		{
+			name: "ambiguous name comes before unsafe word",
+			hint: with(func(h *acceptHint) { h.ambiguous, h.name = true, "my srv" }),
+			want: report.AcceptReasonAmbiguousName,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			text, reason := acceptDecision(tt.hint, tt.config, tt.configProblem)
+			if reason != tt.want {
+				t.Errorf("acceptDecision() reason = %q, want %q", reason, tt.want)
+			}
+			if reason != "" && !slices.Contains(report.AcceptReasons(), reason) {
+				t.Errorf("acceptDecision() reason = %q, which is not in report.AcceptReasons()", reason)
+			}
+			advice, isCommand := acceptAdvice(tt.hint, tt.config, tt.configProblem)
+			if advice != text || isCommand != (reason == "") {
+				t.Errorf("acceptAdvice() = (%q, %v), want (%q, %v) (same decision)", advice, isCommand, text, reason == "")
+			}
+		})
+	}
+}
+
+// TestAcceptOfReason checks the accept object that acceptOf builds: a command
+// and no reason when the hint is a command, and a reason and no command for a
+// full pins.json or a full project share (storeFull and shareFull cannot be
+// made by a small scan, so the hint is built by hand). A server with no hint
+// has no accept object.
+func TestAcceptOfReason(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Scope: discover.ScopeGlobal, Source: "/home/u/.claude.json"}
+	id := serverIdentity(srv)
+	hint := func(f func(h *acceptHint)) map[pins.Identity]acceptHint {
+		h := acceptHint{name: "srv", id: id, digest: testDigest}
+		f(&h)
+		return map[pins.Identity]acceptHint{id: h}
+	}
+	tests := []struct {
+		name        string
+		hints       map[pins.Identity]acceptHint
+		wantNil     bool
+		wantCommand bool
+		wantReason  string
+	}{
+		{name: "no hint", hints: nil, wantNil: true},
+		{name: "command", hints: hint(func(*acceptHint) {}), wantCommand: true},
+		{name: "cut diff", hints: hint(func(h *acceptHint) { h.truncated = true }), wantReason: report.AcceptReasonReviewFirst},
+		{name: "ignored", hints: hint(func(h *acceptHint) { h.ignored = true }), wantReason: report.AcceptReasonReviewFirst},
+		{name: "no diff text", hints: hint(func(h *acceptHint) { h.noText = true }), wantReason: report.AcceptReasonReviewFirst},
+		{name: "pins file full", hints: hint(func(h *acceptHint) { h.full = fileFull }), wantReason: report.AcceptReasonPinsFull},
+		{name: "project share full", hints: hint(func(h *acceptHint) { h.full = shareFull }), wantReason: report.AcceptReasonProjectShareFull},
+		{name: "ambiguous name", hints: hint(func(h *acceptHint) { h.ambiguous = true }), wantReason: report.AcceptReasonAmbiguousName},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := acceptOf(srv, tt.hints, "", false)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("acceptOf() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("acceptOf() = nil, want an accept object")
+			}
+			if got.Digest != testDigest {
+				t.Errorf("Digest = %q, want %q", got.Digest, testDigest)
+			}
+			if (got.Command != "") != tt.wantCommand {
+				t.Errorf("Command = %q, want a command: %v", got.Command, tt.wantCommand)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+
+	t.Run("config problem", func(t *testing.T) {
+		t.Parallel()
+		got := acceptOf(srv, hint(func(*acceptHint) {}), "", true)
+		if got == nil || got.Command != "" || got.Reason != report.AcceptReasonConfigProblem {
+			t.Errorf("acceptOf() = %+v, want no command and reason %q", got, report.AcceptReasonConfigProblem)
+		}
+	})
 }

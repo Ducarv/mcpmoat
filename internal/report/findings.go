@@ -182,7 +182,10 @@ const fieldTool = "tool"
 // empty. A row with the field "tool" has a line "Tool: <name> (<related>)" in
 // place of Where. When its Key is empty (a finding about the whole server, with
 // a fixed reason in Related) the line is "Reason: <related>" instead, because
-// no tool is named. An empty Risk or Remediation shows as "-".
+// no tool is named. A row with an empty Field, an empty Key and a Related (a
+// summary of the whole server, for example MOAT-T4-005) has the same "Reason:"
+// line, because no config field is named. An empty Risk or Remediation shows
+// as "-".
 //
 // A row with Source SourceLLM gets " [LLM]" after the title on its first
 // line, and a line "Source: LLM classification (advisory)" after the Server
@@ -256,6 +259,11 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 	case r.Field == fieldTool && r.Key == "":
 		// No tool name: the row is about the whole server, and Related is the
 		// reason. A "Tool:" line would show the reason as a tool name.
+		writeLine(b, "Reason", findingCell(r.Related))
+	case r.Field == "" && r.Key == "" && r.Related != "":
+		// A summary of the whole server (for example MOAT-T4-005): no field and
+		// no key, only a fixed text in Related. "Where:" would point at a
+		// config field that does not exist.
 		writeLine(b, "Reason", findingCell(r.Related))
 	case r.Field == fieldTool:
 		writeLine(b, "Tool", keyRelatedCell(r.Key, r.Related))

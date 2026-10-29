@@ -539,6 +539,8 @@ func TestUsageContent(t *testing.T) {
 		"scan-output.v2.json",
 		// Before issue #223 the findings and diffs had no server_index.
 		"scan-output.v3.json",
+		// Before issue #249 accept had no reason.
+		"scan-output.v4.json",
 		// Before issue #143 scan did not apply the tool rules (YAML) or the
 		// rules from --rules.
 		"not applied yet",

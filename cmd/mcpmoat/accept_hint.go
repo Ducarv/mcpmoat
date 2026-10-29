@@ -6,6 +6,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // This file holds the "To accept" line that scan prints for each changed
@@ -113,15 +114,53 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 // and configPath are bare shell words, the user saw every change, the name
 // selects the server, no config file has a problem, and pins.json has room for
 // the tools. A command that pin refuses would mislead the user, so a full
-// pins.json gives the prose steps; they still hold the digest. The JSON output
-// reuses this function, so the terminal and the JSON cannot disagree. It does
-// no I/O.
+// pins.json gives the prose steps; they still hold the digest. It is a thin
+// wrapper over acceptDecision, which the JSON output also uses, so the terminal
+// and the JSON cannot disagree. It does no I/O.
 func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
-	text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.full != notFull {
-		return acceptSteps(h, configPath, configProblem), false
+	text, reason := acceptDecision(h, configPath, configProblem)
+	return text, reason == ""
+}
+
+// acceptDecision is the one decision behind acceptAdvice. text is the same as
+// the text of acceptAdvice. reason is empty when text is the command. Else it
+// is the report.AcceptReason* word of the first cause that stops the command,
+// checked in this order:
+//
+//  1. the user did not see every change (a cut diff, a change that --ignore
+//     hid, or a diff that is a fixed note): report.AcceptReasonReviewFirst;
+//  2. pins.json has no room for the tools: report.AcceptReasonPinsFull;
+//  3. only the share of the project servers has no room:
+//     report.AcceptReasonProjectShareFull;
+//  4. a config file has a problem: report.AcceptReasonConfigProblem;
+//  5. the name does not select the server: report.AcceptReasonAmbiguousName;
+//  6. the name, the project or configPath is not a bare shell word:
+//     report.AcceptReasonNotShellSafe.
+//
+// The terminal prints the notes for all the causes. The JSON gives the first
+// one only.
+func acceptDecision(h acceptHint, configPath string, configProblem bool) (text, reason string) {
+	command, wordsOK := acceptCommand(h.name, h.project, configPath, h.digest)
+	switch {
+	case !h.fullyReviewed():
+		reason = report.AcceptReasonReviewFirst
+	case h.full == fileFull:
+		reason = report.AcceptReasonPinsFull
+	case h.full == shareFull:
+		reason = report.AcceptReasonProjectShareFull
+	case configProblem:
+		reason = report.AcceptReasonConfigProblem
+	case h.ambiguous:
+		reason = report.AcceptReasonAmbiguousName
+	case !wordsOK:
+		reason = report.AcceptReasonNotShellSafe
+	case h.full != notFull:
+		// A full kind that this switch does not know: fail closed, no command.
+		reason = report.AcceptReasonPinsFull
+	default:
+		return command, ""
 	}
-	return text, true
+	return acceptSteps(h, configPath, configProblem), reason
 }
 
 // acceptCommand returns the command that accepts the tools with the digest, and
