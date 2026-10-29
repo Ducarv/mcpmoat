@@ -216,23 +216,32 @@ type scanOpts struct {
 	// keeps toolRulesBudget, the default.
 	budget time.Duration
 	// step is the limit of the whole tool rule step. Zero means one hour, so the
-	// 30 s default (toolRulesStepBudget) cannot cut a server on a busy machine.
+	// 30 s default (toolRulesStepBudget) cannot cut a server on a busy machine,
+	// and each server gets budget in full (see serverShare).
 	step time.Duration
 	// maxRows is the largest number of tool rows for one server. Zero keeps
 	// maxToolRowsPerServer, the default.
 	maxRows int
 }
 
-// scanWith runs "mcpmoat scan --config <file> args..." in e with insp and with
-// the limits of opts (see scanOpts).
-func scanWith(e *pinEnv, insp inspect.Inspector, opts scanOpts, args ...string) pinRunResult {
+// runWith runs "mcpmoat args..." in e with insp and with the limits of opts
+// (see scanOpts). Use it when the scan needs another command line than
+// scanWith gives, for example without --config.
+func runWith(e *pinEnv, insp inspect.Inspector, opts scanOpts, args ...string) pinRunResult {
 	e.t.Helper()
 	c, stdout, stderr := e.cli(insp)
 	c.toolBudget = opts.budget
 	c.toolStepBudget = cmp.Or(opts.step, time.Hour)
 	c.maxToolRows = opts.maxRows
-	code := c.dispatch(append([]string{"scan", "--config", e.config}, args...))
+	code := c.dispatch(args)
 	return pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// scanWith runs "mcpmoat scan --config <file> args..." in e with insp and with
+// the limits of opts (see scanOpts).
+func scanWith(e *pinEnv, insp inspect.Inspector, opts scanOpts, args ...string) pinRunResult {
+	e.t.Helper()
+	return runWith(e, insp, opts, append([]string{"scan", "--config", e.config}, args...)...)
 }
 
 // scanWithBudget is scanWith with budget as the tool budget of each server.
@@ -246,15 +255,6 @@ func scanWithBudget(e *pinEnv, insp inspect.Inspector, budget time.Duration, arg
 func scanWithCap(e *pinEnv, insp inspect.Inspector, maxRows int, args ...string) pinRunResult {
 	e.t.Helper()
 	return scanWith(e, insp, scanOpts{maxRows: maxRows}, args...)
-}
-
-// withIgnoreFile writes content as .mcpmoat-ignore in dir, and returns args with
-// --use-ignore-file added. scan reads the file only with that flag, so a test
-// that uses the file must give it (see useIgnoreFileFlag).
-func withIgnoreFile(t *testing.T, dir, content string, args ...string) []string {
-	t.Helper()
-	writeTestFile(t, dir, rules.IgnoreFileName, content)
-	return append(slices.Clone(args), useIgnoreFileFlag)
 }
 
 // assertNoToolText fails the test if stderr holds tool text or a tool name.
@@ -591,13 +591,8 @@ func TestScanToolsHostileIgnoreFile(t *testing.T) {
 			e := &pinEnv{t: t, home: t.TempDir(), work: t.TempDir(), xdg: t.TempDir()}
 			writeServers(t, e.home, ".claude.json", oneServer(server))
 			writeTestFile(t, e.work, rules.IgnoreFileName, content)
-			c, stdout, stderr := e.cli(insp())
-			c.toolBudget = tt.budget
-			c.toolStepBudget = time.Hour
 
-			code := c.dispatch(append([]string{"scan", "--json"}, tt.args...))
-
-			got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			got := runWith(e, insp(), scanOpts{budget: tt.budget}, append([]string{"scan", "--json"}, tt.args...)...)
 			wantStderr := withNewPinsLine(t, e, tt.stderr)
 			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
 			assertStderrLines(t, got.stderr, exactLines(wantStderr))
@@ -1731,7 +1726,7 @@ func TestScanToolsCapDefaultLimit(t *testing.T) {
 	// The test checks the cap, not the time budget: 1005 tools take about 4
 	// seconds under -race, so a busy machine could use up the default budget
 	// of 5 seconds and cut the rows.
-	got := scanWith(e, insp, scanOpts{budget: time.Hour}, "--json")
+	got := scanWithBudget(e, insp, time.Hour, "--json")
 
 	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{capWarning("srv", over, maxToolRowsPerServer)}})
 	assertStderrLines(t, got.stderr, exactLines(withNewPinsLine(t, e, []string{

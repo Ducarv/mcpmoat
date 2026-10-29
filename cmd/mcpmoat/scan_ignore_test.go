@@ -37,6 +37,16 @@ const ignoreCwdWarning = "mcpmoat scan: warning: cannot read the working directo
 // tests of this package use it as a scan argument.
 const useIgnoreFileFlag = "--use-ignore-file"
 
+// withIgnoreFile writes content as .mcpmoat-ignore in dir, and returns args with
+// --use-ignore-file added. scan reads the file only with that flag, so a test
+// that uses the file must give it (see useIgnoreFileFlag). A table-driven test
+// that keeps the flag in its table does not need this helper.
+func withIgnoreFile(t *testing.T, dir, content string, args ...string) []string {
+	t.Helper()
+	writeTestFile(t, dir, rules.IgnoreFileName, content)
+	return append(slices.Clone(args), useIgnoreFileFlag)
+}
+
 // ignoreNoteLine is the stderr line of scan without --use-ignore-file when the
 // working directory holds an entry named .mcpmoat-ignore. The tests keep their
 // own copy of the text (not ignoreFileNote of scan.go), so a change of the text

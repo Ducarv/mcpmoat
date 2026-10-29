@@ -1,5 +1,9 @@
 package main
 
+// Tests for the caps of the config findings (issue #213): at most
+// configRowsPerServer rows for one server and configRowsTotal rows for the
+// whole scan, with one MOAT-T4-005 row for each server that lost rows.
+
 import (
 	"fmt"
 	"maps"
@@ -12,10 +16,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
-
-// Tests for the caps of the config findings (issue #213): at most
-// configRowsPerServer rows for one server and configRowsTotal rows for the
-// whole scan, with one MOAT-T4-005 row for each server that lost rows.
 
 // cfgCapCanary is the env value of the servers of the cap tests. It looks
 // like a secret, and no row, stdout or stderr may hold it.

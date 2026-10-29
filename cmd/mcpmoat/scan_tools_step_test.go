@@ -1,8 +1,12 @@
 package main
 
 // In-process tests of the time limit of the whole tool rule step of "mcpmoat
-// scan" (issue #210, see checkTools and serverShare). The per-server budget,
-// the caps and the helpers that the tests share are in scan_tools_test.go.
+// scan" (issue #210, toolRulesStepBudget, see checkTools and serverShare). The
+// per-server budget, the caps and the helpers that the tests share are in
+// scan_tools_test.go. Most tests here call checkTools with a fake toolChecker
+// (blockingChecker), so a check takes a known time without a hostile regex.
+// They compare deadlines, not the wall clock, so a busy machine cannot make
+// them fail.
 
 import (
 	"context"
@@ -20,12 +24,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
-
-// The tests below check the time limit of the whole tool rule step (issue
-// #210, toolRulesStepBudget, see checkTools and serverShare). Most of them call
-// checkTools with a fake toolChecker (blockingChecker), so a check takes a
-// known time without a hostile regex. They compare deadlines, not the wall
-// clock, so a busy machine cannot make them fail.
 
 // TestScanToolsServerShare checks serverShare: each server gets the time left
 // split evenly among the servers left, but never more than the per-server
@@ -553,7 +551,8 @@ func TestScanToolsStepBudgetScan(t *testing.T) {
 			}
 			wantStderr = append(wantStderr, lateWarning("-1ns", 2), newPinsLine(e), pinnedLine("srv-a", 3), pinnedLine("srv-b", 2))
 
-			got := scanWith(e, insp(), scanOpts{budget: time.Hour, step: usedUpBudget}, flags...)
+			opts := scanOpts{budget: time.Hour, step: usedUpBudget}
+			got := scanWith(e, insp(), opts, flags...)
 
 			assertScanRun(t, got, scanWant{code: tt.code, stdout: []string{"MOAT-T1-023  " + budgetTitle + "\n"}, stderr: wantStderr})
 			assertToolFindings(t, got.stdout,
@@ -566,7 +565,7 @@ func TestScanToolsStepBudgetScan(t *testing.T) {
 
 			// The servers are pinned now. jsonFindings checks that complete
 			// is true.
-			jsonRun := scanWith(e, insp(), scanOpts{budget: time.Hour, step: usedUpBudget}, append(slices.Clone(flags), "--json")...)
+			jsonRun := scanWith(e, insp(), opts, append(slices.Clone(flags), "--json")...)
 
 			wantJSONStderr := slices.DeleteFunc(slices.Clone(wantStderr), func(l string) bool {
 				return strings.HasPrefix(l, scanPrefix+"pinned ") || l == newPinsLine(e)
