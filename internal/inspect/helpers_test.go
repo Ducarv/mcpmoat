@@ -1,9 +1,11 @@
 package inspect
 
 import (
+	"cmp"
 	"context"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,6 +16,48 @@ import (
 
 // This file holds the test helpers that several test files of the package
 // use. A helper that only one file uses stays in that file.
+
+// revealSecrets returns the values of secrets in order, or nil for an empty
+// list. Tests use it to compare Result.Secrets with fake test values.
+func revealSecrets(secrets []discover.Secret) []string {
+	var values []string
+	for _, s := range secrets {
+		values = append(values, s.Reveal())
+	}
+	return values
+}
+
+// checkSecrets fails the test when the revealed values of got are not want,
+// in the same order, or when want is empty and got is not nil (Result.Secrets
+// is nil when no value is long enough). The values are fake test secrets, so
+// the message shows them.
+func checkSecrets(t *testing.T, got []discover.Secret, want []string) {
+	t.Helper()
+	if values := revealSecrets(got); !slices.Equal(values, want) {
+		t.Errorf("Result.Secrets = %q, want %q", values, want)
+	}
+	if len(want) == 0 && got != nil {
+		t.Errorf("Result.Secrets = %#v, want nil", got)
+	}
+}
+
+// wantSecrets returns values in the form of Result.Secrets, for a want whose
+// values the test cannot write in order by hand (such as t.TempDir paths):
+// only the values of at least 8 bytes, longest first, then by value, each
+// one time. It is written here on purpose and does not call resultSecrets,
+// so a bug there cannot hide in the want.
+func wantSecrets(values ...string) []string {
+	var want []string
+	for _, v := range values {
+		if len(v) >= 8 {
+			want = append(want, v)
+		}
+	}
+	slices.SortFunc(want, func(a, b string) int {
+		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
+	})
+	return slices.Compact(want)
+}
 
 // skipOnWindows skips the test on Windows. Starting stdio servers is
 // Unix only, and Windows is a non-goal (PRD section 2.2).

@@ -53,10 +53,18 @@ var (
 // network is "ip", "ip4" or "ip6".
 type lookupFunc func(ctx context.Context, network, host string) ([]netip.Addr, error)
 
-// dialFunc opens a connection to an address. It has the signature of
-// (*net.Dialer).DialContext and of http.Transport.DialContext. Tests give a
-// stub that records the address it gets.
-type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+// DialFunc opens a connection to an address. It has the signature of
+// (*net.Dialer).DialContext and of http.Transport.DialContext, so a method
+// value such as (&net.Dialer{}).DialContext is a DialFunc.
+//
+// DialFunc is a hook for tests (see SDKOptions.Dial): a test gives a stub that
+// records the address it gets. Production code must leave it unset, and nil
+// uses a net.Dialer. The pinned dialer calls a DialFunc only after the DNS
+// pin and the address guard, so the address is already checked and pinned. A
+// DialFunc must connect to the address that it gets and to no other address.
+// If it resolves the name again or changes the address, it goes around the
+// pin and the guard.
+type DialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
 // pinnedDialer is a dialer that keeps the first IP address that it connects
 // to for each host name, and uses only that address for all later
@@ -99,7 +107,7 @@ type pinnedDialer struct {
 	// lookup resolves a host name that is not pinned yet.
 	lookup lookupFunc
 	// dial opens the connection to one IP address and port.
-	dial dialFunc
+	dial DialFunc
 	// timeout bounds the lookup and all the connection attempts of a first
 	// dial to a host name, the same as net.Dialer.Timeout. Zero means no
 	// limit other than the context.
@@ -123,7 +131,7 @@ type pinnedDialer struct {
 // newPinnedDialer returns a pinnedDialer with no pins. A nil lookup uses the
 // system resolver (net.DefaultResolver). A nil dial uses a net.Dialer with
 // the timeouts of the base transport.
-func newPinnedDialer(lookup lookupFunc, dial dialFunc) *pinnedDialer {
+func newPinnedDialer(lookup lookupFunc, dial DialFunc) *pinnedDialer {
 	if lookup == nil {
 		// A method value: it binds the method to net.DefaultResolver, and
 		// the result is a plain function with the lookupFunc signature.

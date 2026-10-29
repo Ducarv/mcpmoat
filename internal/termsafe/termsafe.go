@@ -125,6 +125,36 @@ func Cut(s string, n int) (string, bool) {
 	return s, false
 }
 
+// Escape returns s with each unsafe rune replaced by a visible escape. It adds
+// no quotes and does not cut s. An invalid UTF-8 byte, and an ASCII control
+// character such as a newline or ESC, becomes \xNN. Any other rune for which
+// NeedsEscape is true becomes \uXXXX, or \UXXXXXXXX above U+FFFF. Every other
+// byte is kept. A text with no such rune comes back unchanged.
+//
+// Escape differs from Quote. Quote adds quotes and writes a newline as \n, but
+// Escape writes it as \x0a, so every ASCII control character has one form.
+//
+// The output is for a person to read in one line. It is not reversible: a
+// backslash stays as it is, so the text \x0a (four characters) gives the same
+// output as a real newline. A caller that needs a reversible form uses Quote.
+func Escape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case size == 1 && (r == utf8.RuneError || NeedsEscape(r)):
+			// An invalid byte and an ASCII control character both show as \xNN.
+			_, _ = fmt.Fprintf(&b, `\x%02x`, s[i]) // a strings.Builder write never fails
+		case NeedsEscape(r):
+			writeRuneEscape(&b, r)
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
 // needsQuote reports whether s starts with a double quote, holds invalid
 // UTF-8, or holds a rune for which NeedsEscape is true.
 func needsQuote(s string) bool {

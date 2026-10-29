@@ -1,6 +1,10 @@
 package inspect
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
 
 // This file holds the result types of an inspection. They do not import the
 // MCP SDK on purpose: they are the stable contract between inspect and the
@@ -9,10 +13,11 @@ import "encoding/json"
 // Every string in these types comes from the MCP server, and a malicious
 // server controls it. Treat it as untrusted text. Callers must escape it with
 // internal/termsafe before they print it to a terminal, and must never
-// execute it or put it into a command or a format string. The one exception
-// is Warning: its strings come from the client config or from fixed lists in
-// mcpmoat, never from the server. Callers must still escape them with
-// internal/termsafe.
+// execute it or put it into a command or a format string. There are two
+// exceptions. Warning: its strings come from the client config or from fixed
+// lists in mcpmoat, never from the server. Callers must still escape them
+// with internal/termsafe. Result.Secrets: its values come from the client
+// config and the environment, and they must never be printed at all.
 //
 // The types have no methods and no struct tags on purpose: output types live
 // in internal/report.
@@ -286,4 +291,116 @@ type Result struct {
 	// or items in a list that the server did not declare. It is nil when there
 	// are none.
 	Warnings []Warning
+
+	// Secrets are the secret values that Inspect gave to the server:
+	//
+	//   - stdio: each configured env value.
+	//   - stdio: the secrets in the command and the args that the child
+	//     gets, after the expansion: the text that discover.RedactArgs masks
+	//     (see discover.ArgSecrets), for example the value after "--token"
+	//     or "--api-key=", "x" in -H "Authorization: Bearer x", a token path
+	//     segment, the user info and the query values of a URL, or the
+	//     password of a DSN with no scheme ("u:pw@tcp(h:3306)/db") or of the
+	//     Oracle form "name/pw@tns". Plain args that RedactArgs shows, such
+	//     as package names and paths, are not in the list. RedactArgs fails
+	//     closed, so some text that is not a secret (a path segment with a
+	//     space) is in the list too.
+	//   - remote: each configured header value, and the credential after an
+	//     auth scheme ("Bearer <token>").
+	//   - remote: for a Cookie or Cookie2 header, each pair ("sid=x") and
+	//     each value ("x"), also the value without its quotes. For a
+	//     Set-Cookie header, the same for the first pair only, the cookie:
+	//     the rest are attributes such as "Path=/". A server can echo one
+	//     cookie alone.
+	//   - remote: for a "Basic <base64>" header and for the URL user info, the
+	//     password. The user name too when the password is empty, because the
+	//     name is then the credential, as in https://<token>@host/, or when
+	//     the name looks like a token (see discover.IsSecretUserName), as in
+	//     https://<token>:x-oauth-basic@github.com/. A plain name next to a
+	//     password is not in the list.
+	//   - remote: for both of these, also the Basic token that Inspect builds
+	//     from the name and the password, alone and as "Basic <token>".
+	//   - remote: the secret query and path parts of the URL, the ones that
+	//     discover.RedactURL masks. Also the URL credentials that
+	//     discover.ArgCredentials finds: the whole user info, and the value
+	//     inside a "key=value" path segment or a matrix parameter
+	//     (";token=x"). A server can echo that value alone.
+	//   - both: the values of the expanded variables.
+	//   - all: the credential pieces inside an env value, an expanded value
+	//     or a header value, as discover.ArgCredentials finds them. For
+	//     example the password of "postgres://u:pw@h/db". A server can echo
+	//     the piece alone.
+	//
+	// Each value has at least discover.MinSecretBytes bytes and is in the list
+	// one time. A shorter value is too likely to match ordinary words, so a
+	// short password or name is not in the list. Unlike the other fields,
+	// Secrets does not come from the server.
+	//
+	// A server gets these values and can echo them in its tools, prompts or
+	// instructions. Secrets is the wide list, for local use. The local report
+	// shows each value of Secrets that a server echoes in a tool name, title,
+	// description or schema as discover.Mask ("********"): see
+	// discover.TextRedactor and pins.CompareMasked. The scrub of error text
+	// removes these values too. A value shorter than discover.MinSecretBytes
+	// is not in the list, so the report does not mask it. scan --llm sends
+	// Result text off the machine and removes from it only the values of
+	// Credentials, the subset that looks like a credential.
+	//
+	// Never print, log, encode (JSON, gob) or store the values. A
+	// discover.Secret prints and encodes as discover.Mask, so a mistake shows
+	// only the mask. Read a value with Reveal only to compare it with text.
+	// Result is never encoded as a whole, and the pin hash reads Tools only,
+	// so Secrets is not in any output.
+	//
+	// It is nil on error, and nil when no value is long enough. Inspect sets
+	// it on success only. A [Run] Outcome has it in Outcome.Result.
+	Secrets []discover.Secret
+
+	// Credentials is the subset of Secrets that looks like a credential.
+	// Only scan --llm uses it: it removes these values from the tool text
+	// that it sends to the provider. Plain config words in Secrets, such as
+	// an env value "production" or a "Content-Type" header value, are not in
+	// Credentials, so the text sent to the provider keeps them (issues #229
+	// and #235). Secrets stays the wide list for local use.
+	//
+	// A value of Secrets is a credential when:
+	//
+	//   - env: the key is secret-like (discover.IsSecretName), or the value
+	//     looks like a credential: a word of it looks like a token
+	//     (discover.TokenLike), or discover.ArgCredentials finds a credential
+	//     in it, such as the password of "postgres://u:pw@h/db". The pieces
+	//     that discover.ArgCredentials finds inside an env value, an
+	//     expanded value or a header value count too, such as that password
+	//     alone.
+	//   - stdio args: discover.ArgCredentials returns it, for example the
+	//     value after a secret-like flag or key, a token-like piece (a UUID
+	//     or a long random segment) or a URL credential. A DSN with no
+	//     scheme ("u:pw@host", "u:pw@tcp(h:3306)/db") always gives its
+	//     password, the text between the first ":" and the last "@". The
+	//     Oracle form "name/pw@tns" and a positional "admin:pw" give the
+	//     password only when the whole value is a credential (after a
+	//     secret-like flag, or token-like). "git@github.com:org/repo" and
+	//     "user@example.com" give no password.
+	//   - header: the name is secret-like (Authorization, Cookie, X-Api-Key
+	//     and similar) or names a cookie header (Cookie, Set-Cookie,
+	//     Cookie2), the value is the credential after an auth scheme
+	//     ("Bearer <token>") or a decoded Basic value, or the value looks
+	//     like a credential as an env value does. Then every value of Secrets
+	//     that the header gives counts: the whole value, the credential
+	//     pieces inside it and, for a cookie header, each pair and each
+	//     value (for Set-Cookie, of the first pair only). Every cookie pair
+	//     counts, also one with a plain name such as "theme=dark".
+	//   - URL: the whole user info and the password always; a query or path
+	//     part, or the value inside a "key=value" path segment or a matrix
+	//     parameter, only when its key is secret-like or it looks like a
+	//     token.
+	//   - expanded variable: the variable name is secret-like or the value
+	//     looks like a credential as an env value does.
+	//
+	// The rules of Secrets apply here too: each value has at least
+	// discover.MinSecretBytes bytes and is in the list one time. Never
+	// print, log, encode or store the values; a discover.Secret prints and
+	// encodes as discover.Mask. It is nil on error and nil when no value is
+	// a credential. Inspect sets it on success only.
+	Credentials []discover.Secret
 }

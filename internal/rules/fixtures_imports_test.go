@@ -84,13 +84,15 @@ func TestFixtureImports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// benign, mailer, poisoned, rugpull and shadowing.
+	// A new fixture folder is fine. A missing one of these fails the test.
 	folders := map[string]bool{}
 	for _, fixture := range fixtureOf {
 		folders[fixture] = true
 	}
-	if len(folders) < 4 {
-		t.Fatalf("found %d fixture folders %v, want at least 4", len(folders), slices.Sorted(maps.Keys(folders)))
+	for _, want := range []string{"benign", "echo", "mailer", "poisoned", "rugpull", "shadowing"} {
+		if !folders[want] {
+			t.Fatalf("fixture folder %q not found, found %v", want, slices.Sorted(maps.Keys(folders)))
+		}
 	}
 	for file, dir := range fixtureOf {
 		t.Run(dir+"/"+filepath.Base(file), func(t *testing.T) {

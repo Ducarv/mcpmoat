@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -29,15 +30,15 @@ type llmReply struct {
 
 // llmByTool returns an answer function for llmFake that gives each tool the
 // reply in replies, by tool name. A tool that replies does not name gets
-// risk none.
-func llmByTool(replies map[string]llmReply) func(llm.Input) (llm.Verdict, error) {
-	return func(in llm.Input) (llm.Verdict, error) {
+// risk none. A call whose context has ended gets a stop error.
+func llmByTool(replies map[string]llmReply) llmAnswerFunc {
+	return llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
 		r, ok := replies[in.ToolName]
 		if !ok {
 			return llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}, nil
 		}
 		return r.v, r.err
-	}
+	})
 }
 
 // TestScanLLMErrorSorting checks how scan sorts the errors of the classifier
@@ -97,11 +98,13 @@ func TestScanLLMErrorSorting(t *testing.T) {
 		wantCalls int32
 	}{
 		{
-			name:       "provider error that wraps ErrProvider",
-			tools:      []string{"t1"},
-			replies:    map[string]llmReply{"t1": wrappedProvider},
-			failure:    providerFailure,
-			wantReason: "test: LLM provider request failed",
+			name:    "provider error that wraps ErrProvider",
+			tools:   []string{"t1"},
+			replies: map[string]llmReply{"t1": wrappedProvider},
+			failure: providerFailure,
+			// llm.Reason does not know this error, so the reason is the
+			// fixed "unknown error", never the text of the error.
+			wantReason: "unknown error",
 			wantCount:  "1",
 			wantCode:   exitError,
 			wantMedium: exitError,
@@ -368,7 +371,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 		slices.SortStableFunc(gotIn, func(a, b llm.Input) int {
 			return strings.Compare(a.ToolName+"\x00"+a.Description, b.ToolName+"\x00"+b.Description)
 		})
-		if !slices.Equal(gotIn, wantIn) {
+		if !slices.EqualFunc(gotIn, wantIn, llmSameInput) {
 			t.Errorf("classifier inputs = %+v, want %+v", gotIn, wantIn)
 		}
 	})
@@ -401,7 +404,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 		}
 	})
 
-	// classifyTools matches the ignore list with the real tool name, which is
+	// classifyPlan matches the ignore list with the real tool name, which is
 	// empty here, and not with "(no name)". A tool entry can name no empty
 	// tool, and an entry cannot hold "(no name)" (it has a space, so the line
 	// has too many fields). .mcpmoat-ignore cannot ignore the LLM rules (see
@@ -457,10 +460,13 @@ func TestScanLLMNoToolName(t *testing.T) {
 		t.Run("ignore/"+tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := llmEnv(t, tools)
+			args := append([]string{"--llm", "--json"}, tt.args...)
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ignoreFile)
+				// scan reads the file only with --use-ignore-file.
+				args = append(args, useIgnoreFileFlag)
 			}
-			r := llmScan(t, e, tools, &llmFake{}, append([]string{"--llm", "--json"}, tt.args...)...)
+			r := llmScan(t, e, tools, &llmFake{}, args...)
 
 			if r.code != exitFindings {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
@@ -499,14 +505,14 @@ func TestScanLLMInterruptedAfterLastAnswer(t *testing.T) {
 			defer cancel()
 			var answered atomic.Int32
 			fake := &llmFake{}
-			fake.answer = func(in llm.Input) (llm.Verdict, error) {
-				// The fake checks the context before it calls answer, so
-				// this call returns its verdict after the cancel.
+			fake.answer = llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
+				// llmUnlessStopped checks the context before this function,
+				// so this call returns its verdict after the cancel.
 				if answered.Add(1) == nTools {
 					cancel()
 				}
 				return llmAnswerFor(in)
-			}
+			})
 			f := &llmFactory{t: t, cl: fake}
 			c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
 			c.ctx = ctx
@@ -536,11 +542,17 @@ func TestScanLLMInterruptedAfterLastAnswer(t *testing.T) {
 // TestSortAnswer lists every error class that the LLM client can return, and
 // the answerKind that sortAnswer must give it. A new error class must get its
 // own row here, so its kind is a conscious decision. sortAnswer fails closed:
-// only llm.ErrInvalidOutput gives a MOAT-LLM-002 row, and an error that it
-// does not know stops the step as an internal failure. The unexported local
-// errors of package llm (a request that is too large, a request that cannot
-// be built, a nil client, a refused proxy setting) wrap nothing, so the
-// "unknown error" row covers them.
+// only llm.ErrInvalidOutput and llm.ErrRejected (HTTP 400, 413 and 422, per
+// tool) give a MOAT-LLM-002 row, and an error that it does not know stops the
+// step as an internal failure. llm.ErrRejected wraps llm.ErrProvider, so the
+// rows check that the per-tool codes do not fall into the provider case, and
+// that every other code stays a global failure. The provider errors of
+// package llm (a refused key, a network error, a response that is too large
+// or not valid) are unexported, so the rows use what the client gives: a
+// *llm.StatusError, or an error that wraps llm.ErrProvider. The unexported
+// local errors of package llm (a request that is too large, a request that
+// cannot be built, a nil client, a refused proxy setting) wrap nothing, so
+// the "unknown error" row covers them.
 func TestSortAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -556,14 +568,38 @@ func TestSortAnswer(t *testing.T) {
 		{"context canceled", context.Canceled, answerStopped, false},
 		{"context deadline exceeded", context.DeadlineExceeded, answerStopped, false},
 		{"wrapped context canceled", fmt.Errorf("test: stopped: %w", context.Canceled), answerStopped, false},
-		{"auth", llm.ErrAuth, answerProviderFailed, true},
+		{"auth 403", &llm.StatusError{Code: http.StatusForbidden}, answerProviderFailed, true},
+		{"wrapped auth 401", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusUnauthorized}), answerProviderFailed, true},
 		{"status 401", &llm.StatusError{Code: http.StatusUnauthorized}, answerProviderFailed, true},
 		{"status 429", &llm.StatusError{Code: http.StatusTooManyRequests}, answerProviderFailed, true},
 		{"status 503", &llm.StatusError{Code: http.StatusServiceUnavailable}, answerProviderFailed, true},
 		{"status 307 redirect", &llm.StatusError{Code: http.StatusTemporaryRedirect}, answerProviderFailed, true},
-		{"transport", llm.ErrTransport, answerProviderFailed, true},
-		{"response too large", llm.ErrTooLarge, answerProviderFailed, true},
-		{"bad response", llm.ErrBadResponse, answerProviderFailed, true},
+		{"status 404", &llm.StatusError{Code: http.StatusNotFound}, answerProviderFailed, true},
+		{"status 500", &llm.StatusError{Code: http.StatusInternalServerError}, answerProviderFailed, true},
+		{"wrapped status 503", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusServiceUnavailable}), answerProviderFailed, true},
+		// The neighbours of the per-tool codes stay global.
+		{"status 412", &llm.StatusError{Code: http.StatusPreconditionFailed}, answerProviderFailed, true},
+		{"status 414", &llm.StatusError{Code: http.StatusRequestURITooLong}, answerProviderFailed, true},
+		{"status 421", &llm.StatusError{Code: http.StatusMisdirectedRequest}, answerProviderFailed, true},
+		{"status 423", &llm.StatusError{Code: http.StatusLocked}, answerProviderFailed, true},
+		// The per-tool codes: the provider refused this one tool. They do not
+		// stop the step.
+		{"status 400", &llm.StatusError{Code: http.StatusBadRequest}, answerRejected, false},
+		{"status 413", &llm.StatusError{Code: http.StatusRequestEntityTooLarge}, answerRejected, false},
+		{"status 422", &llm.StatusError{Code: http.StatusUnprocessableEntity}, answerRejected, false},
+		{"wrapped status 400", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusBadRequest}), answerRejected, false},
+		{"wrapped status 413", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusRequestEntityTooLarge}), answerRejected, false},
+		{"wrapped status 422", fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusUnprocessableEntity}), answerRejected, false},
+		{"rejected", llm.ErrRejected, answerRejected, false},
+		{"wrapped rejected", fmt.Errorf("test: %w", llm.ErrRejected), answerRejected, false},
+		// A canceled context wins over a refusal in the same chain: the
+		// request did not end with an answer of the provider.
+		{"rejected and canceled", errors.Join(llm.ErrRejected, context.Canceled), answerStopped, false},
+		// Invalid output wins too: it comes from a 2xx body.
+		{"rejected and invalid output", errors.Join(llm.ErrRejected, llm.ErrInvalidOutput), answerUnusable, false},
+		{"transport", fmt.Errorf("%w: network error", llm.ErrProvider), answerProviderFailed, true},
+		{"response too large", fmt.Errorf("%w: response body too large", llm.ErrProvider), answerProviderFailed, true},
+		{"bad response", fmt.Errorf("%w: response is not valid", llm.ErrProvider), answerProviderFailed, true},
 		{"provider", llm.ErrProvider, answerProviderFailed, true},
 		{"wrapped provider", fmt.Errorf("test: %w", llm.ErrProvider), answerProviderFailed, true},
 		{"unknown error", errors.New("local-error-canary"), answerInternalFailed, true},
@@ -583,9 +619,12 @@ func TestSortAnswer(t *testing.T) {
 	}
 }
 
-// TestAnswerKindAnswered checks which kinds count as an answer: only a
-// verdict and an answer that cannot be used. A tool with any other kind is
-// counted as not classified.
+// TestAnswerKindAnswered checks which kinds count as an answer: a verdict,
+// an answer that cannot be used and a refusal of the tool (answerRejected).
+// A tool with any other kind is counted as not classified: also a tool whose
+// request the step deadline stopped (answerDeadline). The table lists every
+// kind up to answerDeadline, so a new kind fails the test until it gets a
+// row.
 func TestAnswerKindAnswered(t *testing.T) {
 	t.Parallel()
 
@@ -593,91 +632,172 @@ func TestAnswerKindAnswered(t *testing.T) {
 		answerNotRun:         false,
 		answerVerdict:        true,
 		answerUnusable:       true,
+		answerRejected:       true,
 		answerStopped:        false,
 		answerProviderFailed: false,
 		answerInternalFailed: false,
+		answerDeadline:       false,
 	}
-	for k, w := range want {
+	for k := answerNotRun; k <= answerDeadline; k++ {
+		w, ok := want[k]
+		if !ok {
+			t.Errorf("%v has no row in the table", k)
+			continue
+		}
 		if got := k.answered(); got != w {
 			t.Errorf("%v.answered() = %v, want %v", k, got, w)
 		}
 	}
 }
 
-// TestLLMRowTruncated checks llmRow directly for a cut tool text: the floor
-// to medium applies to a verdict with risk none or low or with a risk that
-// is not valid, and to an answer that cannot be used (it gives the MOAT-LLM-001
-// floor row, not a MOAT-LLM-002 row). It never applies to a job without an
-// answer, and a medium or high verdict keeps its own rating.
-func TestLLMRowTruncated(t *testing.T) {
+// TestAnswerKindGot2xx checks which kinds mean a 2xx answer of the provider:
+// only a verdict and an answer that cannot be used. A refusal is an answer
+// (see TestAnswerKindAnswered) but not a 2xx answer, so the fail-closed check
+// of rejectedFailure does not count it. stepFails is in the same table: a
+// refusal does not stop the step at once.
+func TestAnswerKindGot2xx(t *testing.T) {
 	t.Parallel()
 
-	cut := llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryCredentialAccess, Truncated: true}
-	cutWith := func(r llm.Risk) llm.Verdict {
-		v := cut
-		v.Risk = r
-		return v
+	tests := map[answerKind]struct{ got2xx, stepFails bool }{
+		answerNotRun:         {false, false},
+		answerVerdict:        {true, false},
+		answerUnusable:       {true, false},
+		answerRejected:       {false, false},
+		answerStopped:        {false, false},
+		answerProviderFailed: {false, true},
+		answerInternalFailed: {false, true},
+		// The step deadline stops the step like a provider failure, and the
+		// stopped request got no 2xx answer.
+		answerDeadline: {false, true},
 	}
-	tests := []struct {
-		name         string
-		answer       llmAnswer
-		wantOK       bool
-		wantRule     string
-		wantSeverity string
-		wantRisk     string
-		wantRelated  string
-	}{
-		{name: "verdict none cut", answer: llmAnswer{kind: answerVerdict, verdict: cut}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "verdict low cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskLow)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		// A risk that is not valid fails closed: the cut tool still gets the
-		// floor row.
-		{name: "verdict invalid risk cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith("critical")}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "verdict medium cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskMedium)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
-		{name: "verdict high cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskHigh)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "high", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
-		{name: "verdict none not cut", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}}},
-		{name: "unusable cut", answer: llmAnswer{kind: answerUnusable, verdict: llm.Verdict{Truncated: true}}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "unusable not cut", answer: llmAnswer{kind: answerUnusable}, wantOK: true,
-			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
-		{name: "not run cut", answer: llmAnswer{kind: answerNotRun, verdict: cut}},
-		{name: "stopped cut", answer: llmAnswer{kind: answerStopped, verdict: cut}},
-		{name: "provider failed cut", answer: llmAnswer{kind: answerProviderFailed, verdict: cut}},
-		{name: "internal failed cut", answer: llmAnswer{kind: answerInternalFailed, verdict: cut}},
-	}
-	job := llmJob{in: llm.Input{ToolName: "t1"}}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			row, ok := llmRow(job, tt.answer)
-			if ok != tt.wantOK {
-				t.Fatalf("llmRow() ok = %v, want %v", ok, tt.wantOK)
-			}
-			if !ok {
-				if row != (report.FindingRow{}) {
-					t.Errorf("llmRow() row = %+v, want the zero row", row)
-				}
-				return
-			}
-			if row.RuleID != tt.wantRule || row.Severity != tt.wantSeverity || row.Risk != tt.wantRisk || row.Related != tt.wantRelated {
-				t.Errorf("llmRow() = %s %s %q %q, want %s %s %q %q",
-					row.RuleID, row.Severity, row.Risk, row.Related, tt.wantRule, tt.wantSeverity, tt.wantRisk, tt.wantRelated)
-			}
-		})
+	for k := answerNotRun; k <= answerDeadline; k++ {
+		w, ok := tests[k]
+		if !ok {
+			t.Errorf("%v has no row in the table", k)
+			continue
+		}
+		if got := k.got2xx(); got != w.got2xx {
+			t.Errorf("%v.got2xx() = %v, want %v", k, got, w.got2xx)
+		}
+		if got := k.stepFails(); got != w.stepFails {
+			t.Errorf("%v.stepFails() = %v, want %v", k, got, w.stepFails)
+		}
+		// A 2xx answer is always an answer.
+		if k.got2xx() && !k.answered() {
+			t.Errorf("%v.got2xx() is true but answered() is false", k)
+		}
 	}
 }
 
-// verdictClassifier is a toolClassifier that returns its own verdict, with no
-// error, for every tool.
-type verdictClassifier llm.Verdict
+// rowWant is the row that llmRow must give in one case. ok false means no
+// row, and the other fields are then not compared.
+type rowWant struct {
+	ok                            bool
+	rule, severity, risk, related string
+}
 
-// Classify implements toolClassifier.
-func (v verdictClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error) {
-	return llm.Verdict(v), nil
+// TestLLMRowUnrated checks llmRow directly for each combination of a cut and a
+// redacted tool text (llm.Verdict.Truncated and llm.Verdict.Redacted) with
+// each kind of answer. An unrated text (cut or redacted) gets the MOAT-LLM-001
+// floor row, of medium with the category other, when the model rated it none
+// or low, when it gave an answer that cannot be used, or when the provider
+// refused it. A refused or unusable answer that is not unrated keeps its
+// MOAT-LLM-002 row, with llm.RejectedText or llm.InvalidText. A medium or high
+// verdict keeps its own rating. A cut text wins over a redacted one, since
+// the cut is the larger gap. A job without an answer gives no row.
+func TestLLMRowUnrated(t *testing.T) {
+	t.Parallel()
+
+	cred := llm.CategoryCredentialAccess
+	floorCut := rowWant{true, llm.RuleID, "medium", llm.TruncatedText, string(llm.CategoryOther)}
+	floorRed := rowWant{true, llm.RuleID, "medium", llm.RedactedText, string(llm.CategoryOther)}
+	kept := func(sev string) rowWant {
+		return rowWant{true, llm.RuleID, sev, cred.Text(), string(cred)}
+	}
+	invalid := rowWant{true, llm.RuleIDInvalid, "medium", llm.InvalidText, ""}
+	rejected := rowWant{true, llm.RuleIDInvalid, "medium", llm.RejectedText, ""}
+	none := rowWant{}
+
+	tests := []struct {
+		name   string
+		answer llmAnswer
+		// plain, cut, redacted and both are the rows for no flag, a cut text,
+		// a redacted text and a text both cut and redacted.
+		plain, cut, redacted, both rowWant
+	}{
+		{name: "verdict none", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: cred}},
+			plain: none, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "verdict low", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskLow, Category: cred}},
+			plain: kept("low"), cut: floorCut, redacted: floorRed, both: floorCut},
+		// A risk that is not valid fails closed: an unrated tool gets the
+		// floor row, a rated one the invalid row.
+		{name: "verdict invalid risk", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: "critical", Category: cred}},
+			plain: invalid, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "verdict medium", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskMedium, Category: cred}},
+			plain: kept("medium"), cut: kept("medium"), redacted: kept("medium"), both: kept("medium")},
+		{name: "verdict high", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskHigh, Category: cred}},
+			plain: kept("high"), cut: kept("high"), redacted: kept("high"), both: kept("high")},
+		{name: "unusable", answer: llmAnswer{kind: answerUnusable},
+			plain: invalid, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "rejected", answer: llmAnswer{kind: answerRejected},
+			plain: rejected, cut: floorCut, redacted: floorRed, both: floorCut},
+		// The error of the refusal changes nothing in the row.
+		{name: "rejected with status error", answer: llmAnswer{kind: answerRejected, err: &llm.StatusError{Code: http.StatusUnprocessableEntity}},
+			plain: rejected, cut: floorCut, redacted: floorRed, both: floorCut},
+		// A job without an answer gives no row, also when its text is unrated.
+		{name: "not run", answer: llmAnswer{kind: answerNotRun}, plain: none, cut: none, redacted: none, both: none},
+		{name: "stopped", answer: llmAnswer{kind: answerStopped}, plain: none, cut: none, redacted: none, both: none},
+		{name: "provider failed", answer: llmAnswer{kind: answerProviderFailed}, plain: none, cut: none, redacted: none, both: none},
+		{name: "internal failed", answer: llmAnswer{kind: answerInternalFailed}, plain: none, cut: none, redacted: none, both: none},
+		// A request that the step deadline stopped got no answer.
+		{name: "deadline", answer: llmAnswer{kind: answerDeadline}, plain: none, cut: none, redacted: none, both: none},
+	}
+	job := llmJob{in: llm.Input{ToolName: "t1"}}
+	for _, tt := range tests {
+		flags := []struct {
+			name          string
+			cut, redacted bool
+			want          rowWant
+		}{
+			{"plain", false, false, tt.plain},
+			{"cut", true, false, tt.cut},
+			{"redacted", false, true, tt.redacted},
+			{"cut and redacted", true, true, tt.both},
+		}
+		for _, f := range flags {
+			t.Run(tt.name+"/"+f.name, func(t *testing.T) {
+				t.Parallel()
+				answer := tt.answer
+				answer.verdict.Truncated = f.cut
+				answer.verdict.Redacted = f.redacted
+				row, ok := llmRow(job, answer)
+				if ok != f.want.ok {
+					t.Fatalf("llmRow() ok = %v, want %v", ok, f.want.ok)
+				}
+				if !ok {
+					if row != (report.FindingRow{}) {
+						t.Errorf("llmRow() row = %+v, want the zero row", row)
+					}
+					return
+				}
+				if row.RuleID != f.want.rule || row.Severity != f.want.severity || row.Risk != f.want.risk || row.Related != f.want.related {
+					t.Errorf("llmRow() = %s %s %q %q, want %s %s %q %q",
+						row.RuleID, row.Severity, row.Risk, row.Related, f.want.rule, f.want.severity, f.want.risk, f.want.related)
+				}
+				// The title and the fix are the fixed texts of the rule.
+				wantTitle, wantFix := llm.Title, llm.Remediation
+				if f.want.rule == llm.RuleIDInvalid {
+					wantTitle, wantFix = llm.InvalidTitle, llm.InvalidRemediation
+				}
+				if row.Title != wantTitle || row.Remediation != wantFix {
+					t.Errorf("llmRow() title, fix = %q, %q; want %q, %q", row.Title, row.Remediation, wantTitle, wantFix)
+				}
+				if row.Source != report.SourceLLM || row.Key != "t1" {
+					t.Errorf("llmRow() source, key = %q, %q; want %q, %q", row.Source, row.Key, report.SourceLLM, "t1")
+				}
+			})
+		}
+	}
 }
 
 // TestClassifyToolsInvalidVerdict checks that a verdict with a risk or a
@@ -716,7 +836,8 @@ func TestClassifyToolsInvalidVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			res, err := classifyTools(t.Context(), outcomes, verdictClassifier(tt.verdict), &scanIgnores{})
+			cl := &llmFake{answer: func(context.Context, llm.Input) (llm.Verdict, error) { return tt.verdict, nil }}
+			res, err := classifyTools(t.Context(), outcomes, cl, &scanIgnores{})
 			if err != nil {
 				t.Fatalf("classifyTools() error = %v", err)
 			}
@@ -739,35 +860,62 @@ func TestClassifyToolsInvalidVerdict(t *testing.T) {
 }
 
 // TestNewLLMAnswer checks what newLLMAnswer keeps of the verdict: all of it
-// for a verdict, only Truncated for an answer that cannot be used, and
-// nothing for the kinds without an answer.
+// for a verdict, only Truncated for an answer that cannot be used and for a
+// refused tool (so that llmRow can give a cut tool the floor row), and
+// nothing for the kinds without an answer. It keeps the error of Classify
+// only for a refusal (answerRejected), for the reason of rejectedFailure:
+// for every other kind the error is dropped, so its text can never be
+// printed.
 func TestNewLLMAnswer(t *testing.T) {
 	t.Parallel()
 
 	full := llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess, Truncated: true}
-	want := map[answerKind]llm.Verdict{
+	notCut := llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess}
+	// classifyErr is the error that Classify returned with the verdict. Each
+	// kind gets the same error, so only the kind decides whether it is kept.
+	classifyErr := fmt.Errorf("%w: test refusal", llm.ErrRejected)
+	tests := map[answerKind]struct{ cut, notCut llm.Verdict }{
 		answerNotRun:         {},
-		answerVerdict:        full,
-		answerUnusable:       {Truncated: true},
+		answerVerdict:        {full, notCut},
+		answerUnusable:       {llm.Verdict{Truncated: true}, llm.Verdict{}},
+		answerRejected:       {llm.Verdict{Truncated: true}, llm.Verdict{}},
 		answerStopped:        {},
 		answerProviderFailed: {},
 		answerInternalFailed: {},
+		answerDeadline:       {},
 	}
-	for k, w := range want {
-		if got := newLLMAnswer(k, full); got.kind != k || got.verdict != w {
-			t.Errorf("newLLMAnswer(%v) = %v %+v, want %v %+v", k, got.kind, got.verdict, k, w)
+	for k := answerNotRun; k <= answerDeadline; k++ {
+		w, ok := tests[k]
+		if !ok {
+			t.Errorf("%v has no row in the table", k)
+			continue
+		}
+		var wantErr error
+		if k == answerRejected {
+			wantErr = classifyErr
+		}
+		for _, in := range []struct{ v, want llm.Verdict }{{full, w.cut}, {notCut, w.notCut}} {
+			got := newLLMAnswer(k, in.v, classifyErr)
+			if got.kind != k || got.verdict != in.want {
+				t.Errorf("newLLMAnswer(%v, %+v) = %v %+v, want %v %+v", k, in.v, got.kind, got.verdict, k, in.want)
+			}
+			// Compare the error values, not with errors.Is: the answer must
+			// hold the very error of Classify, or nil.
+			if got.err != wantErr { //nolint:errorlint // identity check: newLLMAnswer must keep the same error value
+				t.Errorf("newLLMAnswer(%v, %+v).err = %v, want %v", k, in.v, got.err, wantErr)
+			}
 		}
 	}
 }
 
 // TestAnswerKindString checks that every answerKind up to the last one
-// (answerInternalFailed) has a name. A new kind without a case in String
-// gives the numeric fallback and fails this test. Add the new kind here when
-// it comes after answerInternalFailed.
+// (answerDeadline) has a name. A new kind without a case in String gives the
+// numeric fallback and fails this test. Add the new kind here when it comes
+// after answerDeadline.
 func TestAnswerKindString(t *testing.T) {
 	t.Parallel()
 
-	const last = answerInternalFailed
+	const last = answerDeadline
 	seen := make(map[string]answerKind)
 	for k := answerNotRun; k <= last; k++ {
 		got := k.String()
@@ -781,6 +929,26 @@ func TestAnswerKindString(t *testing.T) {
 	}
 	if got, want := (last + 1).String(), fmt.Sprintf("answerKind(%d)", int(last+1)); got != want {
 		t.Errorf("answerKind %d String() = %q, want the fallback %q: update last", int(last+1), got, want)
+	}
+	// Each name is the name of the constant, so a failure message names the
+	// kind that a reader finds in scan_llm.go.
+	names := map[answerKind]string{
+		answerNotRun:         "answerNotRun",
+		answerVerdict:        "answerVerdict",
+		answerUnusable:       "answerUnusable",
+		answerRejected:       "answerRejected",
+		answerStopped:        "answerStopped",
+		answerProviderFailed: "answerProviderFailed",
+		answerInternalFailed: "answerInternalFailed",
+		answerDeadline:       "answerDeadline",
+	}
+	for k, want := range names {
+		if got := k.String(); got != want {
+			t.Errorf("answerKind %d String() = %q, want %q", int(k), got, want)
+		}
+	}
+	if len(names) != int(last)+1 {
+		t.Errorf("the name table has %d kinds, want %d: add the new kind", len(names), int(last)+1)
 	}
 }
 
@@ -796,8 +964,20 @@ func TestCloseClassifierNil(t *testing.T) {
 
 // TestLLMFailureLine checks the start of the stderr line of a failed LLM step:
 // only a provider failure names the provider, and an internal failure has
-// fixed text. A status code gets a fixed hint for 401 and 403 (the key) and
-// for a 3xx (the redirect), and no hint for other codes.
+// fixed text. A status code gets a fixed hint for 401 and 403 (the key), for
+// a 3xx (the redirect) and for 400, 413 and 422 (the provider refused the
+// tool), and no hint for other codes. Package llm keeps its other provider
+// errors unexported, so a provider error made here is not one that
+// llm.Reason knows: its reason is the fixed "unknown error", never the text
+// of the error.
+//
+// The refusal of every answered tool (kind answerRejected, see
+// rejectedFailure) is a provider failure too, with the reason of
+// rejectedReason: "HTTP <code>, the provider refused every tool", with no
+// nested parentheses. A 400 can only reach the global line (kind
+// answerProviderFailed) from a classifier that wraps it in a way that
+// sortAnswer does not see as a refusal; the line then shows the text of
+// llm.Reason.
 func TestLLMFailureLine(t *testing.T) {
 	t.Parallel()
 
@@ -816,8 +996,37 @@ func TestLLMFailureLine(t *testing.T) {
 		{"provider status 401 wrapped", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusUnauthorized})}, "the LLM provider failed (HTTP 401 (the API key was refused))"},
 		{"provider status 302", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusFound}}, "the LLM provider failed (HTTP 302 (redirect refused))"},
 		{"provider status 307", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusTemporaryRedirect}}, "the LLM provider failed (HTTP 307 (redirect refused))"},
-		{"provider status 400", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (HTTP 400)"},
-		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (network error)"},
+		{"provider status 400", &llmFailure{kind: answerRejected, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (HTTP 400, the provider refused every tool)"},
+		{"provider status 413", &llmFailure{kind: answerRejected, err: &llm.StatusError{Code: http.StatusRequestEntityTooLarge}}, "the LLM provider failed (HTTP 413, the provider refused every tool)"},
+		{"provider status 422", &llmFailure{kind: answerRejected, err: &llm.StatusError{Code: http.StatusUnprocessableEntity}}, "the LLM provider failed (HTTP 422, the provider refused every tool)"},
+		{"provider status 400 wrapped", &llmFailure{kind: answerRejected, err: fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusBadRequest})}, "the LLM provider failed (HTTP 400, the provider refused every tool)"},
+		{"rejected bare", &llmFailure{kind: answerRejected, err: llm.ErrRejected}, "the LLM provider failed (the provider refused every tool)"},
+		{"rejected with a canary", &llmFailure{kind: answerRejected, err: fmt.Errorf("%w: reason-canary-Z5", llm.ErrRejected)}, "the LLM provider failed (the provider refused every tool)"},
+		// A refusal failure without an error is a guard: it never blames the
+		// provider.
+		{"rejected without error", &llmFailure{kind: answerRejected}, llmInternalText},
+		// The global line for a 400 shows the text of llm.Reason, with its
+		// own hint in parentheses.
+		{"provider status 400 global", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (" + llm.Reason(&llm.StatusError{Code: http.StatusBadRequest}) + ")"},
+		{"provider status 400 global text", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (HTTP 400 (the provider refused this tool))"},
+		{"provider status 404", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusNotFound}}, "the LLM provider failed (HTTP 404)"},
+		// Other kinds never name the provider, whatever the error.
+		{"verdict with error", &llmFailure{kind: answerVerdict, err: &llm.StatusError{Code: http.StatusBadRequest}}, llmInternalText},
+		{"stopped with error", &llmFailure{kind: answerStopped, err: &llm.StatusError{Code: http.StatusBadRequest}}, llmInternalText},
+		{"provider bare", &llmFailure{kind: answerProviderFailed, err: llm.ErrProvider}, "the LLM provider failed (unknown error)"},
+		{"provider not known", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: network error", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
+		{"provider not known with a canary", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("%w: reason-canary-Q8", llm.ErrProvider)}, "the LLM provider failed (unknown error)"},
+		// The step deadline (answerDeadline) names the time limit and never
+		// the provider. It needs no error, and the text of an error never
+		// shows (the field stays nil in production, see runLLMJobs).
+		{"deadline 10 minutes", &llmFailure{kind: answerDeadline, timeout: 10 * time.Minute}, "the LLM step stopped after 10 minutes"},
+		{"deadline 1 minute", &llmFailure{kind: answerDeadline, timeout: time.Minute}, "the LLM step stopped after 1 minute"},
+		{"deadline 30 seconds", &llmFailure{kind: answerDeadline, timeout: 30 * time.Second}, "the LLM step stopped after 30 seconds"},
+		{"deadline 50ms", &llmFailure{kind: answerDeadline, timeout: 50 * time.Millisecond}, "the LLM step stopped after 50ms"},
+		{"deadline with a canary error", &llmFailure{kind: answerDeadline, timeout: time.Minute, err: fmt.Errorf("%w: reason-canary-D4", llm.ErrProvider)}, "the LLM step stopped after 1 minute"},
+		// A timeout on another kind changes nothing.
+		{"provider with a timeout", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusServiceUnavailable}, timeout: time.Minute}, "the LLM provider failed (HTTP 503)"},
+		{"internal with a timeout", &llmFailure{kind: answerInternalFailed, timeout: time.Minute}, llmInternalText},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -832,7 +1041,7 @@ func TestLLMFailureLine(t *testing.T) {
 	}
 }
 
-// TestLLMStepStopped checks the guard of llmStep. classifyTools fails only
+// TestLLMStepStopped checks the guard of llmStep. classifyPlan fails only
 // when the context ended, so the fake classifier cannot reach the guard
 // through llmStep: the test calls llmStepStopped directly. An error while the
 // context is alive must give one fixed line, never the text of the error.

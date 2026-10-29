@@ -44,14 +44,19 @@ type confusable struct {
 // duplicates. It is a hand-checked subset of TR39 confusables.txt, version
 // confusablesVersion (the same version that lookalikeScripts comes from).
 // When confusablesVersion or scriptTablesVersion changes, make the table
-// again (issue #152 tracks a generator). Every entry comes from one line of
-// confusables.txt whose source is one rune and whose target is one ASCII
-// letter, alone or followed only by combining marks of category Mn. The
-// entry maps the rune to that letter and drops the marks, because
-// foldMarks drops every mark of the text too: TR39 maps U+0268 (i with
-// stroke) to "i" + U+0335 and U+00F8 (o with stroke) to "o" + U+0338, so
-// the table maps them to "i" and "o", and U+0268 + "gnore" reads as
-// "ignore". The rune is:
+// again from a local copy of confusables.txt with TestGenTables
+// (gentables_test.go). With -update it rewrites the table; without it, it
+// compares the table with the generated one:
+//
+//	go test ./internal/rules/ -run TestGenTables -args -confusables=PATH [-update]
+//
+// Every entry comes from one line of confusables.txt whose source is one rune
+// and whose target is one ASCII letter, alone or followed only by combining
+// marks of category Mn. The entry maps the rune to that letter and drops the
+// marks, because foldMarks drops every mark of the text too: TR39 maps
+// U+0268 (i with stroke) to "i" + U+0335 and U+00F8 (o with stroke) to "o" +
+// U+0338, so the table maps them to "i" and "o", and U+0268 + "gnore" reads
+// as "ignore". The rune is:
 //
 //   - a letter (unicode.IsLetter) or a spacing mark (category Mc) in the Go
 //     unicode tables (scriptTablesVersion), or the symbol U+212E (estimated
@@ -77,12 +82,12 @@ type confusable struct {
 // Cyrillic U+04CF (small palochka) and Hebrew vav U+05D5. Such an entry has
 // "(TR39: l)" in its comment when it maps to "I". One caseless rune maps to
 // "I" too: U+A7FE (Latin epigraphic letter I longa), which is an "I" by its
-// name (see latinILonga in the test). The other reading is a known limit:
-// an uppercase look-alike used as "l" (U+04C0 U+04C0 for "ll"), and a
-// caseless one used as "I" (Runic U+16C1 or U+01C0, a bare bar, + "gnore" is
-// "lgnore"). The mixed_script heuristic flags a rune of another script in a
-// Latin word, so it catches U+16C1, but it cannot catch U+01C0, which is
-// Latin (issue #149).
+// name (see latinILonga in the test).
+//
+// So the table still picks one letter for each rune, and some texts mean
+// the other one. The I/l-blind twin of each regex reads "I" and "l" as one
+// letter, so the pick does not matter for most patterns (see the twin.go
+// file comment).
 //
 // The I/l rule uses the letter of the target, also when marks follow it:
 // U+0197 (capital I with stroke, TR39 "l" + U+0335) maps to "I", and U+019A
@@ -740,7 +745,7 @@ func skeleton(s string) string {
 	return b.String()
 }
 
-// foldSkeleton returns the regex fold of s, a base form of matchForms: the
+// foldSkeleton returns the regex fold of s, a base form of baseFormsCut: the
 // fold of foldMarks with the skeleton applied before it and after it. So
 // "~/." + U+0455 U+0455 U+04BB becomes "~/.ssh".
 //

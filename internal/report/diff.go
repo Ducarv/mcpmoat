@@ -33,6 +33,11 @@ const noDiffNote = "  (no diff text available)"
 type ToolDiff struct {
 	// Server is the name of the server that offers the tool.
 	Server string
+	// ServerIndex is the position of the server in the scanned list (see
+	// ServerRef.Index). Only scan --json reads it, as server_index. WriteDiffs
+	// does not use it. It holds the same value as ServerRef.Index, but ToolDiff
+	// has no ServerRef, so the field name says which index it is.
+	ServerIndex int
 	// Tool is the name of the tool.
 	Tool string
 	// Diff is the unified diff text. Each line starts with "---", "+++",
@@ -113,7 +118,7 @@ func (k DiffKind) String() string {
 //
 // The tool and server names go through findingCell, like the names in
 // WriteFindings: an empty name shows as "-", and a name is escaped and cut at
-// maxShortCellRunes.
+// MaxShortCellRunes.
 //
 // The text of a diff comes from untrusted servers: it is the first place where
 // a tool description reaches the terminal. Each line is split in two parts. The

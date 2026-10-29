@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -228,6 +229,163 @@ func TestWriteJSONEmptyReport(t *testing.T) {
 			t.Errorf("%s = %#v, want an empty list", key, raw[key])
 		}
 	}
+
+	// ignored is always there, with zero counts and an empty object (never null).
+	wantIgnored := map[string]any{"total": float64(0), "rules": map[string]any{}, "file_entries": float64(0)}
+	if !reflect.DeepEqual(raw["ignored"], wantIgnored) {
+		t.Errorf("ignored = %#v, want %#v", raw["ignored"], wantIgnored)
+	}
+	if !strings.Contains(string(out), `"rules": {}`) {
+		t.Errorf("output does not hold \"rules\": {}:\n%s", out)
+	}
+	if raw["fields_truncated"] != false {
+		t.Errorf("fields_truncated = %#v, want false", raw["fields_truncated"])
+	}
+	if raw["schema_version"] != float64(report.SchemaVersion) {
+		t.Errorf("schema_version = %#v, want %d", raw["schema_version"], report.SchemaVersion)
+	}
+}
+
+// TestWriteJSONServerIndex checks that server_index of a finding and of a diff
+// reaches the JSON, and that index 0 is written (the key has no omitempty).
+func TestWriteJSONServerIndex(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		findingIdx int
+		diffIdx    int
+	}{
+		{name: "non-zero", findingIdx: 3, diffIdx: 2},
+		{name: "zero is written", findingIdx: 0, diffIdx: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newReport(nil, []report.JSONDiff{
+				report.NewJSONDiff(report.ToolDiff{Server: "s", ServerIndex: tt.diffIdx, Tool: "t", Kind: report.DiffNew, Diff: "+x\n"}),
+			})
+			r.Findings = []report.JSONFinding{report.NewJSONFinding(report.FindingRow{
+				ServerRef: report.ServerRef{Name: "s", Index: tt.findingIdx}, RuleID: "MOAT-T1-001", Severity: "high",
+			})}
+			var raw struct {
+				Findings []map[string]any `json:"findings"`
+				Diffs    []map[string]any `json:"diffs"`
+			}
+			if err := json.Unmarshal(writeJSON(t, r), &raw); err != nil {
+				t.Fatalf("output is not valid JSON: %v", err)
+			}
+			if len(raw.Findings) != 1 || len(raw.Diffs) != 1 {
+				t.Fatalf("got %d findings and %d diffs, want 1 of each", len(raw.Findings), len(raw.Diffs))
+			}
+			if got, ok := raw.Findings[0]["server_index"]; !ok || got != float64(tt.findingIdx) {
+				t.Errorf("finding server_index = %#v (present %v), want %d", got, ok, tt.findingIdx)
+			}
+			if got, ok := raw.Diffs[0]["server_index"]; !ok || got != float64(tt.diffIdx) {
+				t.Errorf("diff server_index = %#v (present %v), want %d", got, ok, tt.diffIdx)
+			}
+		})
+	}
+}
+
+func TestWriteJSONIgnoredKeepsCounts(t *testing.T) {
+	t.Parallel()
+	r := newReport(nil, nil)
+	r.Ignored = report.JSONIgnored{Total: 5, Rules: map[string]int{"MOAT-T2-004": 3, "MOAT-T4-001": 2}, FileEntries: 2}
+	got := decodeJSON(t, writeJSON(t, r)).Ignored
+	if got.Total != 5 || got.FileEntries != 2 || !reflect.DeepEqual(got.Rules, r.Ignored.Rules) {
+		t.Errorf("ignored = %+v, want %+v", got, r.Ignored)
+	}
+}
+
+func TestWriteJSONAccept(t *testing.T) {
+	t.Parallel()
+	digest := testDigest
+	srv := func(name string, a *report.JSONAccept) report.JSONServer {
+		js := report.NewJSONServer(discover.Server{Name: name, Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
+		js.Accept = a
+		return js
+	}
+	out := writeJSON(t, newReport([]report.JSONServer{
+		srv("none", nil),
+		srv("with-command", &report.JSONAccept{Digest: digest, Command: "mcpmoat pin --accept s --expect " + digest}),
+		srv("digest-only", &report.JSONAccept{Digest: digest}),
+	}, nil))
+
+	var raw struct {
+		Servers []map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw.Servers[0]["accept"]; ok {
+		t.Errorf("server without Accept has an accept key: %v", raw.Servers[0]["accept"])
+	}
+	wantCmd := map[string]any{"digest": digest, "command": "mcpmoat pin --accept s --expect " + digest}
+	if got := raw.Servers[1]["accept"]; !reflect.DeepEqual(got, wantCmd) {
+		t.Errorf("accept with command = %#v, want %#v", got, wantCmd)
+	}
+	// An empty Command is left out, not written as "".
+	wantDigest := map[string]any{"digest": digest}
+	if got := raw.Servers[2]["accept"]; !reflect.DeepEqual(got, wantDigest) {
+		t.Errorf("accept with digest only = %#v, want %#v", got, wantDigest)
+	}
+}
+
+// TestWriteJSONFieldsTruncatedFalse checks that a report with nothing over the
+// cap says fields_truncated false, as a key with a value (not left out). The
+// cuts themselves, and the flag set by the caller, are tested in
+// json_bound_test.go.
+func TestWriteJSONFieldsTruncatedFalse(t *testing.T) {
+	t.Parallel()
+	out := writeJSON(t, richReport())
+	if got := decodeJSON(t, out); got.FieldsTruncated {
+		t.Error("fields_truncated = true, want false")
+	}
+	if !strings.Contains(string(out), `"fields_truncated": false`) {
+		t.Errorf("output has no \"fields_truncated\": false:\n%s", out)
+	}
+}
+
+// cutTestReport builds the same report each time, so a test can compare the
+// report of the caller with a twin. It has a field over the cap.
+func cutTestReport(rules map[string]int) report.ScanReport {
+	js := report.NewJSONServer(discover.Server{Name: strings.Repeat("n", 600), Source: "/s", Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
+	js.Accept = &report.JSONAccept{Digest: testDigest, Command: "cmd"}
+	r := newReport([]report.JSONServer{js}, []report.JSONDiff{{Server: strings.Repeat("d", 600), Tool: "t", Kind: "new"}})
+	r.Findings = []report.JSONFinding{{RuleID: "X", Severity: "low", Key: strings.Repeat("k", 600), Source: report.SourceRule}}
+	r.Errors = []report.JSONFileError{{Path: strings.Repeat("p", 5000), Reason: "invalid JSON"}}
+	r.Ignored = report.JSONIgnored{Total: 2, Rules: rules, FileEntries: 1}
+	return r
+}
+
+func TestWriteJSONDoesNotChangeCaller(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rules func() map[string]int
+	}{
+		{"nil rules map", func() map[string]int { return nil }},
+		{"filled rules map", func() map[string]int { return map[string]int{"MOAT-T2-004": 2} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r, twin := cutTestReport(tt.rules()), cutTestReport(tt.rules())
+			out := writeJSON(t, r)
+			if got := decodeJSON(t, out); !got.FieldsTruncated {
+				t.Fatal("fields_truncated = false, want true: the test report has fields over the cap")
+			}
+			if !reflect.DeepEqual(r, twin) {
+				t.Errorf("WriteJSON changed the report of the caller:\n got %+v\nwant %+v", r, twin)
+			}
+			if (r.Ignored.Rules == nil) != (tt.rules() == nil) {
+				t.Errorf("Ignored.Rules nil = %v after WriteJSON, want %v", r.Ignored.Rules == nil, tt.rules() == nil)
+			}
+			if r.FieldsTruncated {
+				t.Error("FieldsTruncated of the caller is true, want false")
+			}
+		})
+	}
 }
 
 func TestWriteJSONNilListsDoNotChangeCaller(t *testing.T) {
@@ -287,8 +445,8 @@ func TestDiffKindString(t *testing.T) {
 // a literal on purpose: it is the stable name in the schema.
 func TestNewJSONDiffCopiesFields(t *testing.T) {
 	t.Parallel()
-	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
-	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "a note", Truncated: true, IsNote: true}
+	got := report.NewJSONDiff(report.ToolDiff{Server: "s", ServerIndex: 7, Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
+	want := report.JSONDiff{Server: "s", ServerIndex: 7, Tool: "t", Kind: "new", Diff: "a note", Truncated: true, IsNote: true}
 	if got != want {
 		t.Errorf("NewJSONDiff() = %+v, want %+v", got, want)
 	}
@@ -317,12 +475,12 @@ func TestNewJSONFindingSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			row := report.FindingRow{
-				ServerRef: report.ServerRef{Name: "srv", Client: discover.ClientCursor, Scope: discover.ScopeGlobal},
+				ServerRef: report.ServerRef{Name: "srv", Client: discover.ClientCursor, Scope: discover.ScopeGlobal, Index: 5},
 				Source:    tt.source, RuleID: "MOAT-LLM-001", Severity: "medium", Title: "title",
 				Risk: "risk", Remediation: "fix", Field: "tool", Key: "send", Related: "rel",
 			}
 			want := report.JSONFinding{
-				RuleID: "MOAT-LLM-001", Severity: "medium", Server: "srv",
+				RuleID: "MOAT-LLM-001", Severity: "medium", Server: "srv", ServerIndex: 5,
 				Field: "tool", Key: "send", Related: "rel", Source: tt.want,
 			}
 			if got := report.NewJSONFinding(row); got != want {

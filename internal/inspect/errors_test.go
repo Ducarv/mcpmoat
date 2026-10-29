@@ -10,12 +10,19 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
+
+// scrub is the text that classify puts in Reason: replaceSecrets, then the
+// cut of cutWords. The tests of the rules use it.
+func scrub(text, rawURL, redactedURL string, lists secretLists) string {
+	return cutWords(replaceSecrets(text, rawURL, redactedURL, lists), lists.short)
+}
 
 // Secrets that must never appear in any error text.
 const (
@@ -739,11 +746,12 @@ func TestClassify(t *testing.T) {
 		{
 			// The SDK can wrap the transport error in text of its own; the
 			// reason is still the fixed text, so no other text gets in.
-			// safeCause drops the chain of a cause whose text holds a secret,
-			// so errors.Is is not checked here.
+			// safeCause replaces a cause whose text holds a secret, but the
+			// new cause still matches the sentinel (see withText).
 			name:     "invalid proxy in a leaky wrapper keeps the fixed reason",
 			err:      &leakyError{text: "connect: " + leakText, err: errInvalidProxy},
 			wantKind: KindConfig,
+			wantIs:   []error{errInvalidProxy},
 			check: func(t *testing.T, ce *ConnectError) {
 				t.Helper()
 				if ce.Reason != errInvalidProxy.Error() {
@@ -772,7 +780,7 @@ func TestClassify(t *testing.T) {
 			}
 			srv := testServer(transport)
 
-			ce := classify(tt.err, srv, tt.ev, testHeaderValues(srv))
+			ce := classify(tt.err, srv, tt.ev, secretLists{long: testHeaderValues(srv)})
 			if ce == nil {
 				t.Fatal("classify() = nil")
 			}
@@ -878,7 +886,7 @@ func TestClassifyRealNetworkTimeout(t *testing.T) {
 		if err == nil {
 			t.Fatal("DialContext() error = nil, want error")
 		}
-		ce := classify(urlErr("Post", err), srv, nil, testHeaderValues(srv))
+		ce := classify(urlErr("Post", err), srv, nil, secretLists{long: testHeaderValues(srv)})
 		if ce.Kind != KindTimeout {
 			t.Errorf("Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
 		}
@@ -897,7 +905,7 @@ func TestClassifyRealNetworkTimeout(t *testing.T) {
 		if err == nil {
 			t.Fatal("DialContext() error = nil, want error")
 		}
-		ce := classify(urlErr("Post", err), srv, nil, testHeaderValues(srv))
+		ce := classify(urlErr("Post", err), srv, nil, secretLists{long: testHeaderValues(srv)})
 		if ce.Kind != KindTimeout {
 			t.Errorf("Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
 		}
@@ -969,7 +977,7 @@ func TestClassifyRealTLSHandshakeTimeout(t *testing.T) {
 		t.Fatalf("error %T is not a *url.Error", err)
 	}
 	wrapped := urlErr("Post", ue.Err)
-	ce := classify(wrapped, srv, nil, testHeaderValues(srv))
+	ce := classify(wrapped, srv, nil, secretLists{long: testHeaderValues(srv)})
 	if ce.Kind != KindTimeout {
 		t.Errorf("Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
 	}
@@ -986,7 +994,7 @@ func TestClassifyEmptyURL(t *testing.T) {
 	t.Parallel()
 
 	srv := discover.Server{Name: "remote", Transport: discover.TransportHTTP}
-	ce := classify(errors.New("boom"), srv, nil, nil)
+	ce := classify(errors.New("boom"), srv, nil, secretLists{})
 	if ce.Kind != KindProtocol {
 		t.Errorf("Kind = %q, want %q", ce.Kind, KindProtocol)
 	}
@@ -1004,13 +1012,13 @@ func TestClassifyCauseKept(t *testing.T) {
 	values := testHeaderValues(srv)
 
 	clean := errors.New("clean")
-	ce := classify(urlErr("Post", clean), srv, nil, values)
+	ce := classify(urlErr("Post", clean), srv, nil, secretLists{long: values})
 	if got := errors.Unwrap(ce); got != clean { //nolint:errorlint // identity check: the cause must be returned unchanged
 		t.Errorf("Unwrap() = %v, want the original clean cause", got)
 	}
 
 	leaky := errors.New("leak " + testAuthValue)
-	ce = classify(leaky, srv, nil, values)
+	ce = classify(leaky, srv, nil, secretLists{long: values})
 	got := errors.Unwrap(ce)
 	if got == nil {
 		t.Fatal("Unwrap() = nil, want a scrubbed cause")
@@ -1029,7 +1037,7 @@ func TestClassifyLongReasonTruncated(t *testing.T) {
 
 	srv := testServer(discover.TransportHTTP)
 	long := strings.Repeat("x", 500)
-	ce := classify(errors.New(long), srv, nil, nil)
+	ce := classify(errors.New(long), srv, nil, secretLists{})
 	if ce.Kind != KindProtocol {
 		t.Fatalf("Kind = %q, want %q", ce.Kind, KindProtocol)
 	}
@@ -1390,7 +1398,7 @@ func TestScrub(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := scrub(tt.text, tt.rawURL, tt.redacted, tt.headers)
+			got := scrub(tt.text, tt.rawURL, tt.redacted, secretLists{long: tt.headers})
 			if tt.want != "" || (len(tt.wantHas) == 0 && len(tt.wantNot) == 0) {
 				if got != tt.want {
 					t.Errorf("scrub() = %q, want %q", got, tt.want)
@@ -1642,7 +1650,7 @@ func TestClassifyShortUserName(t *testing.T) {
 
 	text := "initialize server in session: got " + password +
 		" from //in@host.example and //in:x@other, header Basic " + token
-	ce := classify(errors.New(text), srv, nil, secrets)
+	ce := classify(errors.New(text), srv, nil, secretLists{long: secrets})
 
 	for _, has := range []string{
 		"initialize server in session",
@@ -1799,5 +1807,579 @@ func TestSentHeaders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestScrubShortWords checks how scrub treats short, the values under
+// discover.MinSecretBytes bytes (issue #180): they go only where they stand
+// as whole words, in the raw and the %q form, while secrets go wherever they
+// stand. Whole words cannot stop a hostile server that glues a letter to the
+// value; the "inside a word" cases pin that known limit, they do not claim a
+// fix.
+func TestScrubShortWords(t *testing.T) {
+	t.Parallel()
+
+	// A text over maxReasonRunes runes whose cut ends right after "12345":
+	// replaceWords keeps "12345x" (glued), but the cut alone would show
+	// " 12345…" as a whole word. cutWords must drop it.
+	cutPrefix := strings.Repeat("a", maxReasonRunes-len(" PIN ")-len("12345")) + " PIN "
+	cutText := cutPrefix + "12345x" + strings.Repeat("b", 50)
+
+	tests := []struct {
+		name    string
+		text    string
+		secrets []string
+		short   []string
+		want    string
+	}{
+		{name: "short value as a word", text: "bad PIN 123456 given", short: []string{"123456"}, want: "bad PIN ******** given"},
+		{name: "short value at both text edges", text: "123456", short: []string{"123456"}, want: discover.Mask},
+		{name: "short value after punctuation", text: "pin=123456, retry", short: []string{"123456"}, want: "pin=********, retry"},
+		{name: "short value after a multi-byte rune", text: "é123456", short: []string{"123456"}, want: "é********"},
+		{
+			name:  "short value inside a word stays (known limit)",
+			text:  "a123456 123456x x_123456 9123456",
+			short: []string{"123456"},
+			want:  "a123456 123456x x_123456 9123456",
+		},
+		{
+			// The cost of the whole-word rule: a common word that is also a
+			// value goes too. "10" holds a "1" glued to a digit, so it stays.
+			name:  "value 1 masks exit status 1 but not line 10",
+			text:  "exit status 1 at line 10",
+			short: []string{"1"},
+			want:  "exit status ******** at line 10",
+		},
+		{
+			// The cut ends with a Mask. The value "*" must not eat the stars
+			// of the Mask one by one.
+			name:  "cut that ends with a Mask and the value star",
+			text:  strings.Repeat("a", maxReasonRunes-len(discover.Mask)) + discover.Mask + "tail",
+			short: []string{"*"},
+			want:  strings.Repeat("a", maxReasonRunes-len(discover.Mask)) + discover.Mask + "…",
+		},
+		{
+			// replaceWords reads the text as it was: "pw!" is glued to "abc"
+			// there, so it stays when "abc" goes (known limit).
+			name:  "value glued to a masked value stays (known limit)",
+			text:  "pw!abc",
+			short: []string{"pw!", "abc"},
+			want:  "pw!" + discover.Mask,
+		},
+		{
+			// %q prints `a"b` as `a\"b`; the raw form is not in the text.
+			name:  "quoted form of a value with a quote",
+			text:  `got "a\"b" from server`,
+			short: []string{`a"b`},
+			want:  `got "********" from server`,
+		},
+		{
+			name:  "quoted form of a value with a backslash",
+			text:  `path "c:\\d" not found`,
+			short: []string{`c:\d`},
+			want:  `path "********" not found`,
+		},
+		{
+			// The "n" before the value is a word byte, but it ends the
+			// escape \n, so it counts as a boundary.
+			name:  "newline escape before the value",
+			text:  `line\n123456`,
+			short: []string{"123456"},
+			want:  `line\n********`,
+		},
+		{name: "hex escape before the value", text: `\x01123456`, short: []string{"123456"}, want: `\x01********`},
+		{name: "unicode escape before the value", text: `\u00e9123456`, short: []string{"123456"}, want: `\u00e9********`},
+		{
+			// `\\n` is an escaped backslash and a plain "n": no escape.
+			name:  "escaped backslash then n is not a boundary",
+			text:  `line\\n123456`,
+			short: []string{"123456"},
+			want:  `line\\n123456`,
+		},
+		{
+			// Without the longest-first rule "ab" would go and leave "-c".
+			name:  "overlapping values longest wins",
+			text:  "x ab-c y ab z",
+			short: []string{"ab", "ab-c"},
+			want:  "x ******** y ******** z",
+		},
+		{
+			name:  "overlapping values longest wins in any order",
+			text:  "x ab-c y ab z",
+			short: []string{"ab-c", "ab"},
+			want:  "x ******** y ******** z",
+		},
+		{
+			// The stars of an existing mask must not be masked one by one.
+			name:  "existing mask is copied with value star",
+			text:  "token ******** and * here",
+			short: []string{"*"},
+			want:  "token ******** and ******** here",
+		},
+		{
+			name:    "mask from a long secret is copied with value star",
+			text:    "got longsecret8 and *",
+			secrets: []string{"longsecret8"},
+			short:   []string{"*"},
+			want:    "got ******** and ********",
+		},
+		{
+			// The last "*" of the stars is the first byte of the value: the
+			// copy of the Mask must not take it and leave "1234".
+			name:  "value with a leading star after seven stars",
+			text:  "*******" + "*1234",
+			short: []string{"*1234"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			name:  "value with a leading star inside a mask in a sentence",
+			text:  "pin ********1234 end",
+			short: []string{"*1234"},
+			want:  "pin *******" + discover.Mask + " end",
+		},
+		{
+			name:  "value with a leading star right after a mask",
+			text:  discover.Mask + "*1234",
+			short: []string{"*1234"},
+			want:  discover.Mask + discover.Mask,
+		},
+		{
+			name:  "value with a leading star glued to a letter stays",
+			text:  discover.Mask + "1234x",
+			short: []string{"*1234"},
+			want:  discover.Mask + "1234x",
+		},
+		{
+			// The longer form "*1234" wins over "1234" at the same text.
+			name:  "value with a leading star and its tail as values",
+			text:  discover.Mask + "1234",
+			short: []string{"1234", "*1234"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			// A match that ends inside the mask is only stars: the mask is
+			// copied once, then the star after it goes.
+			name:  "value star after a mask is masked once",
+			text:  discover.Mask + "*",
+			short: []string{"*"},
+			want:  discover.Mask + discover.Mask,
+		},
+		{
+			// "**" starts at the last star of the mask and ends after it.
+			name:  "value of two stars across the mask end",
+			text:  discover.Mask + "*",
+			short: []string{"**"},
+			want:  "*******" + discover.Mask,
+		},
+		{
+			name:  "value star in a run of masks does not blow up",
+			text:  strings.Repeat(discover.Mask, 3),
+			short: []string{"*"},
+			want:  strings.Repeat(discover.Mask, 3),
+		},
+		{name: "cut after replace drops a value at the cut edge", text: cutText, short: []string{"12345"}, want: cutPrefix + "…"},
+		{name: "cut without the value in short keeps it", text: cutText, want: cutPrefix + "12345…"},
+		{name: "nil short changes nothing", text: "exit status 1", want: "exit status 1"},
+		{name: "empty value in short changes nothing", text: "exit status 1", short: []string{""}, want: "exit status 1"},
+		{name: "short value not in text changes nothing", text: "exit status 1", short: []string{"2"}, want: "exit status 1"},
+		{
+			name:    "long secret goes inside a word",
+			text:    "xlongsecret8y",
+			secrets: []string{"longsecret8"},
+			want:    "x********y",
+		},
+		{
+			// Header values stay removed anywhere, even when short.
+			name:    "short header value goes inside a word",
+			text:    "xabcx",
+			secrets: []string{"abc"},
+			want:    "x********x",
+		},
+		{
+			// The long one goes as a whole first, then the short one as a word.
+			name:    "short value that is part of a long secret",
+			text:    "key abcdefgh12 and 12",
+			secrets: []string{"abcdefgh12"},
+			short:   []string{"12"},
+			want:    "key ******** and ********",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The values are fake, so the messages show them.
+			if got := scrub(tt.text, "", "", secretLists{long: tt.secrets, short: tt.short}); got != tt.want {
+				t.Errorf("scrub(%q, short %q) = %q, want %q", tt.text, tt.short, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyShortValue checks that classify passes short to the scrub of
+// both the reason and the cause, so ConnectError.Error and errors.Unwrap do
+// not show a short value that a server echoed as a word.
+func TestClassifyShortValue(t *testing.T) {
+	t.Parallel()
+
+	srv := testServer(discover.TransportHTTP)
+	ce := classify(errors.New("bad PIN 123456 and tok-42"), srv, nil, secretLists{short: []string{"123456", "tok-42"}})
+	cause := errors.Unwrap(ce)
+	if cause == nil {
+		t.Fatal("Unwrap() = nil, want a scrubbed cause")
+	}
+	for _, text := range []string{ce.Error(), ce.Reason, cause.Error()} {
+		if strings.Contains(text, "123456") || strings.Contains(text, "tok-42") {
+			t.Errorf("error text %q holds a short value", text)
+		}
+		if !strings.Contains(text, "bad PIN "+discover.Mask) {
+			t.Errorf("error text %q, want it to hold %q", text, "bad PIN "+discover.Mask)
+		}
+	}
+}
+
+// testRand is a small linear congruential generator for repeatable test
+// inputs (the constants are the ones of Knuth's MMIX). The inputs are not
+// secrets, so a generator for security is not needed, and the fixed seed
+// gives the same inputs on every run.
+type testRand struct {
+	state int64
+}
+
+// IntN returns a number in [0, n), or 0 when n is 0 or less. The small bias
+// of the modulo does not matter for test inputs.
+func (r *testRand) IntN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	// Go integers wrap around on overflow, which the generator needs.
+	r.state = r.state*6364136223846793005 + 1442695040888963407
+	// The high bits of the state are the most random ones. The mask keeps
+	// 30 of them, so the number is not negative and fits in any int.
+	return int(r.state>>33&(1<<30-1)) % n
+}
+
+// shortWordsInput returns a text of about size bytes and n short values,
+// for the benchmark and the differential test of replaceWords. The text is
+// words of 1 to 7 bytes from [a-z0-9], split by spaces, with each value in it
+// one time as a whole word. The values are 3 to 7 bytes from the same
+// alphabet, so many bytes of the text start a value. The fixed seed makes the
+// input the same on every run.
+func shortWordsInput(size, n int) (string, []string) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	r := &testRand{state: 1}
+	word := func(minLen, maxLen int) string {
+		b := make([]byte, minLen+r.IntN(maxLen-minLen+1))
+		for i := range b {
+			b[i] = alphabet[r.IntN(len(alphabet))]
+		}
+		return string(b)
+	}
+	values := make([]string, n)
+	for i := range values {
+		values[i] = word(3, 7)
+	}
+	var b strings.Builder
+	for b.Len() < size {
+		// About one value in every size/n bytes.
+		if r.IntN(size/n/4) == 0 && len(values) > 0 {
+			b.WriteString(values[r.IntN(len(values))])
+		} else {
+			b.WriteString(word(1, 7))
+		}
+		b.WriteByte(' ')
+	}
+	return b.String(), values
+}
+
+// BenchmarkScrubShortWords measures the whole-word scrub on a JSON-RPC error
+// message at the 4 MiB size class with 200 short values (NFR-03: a hostile
+// server must not make the scrub slow).
+func BenchmarkScrubShortWords(b *testing.B) {
+	text, short := shortWordsInput(4<<20, 200)
+	b.Run("replaceWords", func(b *testing.B) {
+		b.SetBytes(int64(len(text)))
+		for b.Loop() {
+			replaceWords(text, short)
+		}
+	})
+	b.Run("scrub", func(b *testing.B) {
+		b.SetBytes(int64(len(text)))
+		for b.Loop() {
+			scrub(text, "", "", secretLists{short: short})
+		}
+	})
+}
+
+// TestClassifyContextErrorWithShortValue checks that the cause keeps the
+// context error when the scrub changes its text (see safeCause). With the
+// short value "1" (as in DEBUG=1), the text "exit status 1" changes, so the
+// cause becomes a new error; errors.Is must still find the context error,
+// as Remote and Inspect promise, and the new text must not show the value.
+func TestClassifyContextErrorWithShortValue(t *testing.T) {
+	t.Parallel()
+
+	short := secretLists{short: []string{"1"}}
+	tests := []struct {
+		name     string
+		ctxErr   error
+		wantText string
+	}{
+		{name: "deadline", ctxErr: context.DeadlineExceeded, wantText: "timed out"},
+		{name: "canceled", ctxErr: context.Canceled, wantText: "canceled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("%w: calling initialize: exit status 1", tt.ctxErr)
+			checks := []struct {
+				name string
+				ce   *ConnectError
+			}{
+				{name: "classify", ce: classify(err, testServer(discover.TransportHTTP), nil, short)},
+				{name: "stdioFailure", ce: stdioFailure(stdioServer("/bin/true"), err, short, false)},
+			}
+			for _, c := range checks {
+				if c.ce.Kind != KindTimeout || c.ce.Reason != tt.wantText {
+					t.Errorf("%s: Kind %q, Reason %q, want %q, %q", c.name, c.ce.Kind, c.ce.Reason, KindTimeout, tt.wantText)
+				}
+				if !errors.Is(c.ce, tt.ctxErr) {
+					t.Errorf("%s: errors.Is(err, %v) = false, want true", c.name, tt.ctxErr)
+				}
+				cause := errors.Unwrap(c.ce)
+				if cause == nil {
+					t.Fatalf("%s: Unwrap() = nil, want the scrubbed cause", c.name)
+				}
+				if want := "exit status " + discover.Mask; !strings.HasSuffix(cause.Error(), want) {
+					t.Errorf("%s: cause text %q, want it to end with %q", c.name, cause.Error(), want)
+				}
+			}
+		})
+	}
+}
+
+// refReplaceWords is replaceWords as it was before the prefix tree
+// (wordTrie): it tries every form at every byte. TestReplaceWordsDifferential
+// compares the two, so the faster code must give the same text. The reference
+// shares no helper with the code under test (see refWordForms and
+// refWordStart), so a bug in a shared helper cannot change both sides the
+// same way.
+func refReplaceWords(text string, short []string) string {
+	forms := refWordForms(text, short)
+	if len(forms) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		if strings.HasPrefix(text[i:], discover.Mask) {
+			j, n := refMaskedWordAt(text, i, forms)
+			if n == 0 {
+				b.WriteString(discover.Mask)
+				i += len(discover.Mask)
+				continue
+			}
+			b.WriteString(text[i:j])
+			b.WriteString(discover.Mask)
+			i = j + n
+			continue
+		}
+		if n := refWordAt(text, i, forms); n > 0 {
+			b.WriteString(discover.Mask)
+			i += n
+			continue
+		}
+		b.WriteByte(text[i])
+		i++
+	}
+	return b.String()
+}
+
+// refWordAt is wordAt before the prefix tree (see refReplaceWords).
+func refWordAt(text string, i int, forms []string) int {
+	for _, f := range forms {
+		if !strings.HasPrefix(text[i:], f) {
+			continue
+		}
+		if !refWordStart(text, i) {
+			return 0
+		}
+		end := i + len(f)
+		if end == len(text) || !refIsWordByte(text[end]) {
+			return len(f)
+		}
+	}
+	return 0
+}
+
+// refMaskedWordAt is maskedWordAt before the prefix tree (see
+// refReplaceWords).
+func refMaskedWordAt(text string, i int, forms []string) (start, n int) {
+	maskEnd := i + len(discover.Mask)
+	for j := i; j < maskEnd; j++ {
+		if m := refWordAt(text, j, forms); j+m > maskEnd {
+			return j, m
+		}
+	}
+	return 0, 0
+}
+
+// refWordForms is the old wordForms (see refReplaceWords): the forms of the
+// values in short that occur in text, each non-empty value and its %q form,
+// each one time, longest first and then by bytes.
+func refWordForms(text string, short []string) []string {
+	var forms []string
+	for _, v := range short {
+		if v == "" {
+			continue
+		}
+		q := strconv.Quote(v)
+		for _, f := range []string{v, q[1 : len(q)-1]} {
+			if strings.Contains(text, f) {
+				forms = append(forms, f)
+			}
+		}
+	}
+	slices.SortFunc(forms, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	return slices.Compact(forms)
+}
+
+// refWordStart is the old wordStart (see refReplaceWords).
+func refWordStart(text string, i int) bool {
+	return i == 0 || !refIsWordByte(text[i-1]) || refEndsWithEscape(text[:i])
+}
+
+// refIsWordByte is the old isWordByte (see refReplaceWords).
+func refIsWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
+// refEndsWithEscape is the old endsWithEscape (see refReplaceWords): s ends
+// with \a, \b, \f, \n, \r, \t, \v, \xHH, \uHHHH or \UHHHHHHHH after an odd
+// number of backslashes.
+func refEndsWithEscape(s string) bool {
+	isHex := func(c byte) bool {
+		return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+	}
+	for _, n := range []int{1, 3, 5, 9} {
+		if len(s) < n+1 {
+			continue
+		}
+		body := s[len(s)-n:]
+		ok := false
+		switch {
+		case n == 1:
+			ok = strings.IndexByte("abfnrtv", body[0]) >= 0
+		case body[0] == 'x' && n == 3, body[0] == 'u' && n == 5, body[0] == 'U' && n == 9:
+			ok = true
+			for i := 1; i < n; i++ {
+				ok = ok && isHex(body[i])
+			}
+		}
+		if !ok {
+			continue
+		}
+		before := s[:len(s)-n]
+		if (len(before)-len(strings.TrimRight(before, `\`)))%2 == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReplaceWordsDifferential compares replaceWords with refReplaceWords on
+// 3000 random texts and value lists. The alphabet is small and holds the
+// bytes that the rules treat in a special way: "*" (the Mask), digits and
+// letters (word bytes, hex digits, escape letters), "\" and quotes (escapes
+// and %q forms), "_" and a two-byte rune. Whole Masks are mixed in too. The
+// fixed seed makes every run check the same cases.
+func TestReplaceWordsDifferential(t *testing.T) {
+	t.Parallel()
+
+	pieces := []string{"*", "*", "1", "2", "0", "a", "x", "n", "u", "_", " ", `\`, `"`, "-", "é", "\n", discover.Mask}
+	r := &testRand{state: 3}
+	randomText := func(maxPieces int) string {
+		var b strings.Builder
+		for range r.IntN(maxPieces + 1) {
+			b.WriteString(pieces[r.IntN(len(pieces))])
+		}
+		return b.String()
+	}
+	// changed counts the cases in which the text changed.
+	changed := 0
+	for n := range 3000 {
+		text := randomText(40)
+		short := make([]string, r.IntN(6))
+		for i := range short {
+			// Values of 0 to 3 pieces, without the Mask piece: a value is
+			// shorter than discover.MinSecretBytes. An empty value is
+			// allowed; replaceWords must skip it.
+			var b strings.Builder
+			for range r.IntN(4) {
+				b.WriteString(pieces[r.IntN(len(pieces)-1)])
+			}
+			short[i] = b.String()
+		}
+		// Half of the cases take a value from the text, so that most cases
+		// have a match.
+		if len(text) > 0 && len(short) > 0 && r.IntN(2) == 0 {
+			i := r.IntN(len(text))
+			short[0] = text[i:min(len(text), i+1+r.IntN(4))]
+		}
+		got, want := replaceWords(text, short), refReplaceWords(text, short)
+		if got != want {
+			t.Fatalf("case %d: replaceWords(%q, %q) = %q, want %q (reference)", n, text, short, got, want)
+		}
+		if got != text {
+			changed++
+		}
+	}
+	// Guard against a test that checks nothing: many cases must mask.
+	if changed < 500 {
+		t.Errorf("only %d of 3000 cases masked a value, want at least 500", changed)
+	}
+}
+
+// TestShowDiscoveredURLHeaderShortValue checks that showDiscoveredURL removes
+// the short credentials inside the header values too, as classify did in
+// Remote (see remoteShortSecrets). The hostname "h1" comes from a short
+// variable. In "h1pw" classify kept both values, because they are glued.
+// showDiscoveredURL replaces the hostname with the discovered one, and that
+// puts "pw", the short password of the X-Db header, after a non-word byte. So
+// "pw" now stands as a whole word and must go.
+func TestShowDiscoveredURLHeaderShortValue(t *testing.T) {
+	t.Parallel()
+
+	expanded := discover.Server{
+		Name:      "remote",
+		Transport: discover.TransportHTTP,
+		URL:       discover.NewURL("http://h1:8080/mcp"),
+		Headers:   discover.SecretMap{"X-Db": discover.NewSecret("postgres://app:pw@db/app")},
+	}
+	discovered := discover.NewURL("http://${MCP_HOST}:8080/mcp")
+	lookedUp := secretLists{short: []string{"h1"}}
+	short := remoteShortSecrets(expanded, lookedUp)
+	if !slices.Contains(short, "h1") || !slices.Contains(short, "pw") {
+		t.Fatalf("remoteShortSecrets() = %q, want it to hold the expanded value and the header password", short)
+	}
+
+	// All of reason is text of the cause (see ConnectError.serverText).
+	reason := "lookup h1pw: no such host"
+	ce := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverText: reason}
+	showDiscoveredURL(ce, expanded.URL, discovered, short)
+	if strings.Contains(ce.Reason, "pw") || strings.Contains(ce.Reason, "h1") {
+		t.Errorf("Reason = %q, want no short value in it", ce.Reason)
+	}
+
+	// The expanded short values alone, the list before the fix, leave the
+	// password as a whole word. This shows that the case tests the fix.
+	old := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverText: reason}
+	showDiscoveredURL(old, expanded.URL, discovered, lookedUp.short)
+	if !strings.Contains(old.Reason, "pw") {
+		t.Errorf("Reason with the expanded values only = %q, want the case to show %q", old.Reason, "pw")
 	}
 }

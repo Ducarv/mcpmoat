@@ -77,6 +77,8 @@ func TestCheckDocumentedSingleViolation(t *testing.T) {
 		{"risk 600 multibyte runes", func(r *Rule) { r.Risk = strings.Repeat("é", 600) }, "MOAT-T1-003: risk has 600 runes (at most 500)"},
 		{"empty remediation", func(r *Rule) { r.Remediation = "" }, "MOAT-T1-003: remediation is empty"},
 		{"blank remediation", func(r *Rule) { r.Remediation = "  \n" }, "MOAT-T1-003: remediation is empty"},
+		{"remediation 501 runes", func(r *Rule) { r.Remediation = strings.Repeat("a", 501) }, "MOAT-T1-003: remediation has 501 runes (at most 500)"},
+		{"remediation 600 multibyte runes", func(r *Rule) { r.Remediation = strings.Repeat("é", 600) }, "MOAT-T1-003: remediation has 600 runes (at most 500)"},
 		{"no reference", func(r *Rule) { r.References = nil }, "MOAT-T1-003: no reference"},
 		{"empty reference list", func(r *Rule) { r.References = []string{} }, "MOAT-T1-003: no reference"},
 		{"blank-only reference", func(r *Rule) { r.References = []string{"", "  "} }, "MOAT-T1-003: no reference"},
@@ -108,6 +110,23 @@ func TestCheckDocumentedRiskBoundary(t *testing.T) {
 	r.Risk = strings.Repeat("é", 500)
 	if got := CheckDocumented(r); got != nil {
 		t.Errorf("risk of 500 two-byte runes: CheckDocumented() = %q, want nil", got)
+	}
+}
+
+// TestCheckDocumentedRemediationBoundary checks that a remediation of exactly
+// 500 runes passes. The terminal report cuts rule text after 500 runes, so a
+// built-in "Fix:" line of that length is still shown in full.
+func TestCheckDocumentedRemediationBoundary(t *testing.T) {
+	t.Parallel()
+	r := documentedRule()
+	r.Remediation = strings.Repeat("a", 500)
+	if got := CheckDocumented(r); got != nil {
+		t.Errorf("remediation of exactly 500 runes: CheckDocumented() = %q, want nil", got)
+	}
+	// 500 runes of 2 bytes each: the limit counts runes, not bytes.
+	r.Remediation = strings.Repeat("é", 500)
+	if got := CheckDocumented(r); got != nil {
+		t.Errorf("remediation of 500 two-byte runes: CheckDocumented() = %q, want nil", got)
 	}
 }
 

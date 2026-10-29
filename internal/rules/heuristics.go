@@ -38,11 +38,14 @@ const (
 	// so they keep 0.
 	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
-	// do not read in full: the text is longer than the raw scan limit, or
-	// a form of matchForms is cut at MaxMatchInputBytes. The OSC text of a
-	// form, such as a link URL, does not count (see matchWindowCut). So a
-	// payload that padding pushes out of the match window still gives a hit.
-	// It has no parameters.
+	// can miss a part of: the text is longer than the raw scan limit, a form
+	// of baseFormsCut is cut at MaxMatchInputBytes, or the text holds more
+	// than maxStrictOSCStarts U+009D (C1 OSC starts), so some forms read it
+	// with the faster regex ansiSeqFast. The OSC text of a form, such as a
+	// link URL, does not count (see baseFormsCut). So a payload that padding
+	// pushes out of the match window, or that many U+009D hide, still gives a
+	// hit. The hit detail names the reason (see matchWindowPrepared). It has
+	// no parameters.
 	HeuristicMatchWindow = "match_window"
 	// HeuristicTagBidiOverride flags the Unicode tag characters (U+E0000 to
 	// U+E007F), which can hide a full ASCII text, and the bidi overrides LRO
@@ -99,32 +102,34 @@ type paramSpec struct {
 }
 
 // compileHeuristic returns the function of the heuristic name, with its
-// parameters checked and set. The function reads the raw text. Every error
-// is a *FieldError.
-func compileHeuristic(name string, params map[string]any) (func(raw string) []Hit, error) {
+// parameters checked and set. Every error is a *FieldError. The function of
+// match_window is matchWindowPrepared, which reads the cut flag of the shared
+// preparedText. Each other function reads only the raw text (see
+// rawHeuristic).
+func compileHeuristic(name string, params map[string]any) (heuristicFunc, error) {
 	switch name {
 	case HeuristicInvisibleUnicode:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return invisibleUnicode, nil
+		return rawHeuristic(invisibleUnicode), nil
 	case HeuristicMatchWindow:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return matchWindow, nil
+		return matchWindowPrepared, nil
 	case HeuristicTagBidiOverride:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return tagBidiOverride, nil
+		return rawHeuristic(tagBidiOverride), nil
 	case HeuristicMaxLength:
 		v, err := readParams(params, paramSpec{name: "max_runes", def: 4096, min: 1, max: 1 << 24})
 		if err != nil {
 			return nil, err
 		}
 		maxRunes := v[0]
-		return func(raw string) []Hit { return maxLength(raw, maxRunes) }, nil
+		return rawHeuristic(func(raw string) []Hit { return maxLength(raw, maxRunes) }), nil
 	case HeuristicBase64Blob:
 		v, err := readParams(params,
 			paramSpec{name: "min_length", def: 32, min: 8, max: 4096},
@@ -135,14 +140,14 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			return nil, err
 		}
 		minLength, minText, minWords := v[0], v[1], v[2]
-		return func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }, nil
+		return rawHeuristic(func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }), nil
 	case HeuristicMixedScript:
 		v, err := readParams(params, paramSpec{name: "json_escapes", def: 0, min: 0, max: 1})
 		if err != nil {
 			return nil, err
 		}
 		jsonEscapes := v[0] == 1
-		return func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }, nil
+		return rawHeuristic(func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }), nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
@@ -152,13 +157,13 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			// The popular list is built in, so its text is safe to show.
 			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list: " + err.Error()}
 		}
-		return fn, nil
+		return rawHeuristic(fn), nil
 	}
 	if fn, ok := configTextChecks[name]; ok {
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return fn, nil
+		return rawHeuristic(fn), nil
 	}
 	// The given name is not echoed: it comes from the rule file.
 	return nil, &FieldError{Field: "heuristic", Msg: "unknown heuristic; valid: " + heuristicNames}
@@ -228,11 +233,11 @@ const (
 // start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
 // as nothing, and a terminal runs them. A raw ESC before a letter can make
 // the letter the final byte of a CSI, so a terminal does not show the "I" of
-// "\x1b[Ignore". The fifth and the seventh form of matchForms give back that
-// letter, and the text of an OSC, so the regexes and keywords still read them
-// (see keepSeqText and seqText). This heuristic still flags the ESC. It also
-// flags each text that defeats all the forms (see matchForms), because each
-// such text holds an invisible rune.
+// "\x1b[Ignore". The keepSeqText and keepSeqTextSpaced forms of baseFormsCut
+// give back that letter, and the text of an OSC, so the regexes and keywords
+// still read them (see keepSeqText and seqText). This heuristic still flags
+// the ESC. It also flags each text that defeats all the forms (see
+// baseFormsCut), because each such text holds an invisible rune.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
@@ -317,14 +322,48 @@ func maxLength(raw string, maxRunes int) []Hit {
 	return []Hit{{Offset: offset, Detail: fmt.Sprintf("text has %d characters, over the limit of %d", n, maxRunes)}}
 }
 
-// matchWindow flags raw when the regex and keyword matchers do not read all
-// of it (see matchWindowCut). The hit is about the whole text, so it has the
-// offset NoOffset.
-func matchWindow(raw string) []Hit {
-	if !matchWindowCut(raw) {
+// Hit details of the match_window heuristic (see matchWindowPrepared). The
+// number 256 in windowOSCDetail is maxStrictOSCStarts; a test checks it.
+const (
+	// windowLongDetail is the detail when the text is too long.
+	windowLongDetail = "text is longer than the match window"
+	// windowOSCDetail is the detail when the text holds more than
+	// maxStrictOSCStarts U+009D and is not longer than MaxMatchInputBytes.
+	windowOSCDetail = "text holds more than 256 C1 OSC controls (U+009D)"
+	// windowOSCLongDetail is the detail when the text holds more than
+	// maxStrictOSCStarts U+009D and is longer than MaxMatchInputBytes.
+	windowOSCLongDetail = windowOSCDetail + " and can be longer than the match window"
+)
+
+// matchWindowPrepared is the match_window heuristic. It flags p.raw when the
+// regex and keyword matchers can miss a part of it: the cut flag of p (see
+// preparedText.windowCut). The hit is about the whole text, so it has the
+// offset NoOffset. It builds only the base forms of p, once, so the regex
+// and keyword rules that share p reuse them.
+//
+// The detail names the reason, so that a user does not add an ignore entry
+// for a long text when the reason is a count of U+009D. The cut flag does not
+// tell the reason, so a set flag costs one more scanFormFlags pass over the
+// raw window. When the text holds more than maxStrictOSCStarts U+009D, the
+// detail is windowOSCDetail. If the text is also longer than
+// MaxMatchInputBytes, a form can be cut too, and windowOSCLongDetail says so.
+// (A text up to MaxMatchInputBytes can grow past it in two cases: in NFC, a
+// rare case, and when it holds invalid UTF-8, because each bad byte becomes
+// U+FFFD, 3 bytes (see normalizeForMatch). Then a form can be cut, but the
+// detail is windowOSCDetail and names only the U+009D, which is still a
+// reason.) Without many U+009D, the reason is the length: windowLongDetail.
+func matchWindowPrepared(p *preparedText) []Hit {
+	if !p.windowCut() {
 		return nil
 	}
-	return []Hit{{Offset: NoOffset, Detail: "text is longer than the match window"}}
+	detail := windowLongDetail
+	if rawFormFlags(p.raw).manyOSCStarts() {
+		detail = windowOSCDetail
+		if len(p.raw) > MaxMatchInputBytes {
+			detail = windowOSCLongDetail
+		}
+	}
+	return []Hit{{Offset: NoOffset, Detail: detail}}
 }
 
 // Runes that tag_or_bidi_override flags, and the base of the tag flags.

@@ -86,8 +86,11 @@ func TestPinExpectMatch(t *testing.T) {
 
 		got := e.pin(fake, "--accept", "srv", "--expect", digestOf(t, tools...))
 
-		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 2 new, 0 changed, 0 removed\n"}})
-		assertCleanStderr(t, got.stderr)
+		// The save creates pins.json, so the one stderr line is the new pins
+		// file notice: no --expect note.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 2 new, 0 changed, 0 removed\n"}, stderr: []string{notice}})
+		assertCleanStderr(t, withoutPinsFileNotice(t, got.stderr, "pin", e.pinsPath()))
 		if pinned, ok := e.readPins().tools("srv"); !ok || len(pinned) != 2 {
 			t.Errorf("pins.json has %d tools for srv (found %v), want 2", len(pinned), ok)
 		}
@@ -122,8 +125,9 @@ func TestPinExpectMatch(t *testing.T) {
 
 		got := e.pin(fake, "--accept", "srv", "--expect", digestOf(t, a, b))
 
-		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 2 new"}})
-		assertCleanStderr(t, got.stderr)
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 2 new"}, stderr: []string{notice}})
+		assertCleanStderr(t, withoutPinsFileNotice(t, got.stderr, "pin", e.pinsPath()))
 	})
 }
 
@@ -214,9 +218,9 @@ func TestPinExpectMismatch(t *testing.T) {
 		pinsBefore := readFileBytes(t, e.pinsPath())
 
 		got := e.pin(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}),
-			"--accept", "srv", "--expect", "pd1:0000000000000000000000000000000000000000000000000000000000000000")
+			"--accept", "srv", "--expect", wrongDigest)
 
-		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected pd1:0000000000000000000000000000000000000000000000000000000000000000); nothing was saved."}})
+		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected " + wrongDigest + "); nothing was saved."}})
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 			t.Errorf("pins.json changed after a digest mismatch\nbefore: %s\nafter:  %s", pinsBefore, after)
 		}

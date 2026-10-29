@@ -93,16 +93,42 @@
 // An expanded value can be a secret, and the server gets it and can echo it.
 // So Inspect records each value that it looks up (lookupRecorder), and the
 // scrub of error text removes every recorded value of at least
-// minBareSecretLen (8) bytes. A shorter value is too likely to match
-// ordinary words, so it is not removed: a server can echo it in its error
-// text.
+// discover.MinSecretBytes bytes wherever it stands. A shorter value is too
+// likely to match ordinary words, so the scrub removes it only where it
+// stands as a whole word (replaceWords in scrub_words.go): the byte before it
+// and the byte after it are not an ASCII letter, a digit or "_", or are the
+// edge of the text. The same applies to the %q form of the value, and a Go escape
+// such as \n or \x01 before it counts as an edge. The longest value wins, a
+// mask that is in the text already is not masked again, and a cut of the
+// text never leaves a short value at its end as a whole word (cutWords). The
+// same rule applies to the short configured env values and the short argv
+// pieces of a stdio server, and to the short secret parts of the URL of a
+// remote server (urlShortSecrets). Header values and URL passwords are removed
+// wherever they stand at any length (see Secrets).
 //
 // The scrub covers error text only. The expanded values reach the server,
 // and the text of a [Result] (the names and descriptions of tools, prompts
 // and resources, and ServerName) is not scrubbed. So a server can echo a
-// secret in its Result. When scan is wired to inspect (issues #28 and #29),
-// the report and JSON writers must scrub the recorded values and the
-// configured values from that text.
+// secret in its Result. On success, Inspect puts the values of at least 8
+// bytes that the server got in Result.Secrets: the recorded values, the
+// configured values and, for a stdio server, the secrets in the expanded
+// command and args (argSecrets: the text that discover.RedactArgs masks).
+// A server can also echo one piece of a value alone, so the list also holds
+// the pieces inside a value, such as the password of "postgres://u:pw@h/db"
+// or one cookie. The scrub of error text removes the same values and pieces,
+// the shorter ones as whole words. Args that RedactArgs shows, such as
+// package names, are not in the list, so they stay readable. The doc of
+// Result.Secrets lists every value and piece.
+//
+// Result.Credentials is the subset of Result.Secrets that looks like a
+// credential (issues #229 and #235). Plain config words, such as
+// "NODE_ENV=production" or a "Content-Type" value, are not in it. The doc of
+// Result.Credentials holds the rule. scan --llm uses Result.Credentials to
+// replace those values in the tool names and descriptions that it sends to
+// the provider (FR-17). The local report (terminal and JSON) uses the wide
+// Result.Secrets: it shows each of these values that the server echoes in a
+// tool name or a pin diff as discover.Mask (issues #228 and #234). The
+// package itself never scrubs Result text.
 //
 // # Starting stdio servers
 //
@@ -213,9 +239,10 @@
 // jsonshape.go (see Limits) before the SDK decodes it. A frame over a shape
 // limit gives KindTooLarge too.
 //
-// SDKInspector removes from the text of its errors the configured env values
-// and the expanded variable values that have at least 8 bytes: the server
-// gets them and can echo them.
+// SDKInspector removes from the text of its errors the configured env values,
+// the expanded variable values and the argv secrets: the server gets them and
+// can echo them. A value of at least 8 bytes goes wherever it stands, and a
+// shorter one only as a whole word (see Placeholder expansion).
 //
 // # Remote servers
 //
@@ -288,13 +315,26 @@
 // the SDK. It sends the userinfo as a Basic Authorization header, unless the
 // config sets an Authorization header.
 //
+// The package also removes the pieces of these values that a server can
+// echo alone, such as the credential part after an auth scheme, the decoded
+// Basic name and password, one cookie and the URL user info (the doc of
+// Result.Secrets lists them). A password is removed wherever it stands, at
+// any length. A cookie piece, a piece inside a header value or a secret part
+// of the URL (a query value, a path segment, the value of a matrix
+// parameter) that is shorter than 8 bytes is removed as a whole word only.
+//
+// On success, the same values and pieces of at least 8 bytes go to
+// Result.Secrets, and the ones that look like a credential also go to
+// Result.Credentials (see Placeholder expansion).
+//
 // The text of a [ConnectError] can still hold text that the server controls
 // (see "Untrusted data" below).
 //
 // scan prints the failure reason of a server in the SUMMARY on stdout, and pin
-// prints it on stderr. So the known gap in the scrubbing (an expanded value
-// shorter than 8 bytes is not removed, see "Known limits") applies to stdout
-// too: a hostile server can echo such a value in its error text, and scan then
+// prints it on stderr, and scan --json prints it in a warning on stderr. So
+// the known gap in the scrubbing (a value shorter than 8 bytes is removed
+// only as a whole word, see "Known limits") applies to stdout too: a hostile
+// server can glue a letter to such a value in its error text, and scan then
 // prints it.
 //
 // Plain http:// has no encryption, so anyone on the network path can read
@@ -476,11 +516,13 @@
 // # Untrusted data
 //
 // Every string in a [Result] comes from the server, and a malicious server
-// controls it. Never execute it, never put it in a command or a format
-// string, and escape it with internal/termsafe before you print it. The same
-// is true for the text of a [ConnectError], which can hold a status text or a
-// JSON-RPC message from the server, and for the text of Outcome.Err (see
-// Outcome).
+// controls it. The exceptions are Result.Warnings, Result.Secrets and
+// Result.Credentials, which come from the client config and from mcpmoat
+// (see [Result]). Never execute a string of a Result, never put it in a
+// command or a format string, and escape it with internal/termsafe before
+// you print it. The same is true for the text of a [ConnectError], which can
+// hold a status text or a JSON-RPC message from the server, and for the text
+// of Outcome.Err (see Outcome).
 //
 // # Known limits
 //
@@ -501,10 +543,26 @@
 //     identity).
 //   - A server that never answers a list request that it does not support
 //     makes the inspection time out (see Lists).
-//   - An expanded variable value shorter than 8 bytes is not removed from
-//     error text (see Placeholder expansion).
+//   - A configured, expanded or argv value shorter than 8 bytes is removed
+//     from error text only where it stands as a whole word (see Placeholder
+//     expansion). This stops an accidental echo only: a hostile server can
+//     glue a letter to the value ("1234x") or split it, and then the value
+//     shows. The rule also masks ordinary words: with a configured value
+//     "1", "exit status 1" becomes "exit status ********", and words such as
+//     "unknown" or "2.0" from JSON or key=value args can be masked, because
+//     discover.ArgSecrets over-matches on purpose. A short expanded port is
+//     masked in a dial error; the URL as discovered stays in the reason. The
+//     child's stderr goes to /dev/null, so the echo can come only in a
+//     JSON-RPC error or in invalid output on stdout.
 //   - The text of a Result is not scrubbed, so a server can echo an
-//     expanded secret in it (see Placeholder expansion).
+//     expanded or configured secret in it (see Placeholder expansion).
+//     Result.Credentials lets scan --llm remove the values of at least 8
+//     bytes that look like a credential from the text that it sends. A plain
+//     config word in Result.Secrets that is no credential goes to the
+//     provider when the server echoes it. The local report masks the values
+//     of Result.Secrets in tool names and pin diffs, but a value shorter
+//     than 8 bytes, or a value that the server splits over two strings, can
+//     show on stdout.
 //   - npm_config_yes=false does not stop pnpm dlx, bunx, uvx or the
 //     standalone npx from before npm 7 from installing a missing package
 //     (see Starting stdio servers).

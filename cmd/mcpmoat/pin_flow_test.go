@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -379,13 +380,13 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 	})
 }
 
-// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
-// reads pins.json again before it saves the first-run pins, and sets only the
-// identities that the fresh store does not hold.
 // parallelPinWarning is the warning of scan when another run pinned a server
 // with other tools during the scan.
 const parallelPinWarning = "mcpmoat scan: warning: server srv was pinned by another run with other tools during this scan; run scan again\n"
 
+// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
+// reads pins.json again before it saves the first-run pins, and sets only the
+// identities that the fresh store does not hold.
 func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 	t.Parallel()
 
@@ -801,6 +802,15 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 		if n := strings.Count(out, noExpectNote); n != 1 {
 			t.Errorf("output has the note %d times, want 1", n)
 		}
+		// The save created pins.json: its notice comes after the note and
+		// before the "accepted" line, once.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		if i := strings.Index(out, notice); i < 0 || i <= note || i >= accepted {
+			t.Errorf("want the note (%d), then the new pins file notice (%d), then accepted (%d)\noutput:\n%s", note, i, accepted, out)
+		}
+		if n := strings.Count(out, notice); n != 1 {
+			t.Errorf("output has the new pins file notice %d times, want 1", n)
+		}
 	})
 
 	t.Run("the note shows when the save fails", func(t *testing.T) {
@@ -849,9 +859,12 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 
 		got := e.pin(fakeServers(tools), "--accept", "srv", "--expect", digestOf(t, tools["srv"]...))
 
-		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}})
-		if got.stderr != "" {
-			t.Errorf("stderr = %q, want empty", got.stderr)
+		// The save creates pins.json, so stderr holds the new pins file notice
+		// and nothing else: no note.
+		notice := newPinsFileNotice("pin", e.pinsPath())
+		assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv:"}, stderr: []string{notice}})
+		if rest := withoutPinsFileNotice(t, got.stderr, "pin", e.pinsPath()); rest != "" {
+			t.Errorf("stderr without the notice = %q, want empty", rest)
 		}
 	})
 
@@ -1091,7 +1104,7 @@ func TestRelativeConfigPathIsNotPinned(t *testing.T) {
 		e := newPinEnv(t, oneServer("srv"))
 		c, stdout, stderr := e.cli(nil)
 
-		code := c.acceptTools(t.Context(), srv, tools, "")
+		code := c.acceptTools(t.Context(), srv, inspect.Result{Tools: tools}, "", false)
 
 		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the path of its config file is not absolute") {
 			t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d and the path error", code, stdout, stderr, exitError)
@@ -1249,4 +1262,228 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: warning: server srv: " + text})
 	})
+}
+
+// pinsReadingCommands are the two commands that read pins.json before they
+// start any server. Each has a name for the subtests, a run function and an
+// assert function that checks the run like assertScanRun or assertPinRun.
+// The other fields say how the command differs: what it prints on stdout when
+// it refuses the pins, what it prints on stderr when it works, and whether it
+// saves pins.json again.
+var pinsReadingCommands = []struct {
+	name          string
+	run           func(e *pinEnv, insp inspect.Inspector) pinRunResult
+	assert        func(t *testing.T, r pinRunResult, want scanWant)
+	refusedStdout []string // must be on stdout after a refusal; nil means stdout is empty
+	okStderr      []string // must be on stderr after a run that works
+	rewritesFile  bool     // a run that works saves a new pins.json with mode 0600
+}{
+	{
+		name:          "scan",
+		run:           func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.scan(insp) },
+		assert:        assertScanRun,
+		refusedStdout: []string{"not inspected, 0 findings (scan stopped before it inspected the servers"},
+	},
+	{
+		name:         "pin --accept",
+		run:          func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.pin(insp, "--accept", "srv") },
+		assert:       assertPinRun,
+		okStderr:     []string{noExpectNote},
+		rewritesFile: true,
+	},
+}
+
+// pinsPermTools returns the tools that the fake inspector gives the server srv
+// in the pins permission tests. It returns a new map for each test.
+func pinsPermTools() map[string][]inspect.Tool {
+	return map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+}
+
+// TestPinsInsecurePermissionsRefused checks that scan and "pin --accept" refuse
+// a pins folder or a pins.json that group or others can write: exit code 2, the
+// message names the path, the mode and the fix, nothing is printed on stdout,
+// no server starts, and the run changes neither the mode nor the bytes of
+// pins.json (FR-16, T2).
+func TestPinsInsecurePermissionsRefused(t *testing.T) {
+	t.Parallel()
+
+	// The mode tables are in internal/pins. Here two modes per kind prove the wiring.
+	cases := []struct {
+		kind string // pinsKindDir or pinsKindFile
+		mode os.FileMode
+	}{
+		{pinsKindDir, 0o777},
+		{pinsKindDir, 0o770},
+		{pinsKindFile, 0o666},
+		{pinsKindFile, 0o660},
+	}
+	for _, cmd := range pinsReadingCommands {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s, %s %04o", cmd.name, tc.kind, tc.mode), func(t *testing.T) {
+				t.Parallel()
+				tools := pinsPermTools()
+				e := newPinEnv(t, oneServer("srv"))
+				firstScan(t, e, tools["srv"]...)
+				setPinsMode(t, e, tc.kind, tc.mode)
+				path := pinsStorePath(t, e, tc.kind)
+				before := readFileBytes(t, e.pinsPath())
+				fake := fakeServers(tools)
+
+				got := cmd.run(e, fake)
+
+				cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
+					"cannot read the pins file",
+					"pins " + tc.kind + " " + path + " is not safe",
+					fmt.Sprintf("mode %04o", tc.mode),
+					"writable by group or others",
+					chmodHint(path),
+					pins.ErrInsecurePermissions.Error(),
+				}})
+				// scan still lists the servers and shows them as not inspected;
+				// it prints no finding. pin --accept prints nothing.
+				assertContainsNone(t, "stdout", got.stdout, []string{"FINDINGS", "MOAT-", "accepted"})
+				if cmd.refusedStdout != nil {
+					assertContainsAll(t, "stdout", got.stdout, cmd.refusedStdout)
+				} else if got.stdout != "" {
+					t.Errorf("stdout = %q, want empty", got.stdout)
+				}
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
+				}
+				if mode := modeOf(t, path); mode != tc.mode {
+					t.Errorf("mode of %s = %04o after the run, want %04o: the run must not change it", path, mode, tc.mode)
+				}
+				if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(after, before) {
+					t.Errorf("pins.json changed:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+			})
+		}
+	}
+}
+
+// chmodHint is the fix that the refusal message gives for an unsafe path: the
+// chmod command with "--" and the path in single quotes.
+func chmodHint(path string) string {
+	return "chmod go-w -- '" + path + "'"
+}
+
+// TestPinsInsecureHintQuotesPath checks that the fix in the refusal message
+// shell-quotes a path with a single quote, because the user copies it into a
+// shell: the quote becomes quote, backslash, quote, quote. The tests of
+// internal/pins cover the other odd paths.
+func TestPinsInsecureHintQuotesPath(t *testing.T) {
+	t.Parallel()
+
+	tools := pinsPermTools()
+	e := newPinEnv(t, oneServer("srv"))
+	root := e.xdg
+	e.xdg = filepath.Join(root, "it's")
+	if err := os.MkdirAll(e.xdg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstScan(t, e, tools["srv"]...)
+	setPinsMode(t, e, pinsKindDir, 0o777)
+	fake := fakeServers(tools)
+
+	got := e.scan(fake)
+
+	assertScanRun(t, got, scanWant{code: exitError, stderr: []string{
+		"chmod go-w -- '" + filepath.Join(root, `it'\''s`, "mcpmoat") + "'",
+		pins.ErrInsecurePermissions.Error(),
+	}})
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
+	}
+}
+
+// TestPinsSafePermissionsWork checks that the normal modes still work: the
+// folder 0700 with pins.json 0600 that mcpmoat makes itself, and the common
+// modes 0755 and 0644, which group and others can read but not write.
+func TestPinsSafePermissionsWork(t *testing.T) {
+	t.Parallel()
+
+	modes := []struct{ dir, file os.FileMode }{
+		{0o700, 0o600},
+		{0o755, 0o644},
+	}
+	for _, cmd := range pinsReadingCommands {
+		for _, m := range modes {
+			t.Run(fmt.Sprintf("%s, directory %04o and file %04o", cmd.name, m.dir, m.file), func(t *testing.T) {
+				t.Parallel()
+				tools := pinsPermTools()
+				e := newPinEnv(t, oneServer("srv"))
+				firstScan(t, e, tools["srv"]...)
+				setPinsMode(t, e, pinsKindDir, m.dir)
+				setPinsMode(t, e, pinsKindFile, m.file)
+				fake := fakeServers(tools)
+
+				got := cmd.run(e, fake)
+
+				// The tools did not change, so the run finds nothing. A scan
+				// prints nothing on stderr. A pin --accept prints its
+				// --expect note, which is not an error.
+				want := scanWant{code: exitOK, noStdout: []string{"MOAT-T2-"}, stderr: cmd.okStderr}
+				cmd.assert(t, got, want)
+				if calls := fake.Calls(); !slices.Equal(calls, []string{"srv"}) {
+					t.Errorf("the inspector got the calls %v, want [srv]", calls)
+				}
+				if mode := modeOf(t, filepath.Dir(e.pinsPath())); mode != m.dir {
+					t.Errorf("mode of the folder = %04o after the run, want %04o", mode, m.dir)
+				}
+				// pin --accept saves pins.json again, with a new file of mode
+				// 0600; scan finds no change and does not save.
+				wantFile := m.file
+				if cmd.rewritesFile {
+					wantFile = 0o600
+				}
+				if mode := modeOf(t, e.pinsPath()); mode != wantFile {
+					t.Errorf("mode of pins.json = %04o after the run, want %04o", mode, wantFile)
+				}
+			})
+		}
+	}
+}
+
+// TestPinsFolderUnsafeBeforeSave checks the read that scan and "pin --accept"
+// do again before they save: when a folder that did not exist at the first
+// read has become writable by others during the inspection, the run refuses it
+// with exit code 2, saves nothing and creates no pins.json. The first read
+// already checks the folder, and the second read checks it again, so the check
+// in Store.Save is not reachable from here without a hook that production code
+// does not have. The tests of internal/pins cover Save.
+func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range pinsReadingCommands {
+		t.Run(cmd.name, func(t *testing.T) {
+			t.Parallel()
+			skipWithoutModeBits(t)
+			e := newPinEnv(t, oneServer("srv"))
+			dir := filepath.Dir(e.pinsPath())
+			restorePinsModes(t, e)
+			insp := hookInspector{
+				inner: fakeServers(pinsPermTools()),
+				hook: onceFor("srv", func(discover.Server) {
+					// A process makes the folder during the inspection, and lets everybody write it.
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Errorf("make the folder: %v", err)
+						return
+					}
+					if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // G302: the test makes the folder unsafe on purpose
+						t.Errorf("chmod the folder: %v", err)
+					}
+				}),
+			}
+
+			got := cmd.run(e, insp)
+
+			cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
+				"cannot read the pins file",
+				"pins directory " + dir + " is not safe",
+				"mode 0777",
+				chmodHint(dir),
+			}, noStdout: []string{"accepted"}})
+			e.assertNoPinsFile(t, "a refused folder")
+		})
+	}
 }

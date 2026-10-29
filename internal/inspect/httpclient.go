@@ -238,7 +238,7 @@ func newBaseTransport(lookup lookupFunc, guardHost string) *http.Transport {
 // so dial sees only the addresses that the guard lets through. With a proxy,
 // dial sees the address of the proxy. Tests give a dial that records the
 // connections (NFR-01).
-func newBaseTransportDial(lookup lookupFunc, dial dialFunc, guardHost string) *http.Transport {
+func newBaseTransportDial(lookup lookupFunc, dial DialFunc, guardHost string) *http.Transport {
 	dialer := newPinnedDialer(lookup, dial)
 	dialer.guardHost = strings.ToLower(guardHost)
 	return &http.Transport{

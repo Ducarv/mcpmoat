@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -24,10 +25,10 @@ import (
 // x 2500, about 82M instruction-bytes. That is about 0.75 s on an Apple M1
 // Pro (about 9.2 ns for each instruction-byte: the BenchmarkWorstCaseBlock
 // time below divided by 21 forms). A text can have more forms (see
-// matchForms and preparedText):
+// baseFormsCut and preparedText):
 //
 //   - keywords read up to maxKeywordForms (7) forms: the plain folds of the
-//     base forms of matchForms;
+//     base forms of baseFormsCut;
 //   - any_regex and all_regex read up to maxRegexForms (21) forms: the seven
 //     base forms, their seven plain folds and their seven skeleton folds,
 //     when the text is not only ASCII.
@@ -38,6 +39,35 @@ import (
 // with no rune of skeletonTable has at most 14 regex forms. Only a text with
 // such a rune, which the server picks, reaches 21.
 //
+// The I/l-blind twin of a regex (see the twin.go file comment) keeps
+// maxProgInsts and maxTotalInsts, and each form is still read by one regex
+// of at most the same size, so the worst-case match bounds below do not
+// change. The typical cost can change for a user pattern that starts with a
+// literal "I" or "l": `lsass\.exe\s+dump` took under 1 us on a 32 KiB text
+// with no match, and its twin `[Il]sass...` took about 0.5 ms. A text with
+// one look-alike gets twin forms, so the server can pick this cost. It stays
+// under the worst-case bound. No built-in rule has such a prefix: each one
+// starts with (?i)\b or has no "I" or "l" in its prefix.
+//
+// The twins cost compile time and memory: a twin is a second compiled regex,
+// and twinFromTree prints, parses and compiles its pattern to check it. A
+// pattern with no "I" or "l" to blur shares its own regex as the twin.
+// Compiling all the built-in rules 20 times took about 57 ms before the
+// twins and about 135 ms with them (Apple M1 Pro, go1.27.3), about 2.5 times
+// (it varies by machine), and the allocations went from about 4.3 MB to
+// 11 MB for one compile of all of them. A rule compiles once for each scan,
+// so this adds about 4 ms to a scan. A pattern of MaxPatternBytes, such as
+// "l" + 511 times `\S`, gets its twin in under 1 ms (see printRE2 for why
+// this needed care). The worst case for the twin is a pattern that the
+// parser folds slowly, such as `(?:Ia|la)(?i)` + 40 times
+// `[\x{80}-\x{10fff0}l]`: under (?i), the parser folds each rune of a wide
+// class up to U+1E943, so the pattern takes about 200 ms to compile. Its
+// twin adds almost nothing, because twinFromTree checks the printer on the
+// parse tree of compileRegexTree and does not parse the pattern again. The
+// printed pattern writes each class as its ranges, so its parse is fast. A
+// list of 53 such patterns (up to maxTotalInsts) took about 10.5 s to
+// compile, with or without the twins.
+//
 // Each form is at most MaxMatchInputBytes long, so the worst case for one
 // match block is 21 times the cost above: 21 x 32 KiB x 2500, about 1.7G
 // instruction-bytes. BenchmarkWorstCaseBlock measured about 15.9 s for one
@@ -45,41 +75,68 @@ import (
 // -benchtime=1x, 15.60 s to 16.03 s, go1.27.3). In the same run, the 14
 // forms of BenchmarkWorstCaseBlockNoSkeleton took about 10.7 s, the same as
 // before #140. So the seven skeleton folds add about 49%, in line with 21/14
-// forms. The package doc says how the rule count multiplies this cost.
+// forms. These times are for one Match call: one rule on one text. The
+// package doc says how the rule count multiplies this cost.
 //
 // The server alone picks the forms, so its text alone can raise the cost of
 // one text about 18 times with the built-in rules. Before #140, the 13
 // description rules on 32 KiB took about 50 ms for plain text and about
-// 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro). For the
-// current code, scaled by the ratio of the two benchmarks above (15.9 s /
-// 10.7 s, about 1.49), the all-forms time is about 0.91 s. This is an
-// estimate, not a new measurement. The plain text has one form, so it stays
-// at about 50 ms. The scan engine (#143) needs a time or bytes budget.
+// 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro), one
+// Match call for each rule. For the current code, scaled by the ratio of the
+// two benchmarks above (15.9 s / 10.7 s, about 1.49), the all-forms time is
+// about 0.91 s. This is an estimate, not a new measurement. The plain text
+// has one form, so it stays at about 50 ms.
 //
-// Building the forms has a cost too. The slowest known input is a run of
-// U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
-// takes about 240 ms for each form that reads with ansiSeq, and about 1.5 s
-// for one matchForms and one matchWindowCut call (BenchmarkOSCStartRun).
-// Match builds the forms again for each rule. #146 tracks this cost.
+// A scan does not pay this cost without a limit. It builds the forms of each
+// text once and shares them across all the rules that read the text (see
+// preparedText and Matcher.matchCtx). It also stops the analysis of a server
+// at a deadline: matchCtx checks the context before each regex reads each
+// form, so the overshoot past the deadline is at most about one regex on one
+// form, plus one build of the forms of one text, plus one decode of a schema
+// or one heuristic call on the raw text.
+//
+// Building the forms has a cost too. In ansiSeq, each U+009D can start an
+// OSC that stays open for up to 256 runes (see oscExpr), so ansiSeq is slow
+// on a text with many U+009D (the BenchmarkOSCStartRun comment has the
+// times). So baseFormsCut reads a text with more than maxStrictOSCStarts
+// U+009D with ansiSeqFast and sets the cut flag. Measured on an Apple M1 Pro
+// (five runs with -benchtime=5x), one baseFormsCut call takes about 54 ms on
+// 128 KiB of U+009D, about 90 ms on the pairs U+009D "a" up to 128 KiB, and
+// about 70 ms on the text of BenchmarkOSCStartRun, which holds the U+009D
+// run and builds all seven forms.
+// BenchmarkOSCStartRun times one baseFormsCut call in each sub-benchmark:
+// about 69 ms for oscStartRun and 88 ms for pairs. Up to maxStrictOSCStarts
+// U+009D, the OSC part of ansiSeq adds almost nothing: 128 KiB of text with
+// 256 U+009D takes about 95 ms, the same as with 257.
+//
+// The worst case that we know now is not a run of U+009D but a fill of CSIs.
+// One baseFormsCut call takes about 172 ms on a fill of ESC [ A that builds
+// all seven forms, and about 173 ms (median, 234 ms at most) on 256 U+009D
+// and then a fill of C1 CSIs (U+009B A). So one build of the forms takes
+// under about 0.2 s.
+// A scan calls baseFormsCut once for each text, for all its rules.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes
 // this evasion: a high rule with it fires when the window cuts one of the
-// forms of matchForms. The OSC text of a form, such as a link URL, does not
-// count (see matchWindowCut).
+// forms of baseFormsCut. The OSC text of a form, such as a link URL, does not
+// count (see baseFormsCut).
 //
-// A schema target is many short texts (see matchSchema). An any_regex,
-// all_regex or keywords rule reads one schema in three passes: its strings
-// (at most maxSchemaMatchBytes, 128 KiB, and maxSchemaMatchStrings strings),
-// the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
-// the JSON cannot be read in full, the raw text once, in the window of one
-// description. So one schema costs about nine times the bound of one
-// description: the seam pass doubles the cost of the string pass.
+// A schema target is many short texts (see matchSchemaPrepared). An
+// any_regex, all_regex or keywords rule reads one schema in three passes:
+// its strings (at most maxSchemaMatchBytes, 128 KiB, and
+// maxSchemaMatchStrings strings), the seams of neighbour strings (at most
+// maxSeamBytes, 128 KiB), and, when the JSON cannot be read in full, the raw
+// text once, in the window of one description. So one schema costs about
+// nine times the bound of one description: the seam pass doubles the cost of
+// the string pass.
 // BenchmarkSchemaWorstCase measured at most about 63.0 s for one Match call
 // (4 strings of 32 KiB, 21 forms each), about 4 times the description worst
-// case. The match_window heuristic fires on a schema whose strings these
-// caps cut, but not when the seam budget is used up. The package doc gives
-// the details.
+// case. In a scan, the schema rules of one tool share the decoded schema and
+// the forms of each string, seam and raw text (see preparedText.schema), and
+// the deadline above stops them too. The match_window heuristic fires on a
+// schema whose strings these caps cut, but not when the seam budget is used
+// up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -126,7 +183,7 @@ type Hit struct {
 	// Offset is a byte offset in the raw text, or NoOffset for regex and
 	// keyword hits: they run on the normalized text, so no raw offset is
 	// known. Every hit of a schema target has NoOffset too, also a hit of a
-	// heuristic or of the raw JSON text (see matchSchema).
+	// heuristic or of the raw JSON text (see matchSchemaPrepared).
 	Offset int
 	// Detail is short printable ASCII that mcpmoat builds. It never holds
 	// text from the input.
@@ -144,12 +201,30 @@ const (
 
 // Matcher is a compiled match block for one target. Make one with
 // Match.CompileFor. A Matcher is immutable and safe for concurrent use.
+//
+// An any_regex or all_regex Matcher holds two regexes for each entry: the
+// pattern, and its I/l-blind twin (see twinFromTree) for the twin forms.
 type Matcher struct {
 	kind      string
-	target    Target                 // how Match reads the text
-	mode      schemaMode             // how Match reads a schema
-	regexps   []*regexp.Regexp       // any_regex, all_regex and keywords
-	heuristic func(raw string) []Hit // heuristic
+	target    Target           // how Match reads the text
+	mode      schemaMode       // how Match reads a schema
+	regexps   []*regexp.Regexp // any_regex, all_regex and keywords
+	twins     []*regexp.Regexp // any_regex and all_regex: twins[i] is the twin of regexps[i]
+	heuristic heuristicFunc    // heuristic
+}
+
+// heuristicFunc is the compiled function of a heuristic. It reads the
+// prepared text p and returns its hits. It must not change p.
+//
+// Most heuristics read only p.raw (see rawHeuristic), so they build no forms
+// of p. The match_window heuristic reads p.windowCut, so it shares the base
+// forms of p with the regex and keyword rules (see matchWindowPrepared).
+type heuristicFunc func(p *preparedText) []Hit
+
+// rawHeuristic turns a heuristic that reads the raw text into a
+// heuristicFunc. The result reads only p.raw.
+func rawHeuristic(fn func(raw string) []Hit) heuristicFunc {
+	return func(p *preparedText) []Hit { return fn(p.raw) }
 }
 
 // CompileFor checks the match block and compiles it for the target t. Every
@@ -189,15 +264,17 @@ func (m Match) compile() (*Matcher, error) {
 
 	switch {
 	case m.Heuristic != "":
-		fn, err := compileHeuristic(m.Heuristic, m.Params)
+		h, err := compileHeuristic(m.Heuristic, m.Params)
 		if err != nil {
 			return nil, err
 		}
 		mode := schemaAll
 		if m.Heuristic == HeuristicMatchWindow {
+			// match_window reports the schemas that the regex and keyword
+			// rules cannot read in full (see schemaWindowHit).
 			mode = schemaWindow
 		}
-		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: fn}, nil
+		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: h}, nil
 	case m.AnyRegex != nil:
 		return compileRegexMatcher(kindAnyRegex, m.AnyRegex, nil)
 	case m.AllRegex != nil:
@@ -209,12 +286,18 @@ func (m Match) compile() (*Matcher, error) {
 
 // compileRegexMatcher compiles a list of the given kind into a Matcher. See
 // compileRegexList for build.
+//
+// For any_regex and all_regex, it also builds the I/l-blind twin of each
+// regex (see the twin.go file comment). A twin that is the same as its regex
+// is the same *regexp.Regexp, so it costs no memory. A keywords list gets no
+// twins.
 func compileRegexMatcher(kind string, list []string, build func(entry, s string) (string, error)) (*Matcher, error) {
-	res, err := compileRegexList(kind, list, build)
+	withTwins := kind == kindAnyRegex || kind == kindAllRegex
+	res, twins, err := compileRegexList(kind, list, build, withTwins)
 	if err != nil {
 		return nil, err
 	}
-	return &Matcher{kind: kind, mode: schemaBudget, regexps: res}, nil
+	return &Matcher{kind: kind, mode: schemaBudget, regexps: res, twins: twins}, nil
 }
 
 // Match returns the hits of the matcher in text, or nil when it does not
@@ -223,18 +306,22 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 //
 // Regexes and keywords read the normalized forms of the text, so an
 // invisible character cannot split a keyword. Regexes read the forms of
-// preparedText.regexForms, which also hold the folded forms, so a fullwidth
+// preparedText.regexFormParts, which also hold the folded forms, so a fullwidth
 // letter or a combining mark cannot hide a word from a regex. Keywords read
-// the forms of preparedText.keywordForms, the base forms of matchForms folded
+// the forms of preparedText.keywordForms, the base forms of baseFormsCut folded
 // with foldMarks. A regex or a keyword matches when it matches in one form.
 // In all_regex, each regex must match, but each one can match in a different
-// form. A heuristic reads the full raw text.
+// form. In the twin forms, an any_regex or all_regex pattern runs as its
+// I/l-blind twin (see the twin.go file comment). A heuristic reads the full
+// raw text. The match_window heuristic
+// reads the cut flag of the base forms (see matchWindowPrepared).
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
 // in, because a form has no byte offsets in the raw text.
 //
 // For the schema target, text is a JSON schema, and Match runs the steps
-// above on each decoded object key and string value (see matchSchema).
+// above on each decoded object key and string value (see
+// matchSchemaPrepared).
 // Every hit then has the offset NoOffset, and its detail starts with a label
 // such as "schema string N" (the package doc lists the labels). The schema
 // mode depends on the kind:
@@ -261,53 +348,81 @@ func (m *Matcher) Match(text string) []Hit {
 	return m.matchPrepared(prepareText(text))
 }
 
-// matchPrepared returns the hits of the matcher in p, as Match does. The
-// forms of p are built at most once, so the matchers of many rules can share
-// one p for the same text (see preparedText). A heuristic gets only p.raw,
-// so it does not build the forms of p. The match_window heuristic builds
-// its own forms of p.raw (see matchWindowCut). matchPrepared never writes
-// into the forms of p.
-//
-// For the schema target, p.raw is a JSON schema, and matchPrepared reads it
-// with matchSchema. The forms of p are then not built and not shared:
-// matchSchema calls matchText on each string, seam and raw text, and
-// matchText builds a new preparedText for each of them.
+// matchPrepared returns the hits of the matcher in p, as Match does. It is
+// matchCtx with a context that is never done, so it never stops early and
+// has no error.
 //
 // m and p must not be nil. Match does the nil check for m.
 func (m *Matcher) matchPrepared(p *preparedText) []Hit {
-	if m.target == TargetSchema {
-		return matchSchema(p.raw, m.mode, m.matchText)
-	}
-	return m.matchOne(p)
+	// The error is always nil here: context.Background is never done, and
+	// matchCtx fails only when its context is done.
+	hits, _ := m.matchCtx(context.Background(), p)
+	return hits
 }
 
-// matchText returns the hits of m in one text, as Match describes for a text
-// that is not a schema. For a schema, matchSchema calls it on each string,
-// and in some cases on seams and on the raw text (see matchSchema). It builds
-// a new preparedText for text.
-func (m *Matcher) matchText(text string) []Hit {
-	return m.matchOne(prepareText(text))
+// matchCtx returns the hits of the matcher in p, as Match does, and stops
+// early when ctx is done.
+//
+// The preparedText doc tells which parts of p (forms, folds, decoded schema)
+// the rules that share p build once and share. matchCtx never writes into
+// the forms of p.
+//
+// For the schema target, p.raw is a JSON schema. matchCtx reads it with
+// matchSchemaPrepared and p.schema.
+//
+// The context: matchCtx checks ctx before it decodes a schema, before it
+// builds the forms, before each regex or keyword reads each form, and before
+// the heuristic. For a schema, matchSchemaPrepared also checks it before
+// each string, seam and raw text. So when ctx ends, the extra work is at
+// most one schema decode, one build of the forms of one text plus one regex
+// on one form, or one heuristic call. matchCtx then returns the hits that it
+// found so far, and an error that wraps ctx.Err(). The error names the kind
+// and the list index, never input text. With a context that is never done,
+// the error is nil, and the hits are the hits of Match.
+//
+// m and p must not be nil.
+func (m *Matcher) matchCtx(ctx context.Context, p *preparedText) ([]Hit, error) {
+	// Check before p.schema too, so a done ctx does not decode a schema.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("match %s: %w", m.kind, err)
+	}
+	if m.target == TargetSchema {
+		return matchSchemaPrepared(ctx, p.schema(), m.mode, m.matchOne)
+	}
+	return m.matchOne(ctx, p)
 }
 
 // matchOne returns the hits of m in p.raw, read as one text (not as a
-// schema), with the forms of p.
-func (m *Matcher) matchOne(p *preparedText) []Hit {
+// schema), with the forms of p. It is the schemaMatchFunc of a schema rule
+// (see matchCtx), and it checks ctx as matchCtx says.
+func (m *Matcher) matchOne(ctx context.Context, p *preparedText) ([]Hit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("match %s: %w", m.kind, err)
+	}
 	switch m.kind {
 	case kindHeuristic:
-		return m.heuristic(p.raw)
+		return m.heuristic(p), nil
 	case kindAnyRegex:
-		forms := p.regexForms()
-		for i, re := range m.regexps {
-			if matchesAny(re, forms) {
-				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
+		front, twin := p.regexFormParts()
+		for i := range m.regexps {
+			ok, err := m.matchRegex(ctx, i, front, twin)
+			if err != nil {
+				return nil, fmt.Errorf("match any_regex[%d]: %w", i, err)
+			}
+			if ok {
+				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}, nil
 			}
 		}
-		return nil
+		return nil, nil
 	case kindAllRegex:
-		forms := p.regexForms()
-		for _, re := range m.regexps {
-			if !matchesAny(re, forms) {
-				return nil
+		front, twin := p.regexFormParts()
+		for i := range m.regexps {
+			ok, err := m.matchRegex(ctx, i, front, twin)
+			if err != nil {
+				return nil, fmt.Errorf("match all_regex[%d]: %w", i, err)
+			}
+			if !ok {
+				return nil, nil
 			}
 		}
 		var l hitList
@@ -316,62 +431,100 @@ func (m *Matcher) matchOne(p *preparedText) []Hit {
 				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("all_regex[%d] matched", i)})
 			}
 		}
-		return l.result("patterns")
+		return l.result("patterns"), nil
 	case kindKeywords:
 		forms := p.keywordForms()
 		var l hitList
 		for i, re := range m.regexps {
-			if matchesAny(re, forms) && l.keep(NoOffset) {
+			ok, err := matchesAny(ctx, re, forms)
+			if err != nil {
+				// The keywords before i are read in full, so their hits stay.
+				return l.result("keywords"), fmt.Errorf("match keywords[%d]: %w", i, err)
+			}
+			if ok && l.keep(NoOffset) {
 				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("keywords[%d] matched", i)})
 			}
 		}
-		return l.result("keywords")
+		return l.result("keywords"), nil
 	}
-	return nil
+	return nil, nil
 }
 
-// matchesAny reports whether re matches one of forms.
-func matchesAny(re *regexp.Regexp, forms []string) bool {
+// matchRegex reports whether regex i of an any_regex or all_regex matcher
+// matches in one regex form. front and twin are the two parts of
+// preparedText.regexFormParts. The original regex reads front, and its
+// I/l-blind twin reads twin, in place of the original (see the twin.go file
+// comment). It checks ctx as matchesAny does. A Matcher with no twins (not
+// built by compileRegexMatcher) reads twin with the original regex.
+func (m *Matcher) matchRegex(ctx context.Context, i int, front, twin []string) (bool, error) {
+	re := m.regexps[i]
+	ok, err := matchesAny(ctx, re, front)
+	if ok || err != nil {
+		return ok, err
+	}
+	if i < len(m.twins) {
+		re = m.twins[i]
+	}
+	return matchesAny(ctx, re, twin)
+}
+
+// matchesAny reports whether re matches one of forms. It checks ctx before
+// each form, so it stops after at most one regex call on one form when ctx
+// ends. It then returns ctx.Err() as it is; the caller adds the context.
+func matchesAny(ctx context.Context, re *regexp.Regexp, forms []string) (bool, error) {
 	for _, f := range forms {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if re.MatchString(f) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // compileRegexList compiles the entries of the list named field, with the
 // size caps on each entry and on the sum of the programs. build turns an
 // entry into its regex; a nil build uses the entry as it is.
-func compileRegexList(field string, list []string, build func(entry, s string) (string, error)) ([]*regexp.Regexp, error) {
+//
+// When withTwins is true, it also returns the I/l-blind twin of each regex
+// (see twinFromTree): twins[i] is the twin of res[i]. It builds the twin
+// from the parse tree that compileRegexTree made for the size check, so the
+// pattern is not parsed one more time. Otherwise twins is nil.
+func compileRegexList(field string, list []string, build func(entry, s string) (string, error), withTwins bool) (res, twins []*regexp.Regexp, err error) {
 	if err := checkList(field, list); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	res := make([]*regexp.Regexp, 0, len(list))
+	res = make([]*regexp.Regexp, 0, len(list))
+	if withTwins {
+		twins = make([]*regexp.Regexp, 0, len(list))
+	}
 	total := 0
 	for i, s := range list {
 		entry := fmt.Sprintf("%s[%d]", field, i)
 		if err := checkEntry(entry, s); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		expr := s
 		if build != nil {
-			var err error
 			if expr, err = build(entry, s); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		re, insts, err := compileRegex(entry, expr)
+		re, tree, insts, err := compileRegexTree(entry, expr)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		total += insts
 		if err := checkTotal(field, total); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		res = append(res, re)
+		if withTwins {
+			twins = append(twins, twinFromTree(re, tree, insts))
+		}
 	}
-	return res, nil
+	return res, twins, nil
 }
 
 // checkTotal checks the sum of the program sizes of the regexes of the list
@@ -469,8 +622,8 @@ func checkEntry(field, s string) error {
 	return nil
 }
 
-// compileRegex compiles expr and rejects a regex that is too large or that
-// can match the empty text (see minLen).
+// compileRegexTree compiles expr and rejects a regex that is too large or
+// that can match the empty text (see minLen).
 //
 // regexp.Compile works in three steps, and the first two are public in
 // package regexp/syntax:
@@ -486,28 +639,30 @@ func checkEntry(field, s string) error {
 // So the first two steps run here only to count the instructions, before the
 // real compilation. syntax.Perl is the flag set that regexp.Compile uses.
 //
-// compileRegex also returns the number of instructions, so the caller can
-// check the sum over a list (see maxTotalInsts).
-func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
+// compileRegexTree also returns the parse tree of expr (see progSize), as
+// the parser made it, and the number of instructions, so the caller can
+// check the sum over a list (see maxTotalInsts). Only the caller holds the
+// tree. twinFromTree reads it and does not change it.
+func compileRegexTree(field, expr string) (*regexp.Regexp, *syntax.Regexp, int, error) {
 	tree, insts, err := progSize(expr)
 	if err != nil {
-		return nil, 0, regexError(field, err)
+		return nil, nil, 0, regexError(field, err)
 	}
 	if insts > maxProgInsts {
-		return nil, 0, &FieldError{Field: field, Msg: fmt.Sprintf("too complex: %d regex instructions, over the limit of %d", insts, maxProgInsts)}
+		return nil, nil, 0, &FieldError{Field: field, Msg: fmt.Sprintf("too complex: %d regex instructions, over the limit of %d", insts, maxProgInsts)}
 	}
 	// A regex that can match without reading a rune, such as a* or \b, can
 	// match at many places in almost any text, so the rule would fire on
 	// almost every tool. The program has at most maxProgInsts instructions
 	// here, so minLen cannot overflow.
 	if minLen(tree) == 0 {
-		return nil, 0, &FieldError{Field: field, Msg: "regex matches the empty text"}
+		return nil, nil, 0, &FieldError{Field: field, Msg: "regex matches the empty text"}
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		return nil, 0, regexError(field, err)
+		return nil, nil, 0, regexError(field, err)
 	}
-	return re, insts, nil
+	return re, tree, insts, nil
 }
 
 // progSize parses expr with the flags of regexp.Compile and returns the

@@ -7,23 +7,33 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
-// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go) and
-// of e2e_test.go, which runs the real binary. The helpers are the pinEnv world,
-// the fake servers, and the checks of the output.
+// scan_pins_lock_test.go, pin_test.go, pin_flow_test.go, pin_expect_test.go,
+// pin_lock_test.go and pins_diff_test.go; other scan tests use some of them
+// too) and of e2e_test.go and e2e_pins_test.go, which run the real binary. The
+// helpers are the pinEnv world, the fake servers, the checks of the output,
+// the lock helpers (holdPinsLock and lockProbeWriter), the near-full pins
+// file (writeNearFullPins, fillPinsFileNearFull and bigStoreTool), the
+// near-full share of the project servers (fillNearFullProjectShare and
+// writeNearFullProjectShare), and the filler steps that both use
+// (fillerEntrySize, fillerCanonicals and setFillers).
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -67,22 +77,103 @@ func (e *pinEnv) assertNoPinsFile(t *testing.T, after string) {
 	}
 }
 
+// pinsLockFileName is the name of the pins lock file in the folder of
+// pins.json: the pins file name plus ".lock". It copies the unexported
+// lockSuffix of internal/pins.
+const pinsLockFileName = "pins.json.lock"
+
 // readOnlyPinsDir makes the folder of pins.json read-only, so that a save
-// fails but a read finds no file. It skips the test when the user can write
-// there anyway.
+// fails but a read finds no file. It first creates the pins lock file
+// (pinsLockFileName) with mode 0600: the locked read cannot create it in a
+// read-only folder, and without it the run fails at the read and not at the
+// save. It skips the test when the user can write there anyway.
 func readOnlyPinsDir(t *testing.T, e *pinEnv) {
 	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop this user")
-	}
+	skipWithoutModeBits(t)
 	dir := filepath.Dir(e.pinsPath())
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, pinsLockFileName), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600) //nolint:gosec // G304: path is under the test's own t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+}
+
+// The kinds of path in the pins tests: the folder of pins.json, and pins.json.
+// The words are the ones in the refusal message.
+const (
+	pinsKindDir  = "directory"
+	pinsKindFile = "file"
+)
+
+// setPinsMode sets the mode of the folder of pins.json (kind pinsKindDir) or of
+// pins.json (kind pinsKindFile) with os.Chmod, so that a test can make the path
+// unsafe (mode&0o022 != 0) or check a safe mode. The path must exist. It
+// registers a cleanup that sets the folder back to 0700 and the file back to
+// 0600, so that t.TempDir can remove them. It skips the test on Windows, where
+// the mode bits mean nothing, and for root, who owns every path and can write
+// anywhere.
+func setPinsMode(t *testing.T, e *pinEnv, kind string, mode os.FileMode) {
+	t.Helper()
+	skipWithoutModeBits(t)
+	path := pinsStorePath(t, e, kind)
+	restorePinsModes(t, e)
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// skipWithoutModeBits skips the test when the mode bits do not stop the user
+// (Windows, root). The owner and mode check itself does not depend on access,
+// but readOnlyPinsDir does, and the tests share this skip.
+func skipWithoutModeBits(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("the mode bits do not apply to this user")
+	}
+}
+
+// pinsStorePath returns the path of pins.json for kind pinsKindFile and the path
+// of its folder for kind pinsKindDir. It fails the test for another kind.
+func pinsStorePath(t *testing.T, e *pinEnv, kind string) string {
+	t.Helper()
+	switch kind {
+	case pinsKindDir:
+		return filepath.Dir(e.pinsPath())
+	case pinsKindFile:
+		return e.pinsPath()
+	}
+	t.Fatalf("unknown pins path kind %q, want directory or file", kind)
+	return ""
+}
+
+// restorePinsModes registers a cleanup that sets the folder of pins.json back
+// to 0700 and pins.json back to 0600, so that t.TempDir can remove them. The
+// cleanup ignores a missing path.
+func restorePinsModes(t *testing.T, e *pinEnv) {
+	t.Helper()
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Dir(e.pinsPath()), 0o700) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+		_ = os.Chmod(e.pinsPath(), 0o600)
+	})
+}
+
+// modeOf returns the permission bits of path and fails the test on an error.
+func modeOf(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
 }
 
 // cli builds a cli for this world with the given inspector.
@@ -212,6 +303,22 @@ func failingFake(server string) *inspecttest.Fake {
 	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
 }
 
+// pinAlphaOnly runs a first scan in e that pins the server "alpha" with
+// alphaTools only: the server "beta" fails with "boom", so it is not pinned
+// and is new on the next run. pins.json then exists. It fails the test when
+// the scan does not exit with 0, and returns the result, so that a test can
+// check the output of the first run.
+func pinAlphaOnly(t *testing.T, e *pinEnv, alphaTools []inspect.Tool) pinRunResult {
+	t.Helper()
+	fake := fakeServers(map[string][]inspect.Tool{"alpha": alphaTools})
+	fake.Errors = map[string]error{"beta": errors.New("boom")}
+	r := e.scan(fake)
+	if r.code != exitOK {
+		t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+	}
+	return r
+}
+
 // oneServer returns the server map of a config with one stdio server.
 func oneServer(name string) map[string]any {
 	return map[string]any{name: map[string]any{"command": "npx"}}
@@ -255,15 +362,14 @@ const acceptHintPrefix = "To accept "
 // the --expect value to force a digest mismatch.
 const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 
+// testDigest has the real digest format: "pd1:" and 64 hex characters.
+const testDigest = "pd1:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // assertPinsFileMode fails the test when the file at path cannot be read with
 // stat or its mode is not 0o600. E2E tests pass pinsPath(home) as path.
 func assertPinsFileMode(t *testing.T, path string) {
 	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat pins.json %s: %v", path, err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := modeOf(t, path); mode != 0o600 {
 		t.Errorf("pins.json %s mode = %o, want 600", path, mode)
 	}
 }
@@ -600,5 +706,497 @@ func assertNoExpectNote(t *testing.T, stderr string) {
 	t.Helper()
 	if stderr != noExpectNote {
 		t.Errorf("stderr = %q, want exactly the no --expect note %q", stderr, noExpectNote)
+	}
+}
+
+// newPinsNoticeLine returns the exact stderr line, without its newline, that
+// printNewPinsFile prints for the command cmd ("scan" or "pin") and the pins
+// file path. It escapes and cuts path as the production code does. It is the
+// one copy of the notice text in the tests: use it with exactLine, and
+// newPinsFileNotice for the line with its newline.
+func newPinsNoticeLine(cmd, path string) string {
+	return "mcpmoat " + cmd + ": no pins file was found, so a new one was created at " +
+		termsafe.QuoteCut(path, maxWarnPathRunes) +
+		"; if this is not your first run, the old file was removed or moved"
+}
+
+// newPinsFileNotice returns newPinsNoticeLine(cmd, path) with its newline:
+// the exact text that printNewPinsFile writes. Tests pass e.pinsPath() as
+// path.
+func newPinsFileNotice(cmd, path string) string {
+	return newPinsNoticeLine(cmd, path) + "\n"
+}
+
+// withoutPinsFileNotice returns stderr without the line of newPinsFileNotice(cmd,
+// path). It fails the test unless stderr holds that line exactly once, so a test
+// that ignores the notice still proves that the run printed it.
+func withoutPinsFileNotice(t *testing.T, stderr, cmd, path string) string {
+	t.Helper()
+	notice := newPinsFileNotice(cmd, path)
+	lines := strings.SplitAfter(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	found := 0
+	for _, line := range lines {
+		if line == notice {
+			found++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if found != 1 {
+		t.Fatalf("stderr has the new pins file notice %d times, want 1\nnotice: %q\nstderr:\n%s", found, notice, stderr)
+	}
+	return strings.Join(kept, "")
+}
+
+// holdPinsLock takes the lock on the pins lock file of the pins file path
+// (pins.json.lock, see pinsLockFileName) with pins.LoadLocked, as another
+// mcpmoat run would, and returns the function that releases it. LoadLocked
+// creates a missing lock file with mode 0600. holdPinsLock also registers the
+// release with t.Cleanup; a second call does nothing. It fails the test when
+// pins.LoadLocked fails, and skips the test when the system cannot lock the
+// pins lock file (pins.Store.RanWithoutLock), because then no run can be
+// "locked by another run".
+func holdPinsLock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	store, release, err := pins.LoadLocked(t.Context(), path, 0)
+	t.Cleanup(release)
+	if err != nil {
+		t.Fatalf("pins.LoadLocked(%q) error = %v, want nil", path, err)
+	}
+	if store.RanWithoutLock() {
+		release()
+		t.Skip("the system cannot lock the pins lock file here")
+	}
+	return release
+}
+
+// lockProbe is the result of one lock attempt of a lockProbeWriter.
+type lockProbe struct {
+	// line is the text of the write that ran the attempt.
+	line string
+	// err is the error of pins.LoadLocked: nil when the lock was free.
+	err error
+	// ranWithoutLock is pins.Store.RanWithoutLock: the system could not lock at
+	// all, so the attempt proves nothing.
+	ranWithoutLock bool
+}
+
+// lockProbeWriter is a stdout or stderr for scan or pin that checks, from
+// inside the command, whether the command still holds the lock on the pins
+// lock file when it prints a line. On each write that holds one of the texts
+// in match, it calls pins.LoadLocked on path with no wait, as another run
+// would, records the result, and releases the lock again before it writes to
+// w. The test checks the records after the command returns (see
+// assertLockFreeAt), so there is no sleep and no goroutine: the attempt runs
+// at the exact moment of the write.
+type lockProbeWriter struct {
+	t     *testing.T
+	w     io.Writer
+	path  string
+	match []string
+
+	mu     sync.Mutex // guards probes, in case a write comes from another goroutine
+	probes []lockProbe
+}
+
+// newLockProbeWriter returns a lockProbeWriter that writes to w and tries the
+// lock on the pins file path at each write that holds one of the texts in
+// match.
+func newLockProbeWriter(t *testing.T, w io.Writer, path string, match ...string) *lockProbeWriter {
+	return &lockProbeWriter{t: t, w: w, path: path, match: match}
+}
+
+// Write probes the lock when b holds one of the match texts, then writes b to
+// the wrapped writer.
+func (p *lockProbeWriter) Write(b []byte) (int, error) {
+	if slices.ContainsFunc(p.match, func(m string) bool { return bytes.Contains(b, []byte(m)) }) {
+		store, release, err := pins.LoadLocked(p.t.Context(), p.path, 0)
+		// Release inside the write, so the command never waits for the probe.
+		release()
+		probe := lockProbe{line: string(b), err: err}
+		if err == nil {
+			probe.ranWithoutLock = store.RanWithoutLock()
+		}
+		p.mu.Lock()
+		p.probes = append(p.probes, probe)
+		p.mu.Unlock()
+	}
+	return p.w.Write(b)
+}
+
+// assertLockFreeAt fails the test unless p tried the lock exactly once for each
+// text of want, in order, and found it free each time: the command had
+// released the lock before it printed those lines. It skips the test when the
+// system cannot lock the pins lock file, because then a free lock proves
+// nothing.
+func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
+	t.Helper()
+	p.mu.Lock()
+	probes := slices.Clone(p.probes)
+	p.mu.Unlock()
+	if len(probes) != len(want) {
+		t.Errorf("lock attempts at %d writes, want %d (%q)\nprobes: %+v", len(probes), len(want), want, probes)
+	}
+	for i, probe := range probes {
+		if probe.ranWithoutLock {
+			t.Skip("the system cannot lock the pins lock file here")
+		}
+		if i < len(want) && !strings.Contains(probe.line, want[i]) {
+			t.Errorf("lock attempt %d ran at the write %q, want the write of %q", i+1, probe.line, want[i])
+		}
+		if probe.err != nil {
+			t.Errorf("the lock was not free at the write %q: pins.LoadLocked error = %v, want nil (the command must release the lock before it prints)",
+				probe.line, probe.err)
+		}
+	}
+}
+
+// readIfExists returns the content of path and true, or nil and false when
+// the file does not exist. It fails the test on another error.
+func readIfExists(t *testing.T, path string) ([]byte, bool) {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is under the test's own t.TempDir()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, true
+}
+
+// The helpers from here to fillPinsFileNearFull build a pins file near its
+// size limit, and bigPinsServerNames reads it. The tests of the size limit in
+// scan_pins_lock_test.go, scan_pins_budget_test.go and pin_lock_test.go use
+// them. The fillers of the file limit and of the project share share three
+// steps: fillerEntrySize measures the bytes of one entry, fillerCanonicals
+// splits the text bytes over the fillers, and setFillers adds them to a store.
+
+// nearFullGap is the free space that writeNearFullPins leaves below
+// pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
+// it, and the entry of a server with one mkTool is far smaller.
+const nearFullGap = 16 << 10
+
+// nearFullServers is the number of filler servers in the file of
+// writeNearFullPins. With 17 and the 32 MiB of pins.MaxFileSize, each entry is
+// about 1.9 MiB, well below the limit of one server (2 MiB). If the file limit
+// grows, an entry can get larger than 2 MiB: Set then refuses a filler, and
+// writeNearFullPins fails. Then raise this number.
+const nearFullServers = 17
+
+// bigStoreTool returns a tool whose pins entry is larger than nearFullGap:
+// its _meta alone is twice that size. The size is in _meta and not in the
+// description, so no description rule (for example the one for a long
+// description) adds a row, and the rule step stays fast.
+func bigStoreTool() inspect.Tool {
+	return metaTool("big_tool", `{"k":"`+strings.Repeat("a", 2*nearFullGap)+`"}`, "")
+}
+
+// fillerIdentity returns the identity of the filler server i. The names have
+// the same length, so every filler entry has the same fixed bytes.
+func fillerIdentity(i int) pins.Identity {
+	return pins.Identity{Client: "fixture", Source: "/fixture/mcp.json", Name: fmt.Sprintf("fill-%02d", i)}
+}
+
+// fillerNames returns the names of the nearFullServers filler servers.
+func fillerNames() []string {
+	names := make([]string, nearFullServers)
+	for i := range names {
+		names[i] = fillerIdentity(i).Name
+	}
+	return names
+}
+
+// fillerPins returns the pins of a filler server: one tool "fill" with the
+// canonical text and its hash. The hash is built like the one of
+// setPinCanonical (pins.HashVersion, a colon, the hex SHA-256), so it has the
+// same length for every text.
+func fillerPins(canonical string) pins.ServerPins {
+	sum := sha256.Sum256([]byte(canonical))
+	return pins.ServerPins{"fill": {Hash: pins.HashVersion + ":" + hex.EncodeToString(sum[:]), Canonical: canonical}}
+}
+
+// saveFillers saves a new pins store at path with one filler server for each
+// canonical text (fillerIdentity(i), fillerPins(canonicals[i])) and returns
+// the size of the file. It uses the pins API only: pins.Load of a missing
+// file gives an empty store, and Save writes the directory with mode 0700
+// and the file with mode 0600, as the CLI requires.
+func saveFillers(t *testing.T, path string, canonicals ...string) int {
+	t.Helper()
+	return saveFillersAs(t, path, fillerIdentity, canonicals...)
+}
+
+// newPinsStore returns the empty store of pins.Load for path, a file that
+// must not exist yet. It fails the test on an error.
+func newPinsStore(t *testing.T, path string) *pins.Store {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
+	}
+	if store.Existed() {
+		t.Fatalf("pins.Load(%q): the file exists, want a new store", path)
+	}
+	return store
+}
+
+// saveFillersAs is saveFillers with the identity of filler i from idOf, so
+// that the fillers can be servers of the user scope (fillerIdentity) or of a
+// project (projectFillerIdentity).
+func saveFillersAs(t *testing.T, path string, idOf func(int) pins.Identity, canonicals ...string) int {
+	t.Helper()
+	store := newPinsStore(t, path)
+	setFillers(t, store, idOf, canonicals)
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(info.Size())
+}
+
+// writeNearFullPins writes a valid pins.json at path with nearFullServers
+// filler servers, so that the file has exactly pins.MaxFileSize - nearFullGap
+// bytes. A server entry larger than nearFullGap then does not fit
+// (pins.ErrStoreFull), and a small one does.
+//
+// The size of the file depends on the format of Save, so the helper measures
+// it: it saves one and two fillers with a one-byte text in scratch folders.
+// The file grows by one byte for each byte of a canonical text of letters, so
+// the sizes give the fixed bytes of the file and of one entry. The filler
+// texts share one string, so the memory use stays near the size of the file.
+func writeNearFullPins(t *testing.T, path string) {
+	t.Helper()
+	if size := saveFillers(t, path, nearFullCanonicals(t)...); size != pins.MaxFileSize-nearFullGap {
+		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, pins.MaxFileSize-nearFullGap)
+	}
+}
+
+// nearFullCanonicals returns the canonical texts of the nearFullServers
+// fillers of writeNearFullPins, measured as its doc says.
+func nearFullCanonicals(t *testing.T) []string {
+	t.Helper()
+	entry, fixed := fillerEntrySize(t, fillerIdentity)
+	want := pins.MaxFileSize - nearFullGap
+	return fillerCanonicals(want-fixed-nearFullServers*(entry-1), nearFullServers)
+}
+
+// setFillers adds one filler server to store for each canonical text: filler
+// i gets the identity idOf(i) and the pins fillerPins(canonicals[i]). It fails
+// the test when Set refuses one. It does not save the store.
+func setFillers(t *testing.T, store *pins.Store, idOf func(int) pins.Identity, canonicals []string) {
+	t.Helper()
+	for i, c := range canonicals {
+		if err := store.Set(idOf(i), fillerPins(c)); err != nil {
+			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
+		}
+	}
+}
+
+// fillerEntrySize measures the bytes that one filler entry with a one-byte
+// text takes in the saved file, for fillers with the identities of idOf. The
+// format of Save decides the size, so it saves one and two such fillers in
+// scratch folders: entry is the difference of the two file sizes, and fixed
+// is the bytes of the file around the entries. The two files are tiny, so the
+// measure is cheap.
+func fillerEntrySize(t *testing.T, idOf func(int) pins.Identity) (entry, fixed int) {
+	t.Helper()
+	one := saveFillersAs(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), idOf, "a")
+	two := saveFillersAs(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), idOf, "a", "a")
+	entry = two - one
+	return entry, one - entry
+}
+
+// fillerCanonicals splits textBytes bytes of text over count canonical texts:
+// each text has textBytes/count bytes, and the last one also takes the rest.
+// The texts are slices of one string, so the memory use stays near textBytes,
+// not count times more.
+func fillerCanonicals(textBytes, count int) []string {
+	n := textBytes / count
+	long := strings.Repeat("a", n+textBytes%count)
+	canonicals := make([]string, count)
+	for i := range canonicals {
+		canonicals[i] = long[:n]
+	}
+	canonicals[count-1] = long
+	return canonicals
+}
+
+// fillPinsFileNearFull adds the fillers of writeNearFullPins to the pins file
+// at path, which must exist, and saves it. The servers that the file held
+// before stay, and their entries take room from nearFullGap. A test can so
+// pin its servers with a cheap scan on a small file first, and fill the file
+// after that with one read of a small file and one Save, instead of a scan
+// that reads and writes a file of almost 32 MiB.
+func fillPinsFileNearFull(t *testing.T, path string) {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
+	}
+	if !store.Existed() {
+		t.Fatalf("pins.Load(%q): no file, want the file of an earlier run", path)
+	}
+	setFillers(t, store, fillerIdentity, nearFullCanonicals(t))
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+}
+
+// The helpers from here to writeNearFullProjectShare fill the share of the
+// project servers (pins.ProjectShareMiB, 16 MiB) and leave the rest of the
+// file free. The tests of the project share in scan_pins_budget_test.go and
+// pin_lock_test.go use them.
+
+// nearFullProjectFillers is the number of project filler servers of
+// fillNearFullProjectShare. With 9 and the 16 MiB share, each entry is about
+// 1.8 MiB, below the limit of one server (2 MiB). If the share grows, raise
+// this number, as for nearFullServers.
+const nearFullProjectFillers = 9
+
+// projectFillerIdentity returns the identity of the project filler server i:
+// a server of a project config (it has a ProjectPath), so its entry counts
+// toward the project share. The names have the same length, so every entry
+// has the same fixed bytes, also the probe entry of fillNearFullProjectShare
+// (i = nearFullProjectFillers).
+func projectFillerIdentity(i int) pins.Identity {
+	return pins.Identity{
+		Client:      "fixture",
+		Source:      "/fixture/proj/.mcp.json",
+		ProjectPath: "/fixture/proj",
+		Name:        fmt.Sprintf("proj-fill-%02d", i),
+	}
+}
+
+// projectFillerNames returns the names of the nearFullProjectFillers project
+// filler servers.
+func projectFillerNames() []string {
+	names := make([]string, nearFullProjectFillers)
+	for i := range names {
+		names[i] = projectFillerIdentity(i).Name
+	}
+	return names
+}
+
+// fillNearFullProjectShare adds nearFullProjectFillers project filler servers
+// to store, so that the entries of the project servers take exactly
+// nearFullGap bytes less than the share (pins.ProjectShareMiB). A project
+// server whose entry is larger than the room that is left then does not fit
+// (pins.ErrProjectShareFull), and a server of the user scope still fits: the
+// file itself stays near half of pins.MaxFileSize. store must hold no project
+// server yet; a project server that the caller adds later takes room too.
+//
+// It uses the measured trick of writeNearFullPins: the share counts the bytes
+// that one entry takes in the saved file, so fillerEntrySize gives the bytes
+// of one entry. The filler texts share one string (fillerCanonicals), so the
+// memory use stays near the size of the share. Only Set runs here, no Save,
+// so a test that does not need the file stays cheap.
+// At the end, two Set calls on clones check the room: a probe entry of
+// exactly nearFullGap bytes fits, and one byte more is refused with
+// pins.ErrProjectShareFull.
+func fillNearFullProjectShare(t *testing.T, store *pins.Store) {
+	t.Helper()
+	// The share counts only the entries, so the fixed bytes of the file do
+	// not matter here.
+	entry, _ := fillerEntrySize(t, projectFillerIdentity)
+	want := pins.ProjectShareMiB<<20 - nearFullGap
+	setFillers(t, store, projectFillerIdentity, fillerCanonicals(want-nearFullProjectFillers*(entry-1), nearFullProjectFillers))
+
+	probe := projectFillerIdentity(nearFullProjectFillers)
+	fits := strings.Repeat("a", nearFullGap-(entry-1))
+	if err := store.Clone().Set(probe, fillerPins(fits)); err != nil {
+		t.Fatalf("a probe entry of %d bytes: Set error = %v, want nil (the size model of the share changed)", nearFullGap, err)
+	}
+	if err := store.Clone().Set(probe, fillerPins(fits+"a")); !errors.Is(err, pins.ErrProjectShareFull) {
+		t.Fatalf("a probe entry of %d bytes: Set error = %v, want pins.ErrProjectShareFull (the size model of the share changed)", nearFullGap+1, err)
+	}
+}
+
+// writeNearFullProjectShare writes a valid pins.json at path, which must not
+// exist yet, with the project fillers of fillNearFullProjectShare: the
+// project share has nearFullGap bytes of room, and the file is about 16 MiB,
+// half of the cost of writeNearFullPins.
+func writeNearFullProjectShare(t *testing.T, path string) {
+	t.Helper()
+	store := newPinsStore(t, path)
+	fillNearFullProjectShare(t, store)
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+}
+
+// bigPinsServerNames returns the server names in the pins file at path,
+// sorted. It is for the near-full file of writeNearFullPins: a JSON decode of
+// 32 MiB is slow with -race, so it finds each `"name": "` key with
+// bytes.Index. The key text matches the server entries only: Save writes one
+// space after the colon, and a canonical text in the file is a JSON string,
+// so its quotes are escaped (\"name\":\"...\"). The names of the tests are
+// plain words with no escape.
+func bigPinsServerNames(t *testing.T, path string) []string {
+	t.Helper()
+	const key = `"name": "`
+	data := readFileBytes(t, path)
+	var names []string
+	for {
+		i := bytes.Index(data, []byte(key))
+		if i < 0 {
+			break
+		}
+		data = data[i+len(key):]
+		end := bytes.IndexByte(data, '"')
+		if end < 0 {
+			t.Fatalf("pins file %s has a name with no end quote", path)
+		}
+		names = append(names, string(data[:end]))
+		data = data[end:]
+	}
+	slices.Sort(names)
+	return names
+}
+
+// TestNewPinsFileNotice checks that newPinsFileNotice gives the exact line of
+// printNewPinsFile, also for a path with a control byte that must be escaped.
+func TestNewPinsFileNotice(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{"scan", "pin"} {
+		for _, path := range []string{"/tmp/x/mcpmoat/pins.json", "a\x1bb"} {
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			c.printNewPinsFile(cmd, path)
+			want := newPinsFileNotice(cmd, path)
+			if got := stderr.String(); got != want {
+				t.Errorf("printNewPinsFile(%q, %q) stderr = %q, want %q", cmd, path, got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("printNewPinsFile(%q, %q) stdout = %q, want empty", cmd, path, stdout.String())
+			}
+			if strings.Contains(want, "\x1b") {
+				t.Errorf("newPinsFileNotice(%q, %q) = %q holds a raw escape byte", cmd, path, want)
+			}
+			if rest := withoutPinsFileNotice(t, "x\n"+want+"y\n", cmd, path); rest != "x\ny\n" {
+				t.Errorf("withoutPinsFileNotice() = %q, want %q", rest, "x\ny\n")
+			}
+		}
+	}
+}
+
+// TestHoldPinsLock checks that holdPinsLock makes a second LoadLocked fail
+// with pins.ErrLocked, and that its release frees the lock.
+func TestHoldPinsLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mcpmoat", "pins.json")
+	release := holdPinsLock(t, path)
+	_, again, err := pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if !errors.Is(err, pins.ErrLocked) {
+		t.Fatalf("LoadLocked() while held: error = %v, want pins.ErrLocked", err)
+	}
+	release()
+	_, again, err = pins.LoadLocked(t.Context(), path, 0)
+	again()
+	if err != nil {
+		t.Fatalf("LoadLocked() after release: error = %v, want nil", err)
 	}
 }

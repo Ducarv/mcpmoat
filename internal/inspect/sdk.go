@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"os"
 	"slices"
 	"strings"
@@ -48,7 +47,7 @@ type SDKOptions struct {
 	// the guard still applies, and a refused address never reaches Dial.
 	// With a proxy, Dial sees the address of the proxy. Dial must connect
 	// to the address that it gets. It has no effect on stdio servers.
-	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+	Dial DialFunc
 }
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It
@@ -109,14 +108,25 @@ func New(opts SDKOptions) *SDKInspector {
 // comment. The expanded server stays inside Inspect: [Run] keeps the server
 // as discovered in Outcome.Server, so no expanded value is shown.
 //
-// Every non-nil error is a *ConnectError; use errors.As to get it. Its text
-// never holds a configured env value: mcpmoat puts none there, and Inspect
-// removes from text that the server sent the configured values and the
-// values of the expanded variables that have at least minBareSecretLen bytes
-// (a server gets them and can echo them). Its URL is the redacted URL as
-// discovered, not the expanded one. It can hold other text that the server
-// controls, so callers must escape it with internal/termsafe before they
-// print it. errors.Is(err, context.DeadlineExceeded) works for timeouts.
+// Every non-nil error is a *ConnectError; use errors.As to get it. mcpmoat
+// puts no configured env value in its text, and Inspect removes from text that
+// the server sent the configured values, the values of the expanded variables
+// and, for a stdio server, the secrets in the argv (see argSecrets): a server
+// gets them and can echo them. A value of at least discover.MinSecretBytes
+// bytes goes wherever it stands. A shorter value goes only where it stands as
+// a whole word (see replaceWords), so it stays when the text glues it to a
+// letter, a digit or "_". Its URL is the redacted URL as discovered, not the
+// expanded one. It can hold other text that the server controls, so callers
+// must escape it with internal/termsafe before they print it. errors.Is(err,
+// context.DeadlineExceeded) works for timeouts.
+//
+// On success, Result.Secrets holds the configured values, the expanded
+// values, the credentials inside them (see valueCredentials) and, for a
+// stdio server, the argv secrets that have at least discover.MinSecretBytes
+// bytes (see Result.Secrets and resultSecrets). Result.Credentials holds the
+// values of Result.Secrets that look like a credential (see
+// Result.Credentials and resultCredentials). For a remote server, [Remote]
+// sets both.
 //
 // For a stdio server, Inspect:
 //
@@ -183,27 +193,31 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	expanded.ProjectPath = s.ProjectPath
 
 	if s.Transport.IsRemote() {
+		lookedUp := rec.lists()
 		result, err := Remote(ctx, expanded, RemoteOptions{
 			AllowUntrusted: i.opts.AllowUntrusted,
 			AllowDisabled:  i.opts.AllowDisabled,
 			dial:           i.opts.Dial,
-			secrets:        rec.values,
+			lookedUp:       lookedUp,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
-			showDiscoveredURL(ce, expanded.URL, s.URL)
+			// The same short list as the one that Remote gave classify.
+			showDiscoveredURL(ce, expanded.URL, s.URL, remoteShortSecrets(expanded, lookedUp))
 		}
 		return result, err
 	}
-	return i.inspectStdio(ctx, expanded, parent, rec.values)
+	return i.inspectStdio(ctx, expanded, parent, rec.lists())
 }
 
 // inspectStdio is Inspect for a server that is not remote. s is the expanded
 // server, parent is the environment for buildEnv, and lookedUp holds the
-// values of the expanded variables, for the scrub of error text. Inspect
-// checked the gates before, and stdioCommand checks them again.
-func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent, lookedUp []string) (Result, error) {
+// values of the expanded variables (see lookupRecorder.lists). inspectStdio
+// adds the configured env values and the argv secrets of s to them (see
+// stdioSecretLists). Inspect checked the gates before, and stdioCommand checks
+// them again.
+func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, parent []string, lookedUp secretLists) (Result, error) {
 	if err := ctx.Err(); err != nil {
-		return Result{}, classify(err, s, nil, nil)
+		return Result{}, classify(err, s, nil, secretLists{})
 	}
 
 	// The defers below run in this order: the stop of the process, the
@@ -248,7 +262,8 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	// the defer below stops the process first; stop is idempotent.
 	defer proc.stop()
 
-	secrets := slices.Concat(envSecrets(s.Env), lookedUp)
+	// The child gets all the values of lists and can echo them.
+	lists := stdioSecretLists(s, lookedUp)
 	raw, sizes := &rawLists{}, &rawLimit{limit: limit}
 	// fail turns err into the *ConnectError that Inspect returns. The SDK
 	// formats some errors with %v, which drops the context error from the
@@ -269,7 +284,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 		if ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return Result{}, stdioFailure(s, err, secrets, sizes.exceeded())
+		return Result{}, stdioFailure(s, err, lists, sizes.exceeded())
 	}
 
 	client := newStdioClient(clientIdentity(s.Client), raw, sizes)
@@ -294,7 +309,34 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	if err := listInto(ctx, cs, initRes.Capabilities, raw, &result); err != nil {
 		return fail(err)
 	}
+	// The configured env values, the expanded values and the argv secrets,
+	// for consumers that remove them from the Result text (see
+	// Result.Secrets). lists.long holds only values of at least
+	// discover.MinSecretBytes bytes already. lists.short does not go there:
+	// in ordinary text a short value would garble words.
+	result.Secrets = resultSecrets(lists.long)
+	// The values of Secrets that look like a credential, for scan --llm (see
+	// Result.Credentials). resultCredentials only filters Secrets, so
+	// Credentials is a subset of it.
+	result.Credentials = resultCredentials(result.Secrets, lists.credentials)
 	return result, nil
+}
+
+// stdioSecretLists returns the lists of inspectStdio for s, the expanded
+// stdio server: lookedUp, the values of the expanded variables, plus the
+// configured env values and the credentials inside them (see envSecrets and
+// envCredentials) and the secrets in the argv (see argSecrets and
+// argCredentials).
+//
+// The result holds raw values. Never print, log or encode them.
+func stdioSecretLists(s discover.Server, lookedUp secretLists) secretLists {
+	envLong, envShort := envSecrets(s.Env)
+	argLong, argShort := argSecrets(s)
+	return secretLists{
+		long:        slices.Concat(envLong, lookedUp.long, argLong),
+		short:       slices.Concat(envShort, lookedUp.short, argShort),
+		credentials: slices.Concat(envCredentials(s.Env), lookedUp.credentials, argCredentials(s)),
+	}
 }
 
 // newStdioClient returns a new SDK client for one stdio server, with the
@@ -336,36 +378,122 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 }
 
 // lookupRecorder wraps a variable lookup for discover.Expand. It keeps each
-// value that the lookup returns with at least minBareSecretLen bytes, for
-// classify to remove from error text. A shorter value is too likely to match
-// ordinary words. It keeps each value one time only, so a config that reads
-// the same variable many times does not make the scrub list long. It is
-// used by one goroutine only.
+// non-empty value that the lookup returns, for classify to remove from error
+// text: a value of at least discover.MinSecretBytes bytes in long, which
+// classify removes wherever it stands, and a shorter one in short, which
+// classify removes as a whole word only (see replaceWords). A short value is
+// too likely to match ordinary words to remove it everywhere. It keeps each
+// value one time only, so a config that reads the same variable many times
+// does not make the scrub lists long. It is used by one goroutine only.
+//
+// It also reads the variable name next to each value, for
+// Result.Credentials: a value of long is a credential when the name is
+// secret-like or the value looks like a credential (see isCredential). The
+// same value can come first from a plain name ("A=x") and then from a
+// secret-like one ("TOKEN=x"), so a repeated lookup still checks the name.
+//
+// After each new value, it also records the credentials inside the value
+// (see valueCredentials), such as the password of a connection URL: the
+// server can echo the password alone. A long piece goes to long and to
+// credentials, and a short piece goes to short, by the same length rule as
+// a whole value.
+//
+// The embedded secretLists holds the recorded values. Its long and short
+// lists hold raw values of the user's environment and the credentials inside
+// them, each one time, in the order in which they were recorded. Its
+// credentials list holds the strings of long that are credentials, each one
+// time, in the order in which they became one. Never print, log or encode
+// them.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
-	// values holds raw values of the user's environment, each one time, in
-	// the order of the first lookup. seen holds the same values, to find a
-	// value that is already in values. Never print, log or encode them.
-	values []string
-	seen   map[string]struct{}
+	secretLists
+	// lookedUpSet holds the whole values that a lookup returned, to skip
+	// the checks of a value that was checked already.
+	lookedUpSet map[string]struct{}
+	// listedSet holds every string of long and short, whole values and
+	// pieces alike, to keep a string out of the lists the second time.
+	listedSet map[string]struct{}
+	// credentialSet holds the strings of credentials, to find one that is
+	// already there.
+	credentialSet map[string]struct{}
+}
+
+// lists returns the recorded values as a secretLists. The slices are the
+// ones of r, not copies; the callers only read them.
+func (r *lookupRecorder) lists() secretLists {
+	return r.secretLists
 }
 
 // Lookup returns the value of the variable name and whether it is set, and
-// records the value if it is not recorded yet.
+// records the value and the credentials inside it if the value is not
+// recorded yet.
 func (r *lookupRecorder) Lookup(name string) (string, bool) {
 	value, ok := r.lookup(name)
-	if !ok || len(value) < minBareSecretLen {
+	if !ok || value == "" {
 		return value, ok
 	}
-	if _, dup := r.seen[value]; dup {
+	if _, dup := r.lookedUpSet[value]; dup {
+		// The value check (holdsCredential) and the pieces
+		// (valueCredentials) ran at the first lookup and give the same
+		// answer now. Only a secret-like name can make the value a
+		// credential, and that check is cheap.
+		if discover.IsSecretName(name) {
+			r.addCredential(value)
+		}
 		return value, ok
 	}
-	if r.seen == nil {
-		r.seen = make(map[string]struct{})
+	if r.lookedUpSet == nil {
+		r.lookedUpSet = make(map[string]struct{})
 	}
-	r.seen[value] = struct{}{}
-	r.values = append(r.values, value)
+	r.lookedUpSet[value] = struct{}{}
+	r.record(value)
+	if isCredential(name, value) {
+		r.addCredential(value)
+	}
+	// Each piece is a credential by itself. addCredential drops the short
+	// ones, so only the record call matters for them.
+	innerLong, innerShort := valueCredentials(value)
+	for _, piece := range slices.Concat(innerLong, innerShort) {
+		r.record(piece)
+		r.addCredential(piece)
+	}
 	return value, ok
+}
+
+// record keeps s in r.long when it has at least discover.MinSecretBytes
+// bytes, or else in r.short, unless one of the lists has it already. A
+// piece of one value can be the whole of another, so the check is on the
+// lists (r.listedSet) and not on r.lookedUpSet.
+func (r *lookupRecorder) record(s string) {
+	if _, dup := r.listedSet[s]; dup {
+		return
+	}
+	if r.listedSet == nil {
+		r.listedSet = make(map[string]struct{})
+	}
+	r.listedSet[s] = struct{}{}
+	if len(s) >= discover.MinSecretBytes {
+		r.long = append(r.long, s)
+	} else {
+		r.short = append(r.short, s)
+	}
+}
+
+// addCredential keeps value in r.credentials when it has at least
+// discover.MinSecretBytes bytes and is not there yet. A shorter value never
+// goes to Result.Secrets, so it cannot be a credential either.
+func (r *lookupRecorder) addCredential(value string) {
+	if len(value) < discover.MinSecretBytes {
+		return
+	}
+	if _, dup := r.credentialSet[value]; dup {
+		return
+	}
+	if r.credentialSet == nil {
+		r.credentialSet = make(map[string]struct{})
+	}
+	r.credentialSet[value] = struct{}{}
+	r.credentials = append(r.credentials, value)
 }
 
 // environLookup returns a lookup in env, which has the form of os.Environ:
@@ -508,18 +636,61 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 	return configErrorWithCause(s, reason, err)
 }
 
-// envSecrets returns the configured env values of at least minBareSecretLen
-// bytes, for classify to remove from error text. A shorter value is too
-// likely to match ordinary words ("1", "true", "info"), and too short to be
-// a token.
-func envSecrets(env discover.SecretMap) []string {
-	var secrets []string
+// envSecrets returns the configured env values in two lists. secrets holds
+// the values of at least discover.MinSecretBytes bytes, for classify to remove
+// from error text wherever they stand and for Result.Secrets (see
+// resultSecrets). short holds the other non-empty values, for classify to
+// remove from error text as whole words only (see replaceWords): a shorter
+// value is too likely to match ordinary words ("1", "true", "info"), but the
+// child gets it and can echo it.
+//
+// After each value, the lists also get the credentials inside it (see
+// valueCredentials), such as the password of
+// "DATABASE_URL=postgres://u:pw@h/db": the child can echo the password alone.
+// The long pieces go to secrets and the short ones to short, by the same
+// length rule. Both lists are in the order of env.Keys.
+//
+// The results hold raw values. Never print, log or encode them.
+func envSecrets(env discover.SecretMap) (secrets, short []string) {
 	for _, key := range env.Keys() {
-		if v := env[key].Reveal(); len(v) >= minBareSecretLen {
+		v := env[key].Reveal()
+		switch {
+		case len(v) >= discover.MinSecretBytes:
 			secrets = append(secrets, v)
+		case v != "":
+			short = append(short, v)
 		}
+		innerLong, innerShort := valueCredentials(v)
+		secrets = append(secrets, innerLong...)
+		short = append(short, innerShort...)
 	}
-	return secrets
+	return secrets, short
+}
+
+// envCredentials returns the configured env values that are credentials, for
+// Result.Credentials: the values of at least discover.MinSecretBytes bytes
+// (the long list of envSecrets) whose key is secret-like or that look like a
+// credential (see isCredential). So "API_KEY=production" gives "production",
+// and "NODE_ENV=production" gives nothing. After each value, it also returns
+// the long credentials inside the value (see valueCredentials), which
+// envSecrets puts in its long list too. The list is in the order of
+// env.Keys.
+//
+// The result holds raw values. Never print, log or encode them.
+func envCredentials(env discover.SecretMap) []string {
+	var credentials []string
+	for _, key := range env.Keys() {
+		v := env[key].Reveal()
+		if len(v) >= discover.MinSecretBytes && isCredential(key, v) {
+			credentials = append(credentials, v)
+		}
+		// The blank identifier _ drops the short pieces: a value under
+		// discover.MinSecretBytes bytes never goes to Result.Secrets, so it
+		// cannot be a credential either.
+		innerLong, _ := valueCredentials(v)
+		credentials = append(credentials, innerLong...)
+	}
+	return credentials
 }
 
 // stdioFailure turns err, from the MCP session of a stdio server, into a
@@ -540,8 +711,10 @@ func envSecrets(env discover.SecretMap) []string {
 // fail in inspectStdio adds errJSONTooComplex only when ctx has not ended, so
 // for a shape violation that only the process knows about, an ended ctx wins
 // too.
-func stdioFailure(s discover.Server, err error, secrets []string, tooLarge bool) *ConnectError {
-	ce := classify(err, s, nil, secrets)
+//
+// lists are the values to remove from the error text (see classify).
+func stdioFailure(s discover.Server, err error, lists secretLists, tooLarge bool) *ConnectError {
+	ce := classify(err, s, nil, lists)
 	switch {
 	case errors.Is(err, errJSONTooComplex):
 		ce.err = errJSONTooComplex
@@ -551,6 +724,7 @@ func stdioFailure(s discover.Server, err error, secrets []string, tooLarge bool)
 	case ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)):
 		ce.Kind = KindTooLarge
 		ce.Reason = errRawTooLarge.Error()
+		ce.fixed, ce.serverText = ce.Reason, "" // all of Reason is fixed text now
 		ce.err = errRawTooLarge
 	}
 	return ce
@@ -566,10 +740,12 @@ func commandError(s discover.Server, err error) *ConnectError {
 	if errors.Is(err, errCommandNotFound) || errors.Is(err, errCommandNotRunnable) || errors.Is(err, errNoWorkDir) {
 		kind = KindStart
 	}
+	reason := strings.TrimPrefix(err.Error(), "inspect: ")
 	return &ConnectError{
 		Kind:   kind,
 		Server: s.Name,
-		Reason: strings.TrimPrefix(err.Error(), "inspect: "),
+		Reason: reason,
+		fixed:  reason,
 		err:    err,
 	}
 }
@@ -581,7 +757,7 @@ func commandError(s discover.Server, err error) *ConnectError {
 // ctx is done, the result is a timeout.
 func startError(ctx context.Context, s discover.Server, err error) *ConnectError {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return classify(ctxErr, s, nil, nil)
+		return classify(ctxErr, s, nil, secretLists{})
 	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -599,6 +775,7 @@ func startFailure(s discover.Server, reason string, err error) *ConnectError {
 		Kind:   KindStart,
 		Server: s.Name,
 		Reason: reason,
+		fixed:  reason,
 		err:    err,
 	}
 }

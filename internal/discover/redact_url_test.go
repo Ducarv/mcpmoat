@@ -842,6 +842,83 @@ func TestSecretQueryParts(t *testing.T) {
 	}
 }
 
+// TestIsSecretUserName checks when a user name is a secret by itself: when
+// the password is empty, when the name looks like a token, and when it has 8
+// or more bytes and a digit. A plain name next to a password is not.
+func TestIsSecretUserName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		user     string
+		password string
+		want     bool
+	}{
+		// With no password, the name is the credential, at any length.
+		{name: "empty password", user: "alice", password: "", want: true},
+		{name: "empty name and password", user: "", password: "", want: true},
+		// A token sign in the name.
+		{name: "token prefix", user: "ghp_abc", password: "x-oauth-basic", want: true}, //nolint:gosec // G101: fake test credentials
+		{name: "token prefix after a dot", user: "x.sk-abc", password: "pw", want: true},
+		{name: "long word with no digit", user: strings.Repeat("abcdefgh", 4), password: "pw", want: true},
+		// The digit rule and its 8-byte limit.
+		{name: "8 bytes with a digit", user: "abcdefg1", password: "pw", want: true},
+		{name: "7 bytes with a digit", user: "abcdef1", password: "pw", want: false},
+		{name: "8 bytes with no digit", user: "abcdefgh", password: "pw", want: false},
+		{name: "short name with a digit", user: "user1", password: "pw", want: false},
+		// Plain names next to a password.
+		{name: "plain name", user: "alice", password: "pw", want: false},
+		{name: "long plain name", user: "readonly-user", password: "pw", want: false},
+		{name: "empty name with a password", user: "", password: "pw", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := discover.IsSecretUserName(tt.user, tt.password); got != tt.want {
+				t.Errorf("IsSecretUserName(%q, %q) = %v, want %v", tt.user, tt.password, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRawUserinfo checks that RawUserinfo finds the user info as written, as
+// url.Parse finds it: after the first "//", in the authority that ends at the
+// first "/", "?" or "#", before the last "@" there. It works on text that
+// url.Parse rejects too.
+func TestRawUserinfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "no double slash", raw: "u:p@h", want: ""},
+		{name: "no at sign", raw: "https://h/x", want: ""},
+		{name: "name and password", raw: "https://u:p@h/x", want: "u:p"}, //nolint:gosec // G101: fake test credentials
+		{name: "name only", raw: "https://u@h", want: "u"},
+		{name: "empty user info", raw: "https://@h/x", want: ""},
+		{name: "no scheme", raw: "//u@h", want: "u"},
+		{name: "last at sign of the authority", raw: "https://a@b@h/x", want: "a@b"},
+		{name: "at sign after a slash", raw: "https://h/x@y", want: ""},
+		{name: "at sign after a question mark", raw: "https://h?x@y", want: ""},
+		{name: "at sign after a hash", raw: "https://h#x@y", want: ""},
+		{name: "authority ends at the first slash", raw: "https://u@h/a@b", want: "u"},
+		{name: "first double slash", raw: "jdbc:x://u:p@h/db", want: "u:p"},
+		{name: "escapes as written", raw: "https://u:p%40ss@h", want: "u:p%40ss"},   //nolint:gosec // G101: fake test credentials
+		{name: "text that does not parse", raw: "https://u:p%zz@h", want: "u:p%zz"}, //nolint:gosec // G101: fake test credentials
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := discover.RawUserinfo(tt.raw); got != tt.want {
+				t.Errorf("RawUserinfo(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // ExampleRedactURL shows that the userinfo and the query values are masked.
 func ExampleRedactURL() {
 	fmt.Println(discover.RedactURL("https://user:pw@example.com/mcp?key=abc"))

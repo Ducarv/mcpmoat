@@ -1,11 +1,12 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "tool": {
     "name": "mcpmoat",
     "version": "1.2.3"
   },
   "mode": "no-connect",
   "complete": true,
+  "fields_truncated": false,
   "servers": [
     {
       "name": "cc-global",
@@ -111,6 +112,7 @@
       "rule_id": "MOAT-T4-003",
       "severity": "medium",
       "server": "cc-global",
+      "server_index": 0,
       "field": "args",
       "key": "",
       "related": "cc-global",
@@ -120,6 +122,7 @@
       "rule_id": "MOAT-T4-004",
       "severity": "low",
       "server": "cc-global",
+      "server_index": 0,
       "field": "args",
       "key": "",
       "related": "",
@@ -129,6 +132,7 @@
       "rule_id": "MOAT-T4-003",
       "severity": "medium",
       "server": "cursor-global",
+      "server_index": 3,
       "field": "args",
       "key": "",
       "related": "cursor-global",
@@ -138,6 +142,7 @@
       "rule_id": "MOAT-T4-003",
       "severity": "medium",
       "server": "codex-global",
+      "server_index": 5,
       "field": "args",
       "key": "",
       "related": "codex-global",
@@ -147,6 +152,7 @@
       "rule_id": "MOAT-T4-004",
       "severity": "low",
       "server": "codex-global",
+      "server_index": 5,
       "field": "args",
       "key": "",
       "related": "",
@@ -154,5 +160,10 @@
     }
   ],
   "diffs": [],
-  "errors": []
+  "errors": [],
+  "ignored": {
+    "total": 0,
+    "rules": {},
+    "file_entries": 0
+  }
 }

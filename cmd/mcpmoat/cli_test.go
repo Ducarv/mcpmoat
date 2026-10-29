@@ -5,12 +5,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // testBuild is the build information that the CLI tests inject.
@@ -40,13 +43,24 @@ func fakeGetenv(env map[string]string) func(string) string {
 // homeDir and getwd return an error by default. A test that needs them must
 // set them to a fixture path. This way a test that forgets cannot read the
 // real home directory or the real working directory.
+//
+// toolBudget is one hour. The default budget is 5 s of wall-clock time, so a
+// test that reads a big tool text could reach it on a busy machine (for
+// example with -race and the whole suite in parallel) and get an extra
+// MOAT-T1-023 row. A test of the budget sets c.toolBudget itself (see
+// scanWithBudget).
+//
+// toolStepBudget is one hour too. The default limit of the whole tool rule
+// step is 30 s, so a loaded machine could cut the analysis there.
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
-		stdout: &stdout,
-		stderr: &stderr,
-		getenv: getenv,
-		build:  build,
+		stdout:         &stdout,
+		stderr:         &stderr,
+		getenv:         getenv,
+		build:          build,
+		toolBudget:     time.Hour,
+		toolStepBudget: time.Hour,
 		homeDir: func() (string, error) {
 			return "", errors.New("test: home not set")
 		},
@@ -343,6 +357,15 @@ func TestCLIRunNoArgsPrintsUsageOnStderr(t *testing.T) {
 	}
 }
 
+// wantRetryTriesLine and wantRetryAfterLine are the retry lines of the scan
+// help, as users see them (issue #188). The numbers are literal: 3 tries and
+// 30 seconds. TestUsageRetryNumbersMatchConstants checks that they are the
+// numbers of the retry policy of package llm.
+const (
+	wantRetryTriesLine = "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to 3 tries in total for each tool.\n"
+	wantRetryAfterLine = "  scan waits for a Retry-After of up to 30 seconds before the next try; a longer Retry-After means no retry.\n"
+)
+
 func TestUsageContent(t *testing.T) {
 	t.Parallel()
 
@@ -362,16 +385,24 @@ func TestUsageContent(t *testing.T) {
 		"Exit codes:\n",
 		"  0  no finding that is not ignored at or above --fail-on\n",
 		"  1  a finding that is not ignored at or above --fail-on (default high)\n",
-		// Exit code 2 wins over 1 (FR-16). README.md#exit-codes owns the
+		// Exit code 2 wins over 1 (FR-16). docs/exit-codes.md owns the
 		// exact contract, so the usage text points to it.
 		"  2  execution or usage error, also when there are findings\n",
-		"     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n",
+		"     (https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/exit-codes.md lists the causes and when the report still prints)\n",
 		// The --fail-on flag line and its continuation lines. Only the text is
 		// checked, not the padding that tabwriter prints.
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
 		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
 		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
-		"The file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		// The ignore file line is checked in two parts, so a comma between the
+		// listed rules does not break the test.
+		"The file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
+		"the finding that config findings were left out (MOAT-T4-005)",
+		"the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them",
+		// The flag that turns the ignore file on, without the tabwriter
+		// padding.
+		"  --use-ignore-file ",
+		"Also ignore the findings that the .mcpmoat-ignore file in the working directory lists. Off by default\n",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
@@ -386,13 +417,43 @@ func TestUsageContent(t *testing.T) {
 		"Scan output:\n",
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
-		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
+		// The description and schema rules (T1 and T3) run when scan
+		// connects, with a time budget for each server. Config rules from
+		// --rules never run. The --rules continuation line is checked
+		// without the tabwriter padding.
+		"Rules with target description or schema apply to the tools. Rules with target config are not applied\n",
+		"  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n",
+		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
+		// The time limit of the whole rule step (30s) and the budget of
+		// one server (5s). The numbers are literal: this is the text that
+		// users see.
+		"  The rule analysis has a time limit of 30s for all servers. Each server gets a fair share of the time left,\n",
+		"  up to a time budget of 5s. A server that uses it up, or that scan reaches after the limit, is a finding (MOAT-T1-023):\n",
+		"  high, or critical when a description or schema rule from --rules is critical.\n",
+		// The part of an analysis that cannot be stopped also uses the
+		// limit for all servers (issue #210). The help says that a later
+		// server then gets MOAT-T1-023 and does not pass silently.
+		"  The part of an analysis that cannot be stopped at its deadline (one regex and one text conversion) also uses\n",
+		"  the limit for all servers. So servers early in the order can use up the time of later servers.\n",
+		"  Those later servers get MOAT-T1-023 too, never a silent pass.\n",
+		// The tool findings cap (MOAT-T1-024) has its own two lines.
+		fmt.Sprintf("  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer),
+		"  at least high.\n",
+		// The config findings caps (MOAT-T4-005, issue #213) have their own
+		// three lines. The numbers are literal (configRowsPerServer and
+		// configRowsTotal), so a change of a cap must change this test too.
+		// The third line says that the scan-wide cap keeps the most severe
+		// findings of all the servers, not the findings of the first servers.
+		"  scan lists at most 100 config findings for each server and 10000 for the whole scan. A server that loses\n",
+		"  config findings to a limit gets a finding (MOAT-T4-005), at least high. The limits do not count this finding.\n",
+		"  scan keeps the most severe config findings across the whole scan, not the findings of the first servers.\n",
+		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
 		// exception to "offline". The flag lines and their continuation lines
 		// are checked without the tabwriter padding where it can change.
 		"mcpmoat finds malicious or tampered MCP servers. It runs offline, unless you use scan --llm.\n",
-		"(schema: docs/schema/scan-output.v2.json)\n",
+		fmt.Sprintf("(schema: docs/schema/scan-output.v%d.json)\n", report.SchemaVersion),
 		"  --llm ",
 		"Also ask an LLM to rate each tool description. Off by default. Not with --no-connect\n",
 		"It sends the name and description of every tool to the LLM provider: this data leaves your machine\n",
@@ -403,7 +464,21 @@ func TestUsageContent(t *testing.T) {
 		"  --llm-base-url <url>  The base URL of the API: https, or http for a loopback host only (default: the public API)\n",
 		"  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n",
 		"  They are high at most, and they count for --fail-on. They never remove a rule finding.\n",
-		fmt.Sprintf("  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools),
+		// A refused tool is a per-tool finding, not a step failure (issue
+		// #184). The cap is shared between the servers.
+		"  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n",
+		"  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut or a configured value was removed from it), and the scan goes on.\n",
+		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
+		"  every tool, or another provider error gives exit 2; the report still prints.\n",
+		// The retries of a busy provider and the time limit of the whole
+		// LLM step (issue #188). The lines are literal: this test checks
+		// the text that users see. TestUsageRetryNumbersMatchConstants
+		// checks that the two retry numbers are those of the policy of
+		// package llm, and a change of defaultLLMStepTimeout must change the help
+		// too.
+		wantRetryTriesLine,
+		wantRetryAfterLine,
+		"  The LLM step stops after 10 minutes: the tools that are not classified yet give exit 2; the report still prints.\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
@@ -412,11 +487,30 @@ func TestUsageContent(t *testing.T) {
 	// The scan help says once which rules scan runs, and says that the
 	// --no-connect line lists and checks the configs. The old text said that
 	// scan applies no rules: it must be gone. The failing-server note is only
-	// in the scan notes, not in the exit code block too.
+	// in the scan notes, not in the exit code block too. The time budget and
+	// its rule ID are named once, in the scan notes.
 	for _, once := range []string{
 		"built-in config rules (T4 and T5)",
 		"List the servers in the configs and check the configs.",
-		"not applied yet",
+		"description and schema rules (T1 and T3",
+		// The ignore file line also names MOAT-T1-023, so the scan note is
+		// matched by its full phrase.
+		"is a finding (MOAT-T1-023)",
+		// The ignore file line also names MOAT-T1-024, so the scan note is
+		// matched by its full phrase.
+		"gets one finding (MOAT-T1-024)",
+		// The ignore file line also names MOAT-T4-005, so the scan note is
+		// matched by its full phrase.
+		"gets a finding (MOAT-T4-005)",
+		// The --use-ignore-file flag has one flag line.
+		"Also ignore the findings that the .mcpmoat-ignore file",
+		"time budget",
+		"time limit of 30s",
+		// The note on the part of an analysis that cannot be stopped, and the
+		// note on the scan-wide config cap, are each said once.
+		"cannot be stopped at its deadline",
+		"never a silent pass",
+		"most severe config findings across the whole scan",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once
 		// in the flag list; the scan notes do not repeat it.
@@ -442,9 +536,57 @@ func TestUsageContent(t *testing.T) {
 		// schema had version 1.
 		"It runs offline.\n",
 		"scan-output.v1.json",
+		"scan-output.v2.json",
+		// Before issue #223 the findings and diffs had no server_index.
+		"scan-output.v3.json",
+		// Before issue #143 scan did not apply the tool rules (YAML) or the
+		// rules from --rules.
+		"not applied yet",
+		"are not applied to tools",
+		// Before issue #184 one server could use the whole --llm cap, and
+		// the line did not name the refusal of every tool.
+		"A provider error or more tools than that gives exit 2",
+		// An earlier draft of the config cap note did not say which findings
+		// the scan-wide cap keeps.
+		"at least high. scan keeps the most severe findings.\n",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
+		}
+	}
+}
+
+// TestUsageRetryNumbersMatchConstants checks that the literal retry lines of
+// TestUsageContent give the numbers of the retry policy of package llm
+// (llm.RetryMaxTries and llm.RetryAfterCap). The help prints the constants, so
+// a change of the policy changes the help; this test then fails until the
+// literal lines change too. internal/llm (TestRetryPolicyDefaults) pins the
+// values of the constants.
+func TestUsageRetryNumbersMatchConstants(t *testing.T) {
+	t.Parallel()
+
+	got := usageText(t)
+	for _, tt := range []struct {
+		name      string
+		fromConst string // the line, built from the constant
+		literal   string // the line that TestUsageContent checks
+	}{
+		{
+			name:      "llm.RetryMaxTries",
+			fromConst: fmt.Sprintf("  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries),
+			literal:   wantRetryTriesLine,
+		},
+		{
+			name:      "llm.RetryAfterCap",
+			fromConst: "  scan waits for a Retry-After of up to " + durationText(llm.RetryAfterCap) + " before the next try; a longer Retry-After means no retry.\n",
+			literal:   wantRetryAfterLine,
+		},
+	} {
+		if tt.fromConst != tt.literal {
+			t.Errorf("%s: the help line from the constant is %q, but TestUsageContent checks %q", tt.name, tt.fromConst, tt.literal)
+		}
+		if !strings.Contains(got, tt.fromConst) {
+			t.Errorf("%s: usage text does not contain %q\n--- got ---\n%s", tt.name, tt.fromConst, got)
 		}
 	}
 }
@@ -644,5 +786,239 @@ func TestCommandsOrder(t *testing.T) {
 	want := []string{"scan", "pin", "version", "help"}
 	if !slices.Equal(names, want) {
 		t.Errorf("commands() names = %q, want %q", names, want)
+	}
+}
+
+// TestArgErrorsHideURLPassword checks that no argument error of any command
+// shows the user info of a URL (FR-16, FR-17). A base URL can hold a user name
+// and a password, and the flag package and the argument checks put the user
+// argument in their error text. Each case is exit code 2, with the error kind
+// in want and no part of the canary in stdout or stderr. A case with hidden
+// set must also show hiddenArgText, so the test cannot pass when the error
+// line drops the argument.
+func TestArgErrorsHideURLPassword(t *testing.T) {
+	t.Parallel()
+
+	const canary = "CANARYpw-9f3a"
+	// passURL has a user name and a password. userURL has only a user name,
+	// which can be a token too.
+	const passURL = "https://user:" + canary + "@host.example"
+	const userURL = "https://" + canary + "@host.example"
+	// bareURL is a --llm-base-url value without a scheme. hideUserinfo does
+	// not see it as a URL, so only the argHider of the command hides it.
+	const bareURL = "user:" + canary + "@host.example"
+
+	// The worlds of the cases. worldPlain has no home and no working
+	// directory: the args must fail before scan or pin reads a config.
+	// worldPin has one server "srv" in a --config file. worldAmbiguous has
+	// two global config files in the home, each with a server named passURL.
+	const (
+		worldPlain = iota
+		worldPin
+		worldAmbiguous
+	)
+	tests := []struct {
+		name   string
+		world  int
+		args   []string
+		want   string // a part of stderr that names the error
+		hidden bool   // stderr shows hiddenArgText
+	}{
+		{name: "global bad flag syntax", args: []string{"---llm-base-url=" + passURL, "scan"},
+			want: "mcpmoat: bad flag syntax: ", hidden: true},
+		{name: "global bad flag syntax, user only", args: []string{"---llm-base-url=" + userURL, "scan"},
+			want: "mcpmoat: bad flag syntax: ", hidden: true},
+		{name: "unknown command is the URL", args: []string{passURL},
+			want: "mcpmoat: unknown command ", hidden: true},
+		{name: "unknown command is the URL, user only", args: []string{userURL},
+			want: "mcpmoat: unknown command ", hidden: true},
+		{name: "pin bad flag syntax", args: []string{"pin", "---llm-base-url=" + passURL},
+			want: "mcpmoat pin: bad flag syntax: ", hidden: true},
+		{name: "pin --timeout=URL", args: []string{"pin", "--timeout=" + passURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin --timeout URL", args: []string{"pin", "--timeout", passURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin --timeout=URL, user only", args: []string{"pin", "--timeout=" + userURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin positional URL", args: []string{"pin", "--accept", "srv", passURL},
+			want: "mcpmoat pin: unexpected arguments ", hidden: true},
+		{name: "pin --accept URL, unknown server", world: worldPin, args: []string{"pin", "--accept", passURL},
+			want: "mcpmoat pin: unknown server ", hidden: true},
+		{name: "pin --accept URL, unknown server, user only", world: worldPin, args: []string{"pin", "--accept", userURL},
+			want: "mcpmoat pin: unknown server ", hidden: true},
+		{name: "pin --accept=URL, ambiguous server", world: worldAmbiguous, args: []string{"pin", "--accept=" + passURL},
+			want: "mcpmoat pin: 2 servers are named ", hidden: true},
+		{name: "version URL", args: []string{"version", passURL},
+			want: "mcpmoat version: unexpected arguments ", hidden: true},
+		{name: "version URL, user only", args: []string{"version", userURL},
+			want: "mcpmoat version: unexpected arguments ", hidden: true},
+		{name: "help URL", args: []string{"help", passURL},
+			want: "mcpmoat help: unexpected arguments ", hidden: true},
+		{name: "scan --llm=URL", args: []string{"scan", "--llm=" + passURL},
+			want: "mcpmoat scan: invalid boolean value ", hidden: true},
+		{name: "scan --llm URL", args: []string{"scan", "--llm", passURL},
+			want: "mcpmoat scan: unexpected arguments ", hidden: true},
+		{name: "scan --llm URL, user only", args: []string{"scan", "--llm", userURL},
+			want: "mcpmoat scan: unexpected arguments ", hidden: true},
+		{name: "scan --timeout=llm-base-url=URL", args: []string{"scan", "--timeout=llm-base-url=" + passURL},
+			want: "mcpmoat scan: invalid value ", hidden: true},
+		{name: "scan --timeout=URL, user only", args: []string{"scan", "--timeout=" + userURL},
+			want: "mcpmoat scan: invalid value ", hidden: true},
+		{name: "scan --llm-base-url=URL before a bad flag", args: []string{"scan", "--llm-base-url=" + passURL, "--bogus"},
+			want: "mcpmoat scan: flag provided but not defined: -bogus"},
+		{name: "scan --llm-base-url URL after a bad flag", args: []string{"scan", "--bogus", "--llm-base-url", passURL},
+			want: "mcpmoat scan: flag provided but not defined: -bogus"},
+
+		// Every command sends its "unexpected arguments" list through its
+		// argHider, so a --llm-base-url value without a scheme is hidden in
+		// pin, help and version too, not only in scan.
+		{name: "pin positional --llm-base-url bare value", args: []string{"pin", "x", "--llm-base-url", bareURL},
+			want: `mcpmoat pin: unexpected arguments ["x" "--llm-base-url" "` + hiddenArgText + `"]`, hidden: true},
+		{name: "help --llm-base-url=bare value", args: []string{"help", "--llm-base-url=" + bareURL},
+			want: `mcpmoat help: unexpected arguments ["--llm-base-url=` + hiddenArgText + `"]`, hidden: true},
+		{name: "version --llm-base-url bare value", args: []string{"version", "--llm-base-url", bareURL},
+			want: `mcpmoat version: unexpected arguments ["--llm-base-url" "` + hiddenArgText + `"]`, hidden: true},
+		{name: "version extra and URL", args: []string{"version", "extra", passURL},
+			want: `mcpmoat version: unexpected arguments ["extra" "https://` + hiddenArgText + `@host.example"]`, hidden: true},
+		{name: "scan --llm extra --llm-base-url=bare value", args: []string{"scan", "--llm", "extra", "--llm-base-url=" + bareURL},
+			want: `mcpmoat scan: unexpected arguments ["extra" "--llm-base-url=` + hiddenArgText + `"]`, hidden: true},
+		{name: "pin --accept srv extra", args: []string{"pin", "--accept", "srv", "extra"},
+			want: `mcpmoat pin: unexpected arguments ["extra"]`},
+		// pin has no --llm-base-url flag: the flag error names the flag and
+		// not its value.
+		{name: "pin --llm-base-url=URL", args: []string{"pin", "--llm-base-url=" + passURL},
+			want: "mcpmoat pin: flag provided but not defined: -llm-base-url\n"},
+		{name: "pin --timeout --llm-base-url=bare value", args: []string{"pin", "--timeout", "--llm-base-url=" + bareURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		// "--accept --llm-base-url" takes "--llm-base-url" as the server name,
+		// and the bare value is then an unexpected argument.
+		{name: "pin --accept --llm-base-url bare value", args: []string{"pin", "--accept", "--llm-base-url", bareURL},
+			want: `mcpmoat pin: unexpected arguments ["` + hiddenArgText + `"]`, hidden: true},
+		// A --accept, --config or --project value that holds a --llm-base-url
+		// value is refused with a fixed message, before pin reads a config
+		// or prints the value (see parsePinArgs).
+		{name: "pin --accept --llm-base-url=bare value", args: []string{"pin", "--accept", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("accept")},
+		{name: "pin --accept=x-llm-base-url=bare value", args: []string{"pin", "--accept=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("accept")},
+		{name: "pin --project --llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--project", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("project")},
+		{name: "pin --project=x-llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--project=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("project")},
+		{name: "pin --config --llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--config", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("config")},
+		{name: "pin --config=x-llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--config=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("config")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := tt.args
+			var c *cli
+			var stdoutBuf, stderrBuf *bytes.Buffer
+			switch tt.world {
+			case worldPlain:
+				c, stdoutBuf, stderrBuf = newTestCLI(fakeGetenv(nil), testBuild)
+			case worldPin:
+				e := newPinEnv(t, oneServer("srv"))
+				c, stdoutBuf, stderrBuf = e.cli(fakeServers(nil))
+				args = append(slices.Clone(args), "--config", e.config)
+			case worldAmbiguous:
+				e := newPinEnv(t, oneServer("srv"))
+				writeServers(t, e.home, ".claude.json", oneServer(passURL))
+				writeServers(t, e.home, filepath.Join(".cursor", "mcp.json"), oneServer(passURL))
+				c, stdoutBuf, stderrBuf = e.cli(fakeServers(nil))
+			default:
+				t.Fatalf("unknown world %d", tt.world)
+			}
+
+			code := c.dispatch(args)
+
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
+			}
+			for _, out := range []struct{ name, text string }{{"stdout", stdout}, {"stderr", stderr}} {
+				if part, leak := secretPartLeak(canary, out.text); leak {
+					t.Errorf("%s holds %q, a part of the password %q:\n%s", out.name, part, canary, out.text)
+				}
+			}
+			if !strings.Contains(stderr, tt.want) {
+				t.Errorf("stderr does not hold %q:\n%s", tt.want, stderr)
+			}
+			if got := strings.Contains(stderr, hiddenArgText); got != tt.hidden {
+				t.Errorf("stderr holds %q = %v, want %v:\n%s", hiddenArgText, got, tt.hidden, stderr)
+			}
+			assertNoEscape(t, stdout, stderr)
+		})
+	}
+}
+
+// pinBaseURLRefusal returns the exact stderr line of pin when the value of
+// --name holds a --llm-base-url value (see parsePinArgs). It is a copy of the
+// text, so a change of it fails the tests. The line never holds the value.
+func pinBaseURLRefusal(name string) string {
+	return "mcpmoat pin: --" + name + " holds a --llm-base-url value; --llm-base-url is a scan flag and pin does not take it\n"
+}
+
+// TestParsePinArgsBaseURLRefusal checks when parsePinArgs refuses a --accept,
+// --config or --project value because it holds a --llm-base-url value. The
+// normal values of pin are not refused (no false positive).
+//
+// The check is "the argHider changes the value", so it is fail-safe and can
+// refuse more than it must. A known edge: a very short --llm-base-url value
+// that is also inside another value is refused. In
+// "--config=./x-llm-base-url=e" the argHider takes "e" as a base URL value,
+// and "./x-llm-base-url=e" holds "e", so pin refuses the --config value. Such
+// a path is not a real use, and a refusal shows no secret.
+func TestParsePinArgsBaseURLRefusal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		// refused is the flag name in the refusal line, or "" when
+		// parsePinArgs must accept the args.
+		refused string
+	}{
+		{name: "accept only", args: []string{"--accept", "srv"}},
+		{name: "accept=srv", args: []string{"--accept=srv"}},
+		{name: "all three flags", args: []string{"--accept", "srv", "--config", "./mcp.json", "--project", "./proj"}},
+		{name: "server name holds the flag name without a dash", args: []string{"--accept", "llm-base-url"}},
+		{name: "server name ends with the flag name", args: []string{"--accept", "my-llm-base-url"}},
+		{name: "known edge: short value inside the --config value", args: []string{"--accept", "srv", "--config=./x-llm-base-url=e"},
+			refused: "config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			a, code, ok := c.parsePinArgs(tt.args)
+
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if tt.refused != "" {
+				if ok || code != exitError {
+					t.Errorf("parsePinArgs() ok = %v, code = %d, want false, %d", ok, code, exitError)
+				}
+				// usageError adds the "Run mcpmoat help" line after it.
+				if got, want := stderr.String(), pinBaseURLRefusal(tt.refused); !strings.HasPrefix(got, want) {
+					t.Errorf("stderr = %q, want it to start with %q", got, want)
+				}
+				return
+			}
+			if !ok || code != exitOK {
+				t.Fatalf("parsePinArgs() ok = %v, code = %d, want true, %d; stderr:\n%s", ok, code, exitOK, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			if a.accept == "" {
+				t.Errorf("accept is empty, want the server name")
+			}
+		})
 	}
 }

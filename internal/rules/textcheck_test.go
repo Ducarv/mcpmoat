@@ -116,7 +116,7 @@ func TestTextAdapters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileHeuristic(%q) error = %v", tt.heuristic, err)
 			}
-			hits := fn(tt.input)
+			hits := fn(prepareText(tt.input))
 			if !tt.wantHit {
 				if len(hits) != 0 {
 					t.Errorf("hits = %+v, want none", hits)
@@ -161,7 +161,7 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileHeuristic(%q) error = %v", tt.heuristic, err)
 			}
-			hits := fn(tt.input)
+			hits := fn(prepareText(tt.input))
 			if len(hits) != 1 {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}
@@ -226,7 +226,7 @@ func TestTextAdaptersNoLeakArgsAndURL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileHeuristic() error = %v", err)
 			}
-			hits := fn(tt.input)
+			hits := fn(prepareText(tt.input))
 			if len(hits) != 1 {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}

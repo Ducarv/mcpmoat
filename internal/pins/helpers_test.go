@@ -11,6 +11,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
+// lockName is the name of the pins lock file next to pins.json.
+const lockName = "pins.json" + lockSuffix
+
 // testSeed is the fixed seed of the test shuffles. Any value works; a fixed
 // one makes a failure reproducible.
 const testSeed = 1

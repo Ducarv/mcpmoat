@@ -1,0 +1,234 @@
+# What mcpmoat does not do
+
+This page lists what mcpmoat does not do, so you know how far to trust a clean scan.
+
+- **It does not guarantee safety.** Rule-based scanning reduces risk. It has false positives (it can
+  flag a safe tool) and false negatives (it can miss a malicious one). Exit code 0 does not mean
+  that the tools are safe.
+- It does not analyse server source code, so it does not find malware inside a server.
+- It does not protect against prompt injection that arrives in content the agent reads (for example
+  a GitHub issue). That is planned for a later phase.
+- `mcpmoat scan` starts each configured stdio server, with the same command your client already
+  runs. mcpmoat uses no shell. The server gets only the env from its config plus a small allowlist
+  of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as
+  you and can read your files and use the network.
+- A server can also echo a configured env value into a tool description, and then that text is
+  stored in `pins.json` as the server sent it. The report masks the value (see below), but
+  `pins.json` (mode `0600`) keeps the raw text.
+- mcpmoat does not start a server from an untrusted project file or a turned-off server, and no flag
+  allows it yet.
+- The description and schema rules read only the description and the input schema of each tool.
+  They do not read the output schema, the title or the annotations of a tool, and they do not read
+  prompts or resources.
+- The shadowing check (tool text that names a tool of another server, to change how the model uses
+  that tool) is not applied yet (#200).
+- `scan --no-connect` gets no tools, so it applies no description or schema rule. When `--rules`
+  has such a rule, `scan` prints `mcpmoat scan: rules from --rules with target description or
+  schema are not applied with --no-connect; these rules need a connection to each server to get
+  its tools` on stderr.
+- `scan` does not apply a rule from `--rules` with the target `config`. It runs only its built-in
+  config checks, and prints `mcpmoat scan: rules from --rules with target config are not applied;
+  scan applies only the built-in config checks` on stderr.
+- The rule analysis has a time limit of 30 seconds for all servers together. Each server gets a
+  fair share of the time that is left, but never more than 5 seconds. A server that uses up its
+  share, or that `scan` does not analyse, gets a `MOAT-T1-023` finding (see
+  [Exit codes](exit-codes.md)), and its tools that were not fully checked can hide a malicious
+  text. `scan` does not analyse a server that it reaches after the limit or with a share under
+  1 ms, or any server after it.
+- The rule analysis step takes at most 30 seconds plus one overshoot. The overshoot is the part of
+  an analysis that cannot stop at its deadline: one build of the match forms of one text (#146)
+  and one regex on one form (the Go `regexp` package has no context). The build takes under about
+  0.2 seconds in the worst case that we measured. The whole overshoot is up to about 1 second on
+  an idle Apple M1 Pro, about 10 seconds with the race detector, and more on a loaded machine.
+  The overshoot uses the shared limit too, so servers early in the order can use up the time of
+  later servers. Those later servers get `MOAT-T1-023`, never a silent pass.
+- A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
+  (high), also a benign text in the wrong encoding. The reason and the example are in
+  [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
+  severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
+  that rule and only `MOAT-T1-017` or `MOAT-T1-018` (high) fires.
+- `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
+  after the ignore list. `scan` keeps the most severe findings, and among findings of the same
+  severity the ones of the first tools, so a server cannot push a severe finding out of the report
+  with many weak ones. It counts the rest but does not list them, and adds one `MOAT-T1-024`
+  finding that says how many it left out. Its severity is the highest severity of the applied rules,
+  and never below high. A `.mcpmoat-ignore` file cannot drop it, and only `--ignore MOAT-T1-024`
+  can (see [Ignore findings](ignore.md)). The scan stays complete, and the exit code follows
+  `--fail-on`. The config findings, the pin findings and the LLM findings are not part of this
+  limit. The number of tools for each server (at most 10,000) bounds the pin findings (at most one
+  for each current tool and one for each removed tool, plus one for the server; the pinned tools
+  come from an earlier scan, so they are at most 10,000 too), and the LLM tool cap of 500 bounds
+  the LLM findings. The number of servers multiplies these bounds.
+- `scan` keeps at most 100 config findings (`MOAT-T4-*` and `MOAT-T5-*`) for each server and
+  10,000 for the whole scan. The config checks make one finding for each env key and each header
+  key that looks like a secret, so without the caps a hostile project `.mcp.json` with many short
+  keys could make a huge report. The caps count the findings after the ignore list. `scan` first
+  keeps the 100 most severe findings of each server. When more than 10,000 are left, it keeps the
+  10,000 most severe of the whole scan: severity first, then servers from your own files before
+  servers from a project file, then the order of the servers, then the order of the findings. A severity that mcpmoat does not know counts as critical. A server that
+  lost findings gets one `MOAT-T4-005` finding: `N more config findings are not listed; limit M`
+  (M is 100, or 10000 when the limit of the whole scan cut that server). It is high, or higher
+  when a finding that it left out is higher. It does not count toward the caps, so the report has
+  at most 10,000 config findings plus one `MOAT-T4-005` finding for each server that lost
+  findings. A `.mcpmoat-ignore` file cannot drop it, so a hostile config cannot hide that findings
+  were cut. Only `--ignore MOAT-T4-005` can. The scan stays complete, and the exit code follows
+  `--fail-on`.
+- The config caps bound the rows and the output. They do not bound the memory that `scan` uses
+  before the cut: it first turns every key into a finding. A 4 MiB project file still costs about
+  200 to 250 MiB of allocations. Measured on an Apple M1 Pro (go1.27.3, no race detector) with a
+  4 MiB project file:
+
+  | Config | Rows | `--json` output | Allocations |
+  |---|---|---|---|
+  | One server, 111,622 env keys | 101 | 71,690 bytes | 210.9 MiB |
+  | One server, 103,453 header keys | 101 | 72,104 bytes | 202.4 MiB |
+  | 921 servers, 110 env keys each | 10,921 | 8,576,786 bytes | 225.8 MiB |
+  | One server, env keys, without the caps | 111,622 | 77.6 MB | 828.9 MiB |
+  | 921 servers, without the caps | 101,310 | 71.2 MB | 762 MiB |
+
+  The terminal output is about 87.6 KB for one server and 9,765,244 bytes for 921 servers (211.5
+  and 251.2 MiB of allocations). Without the caps it was about 86 to 96 MB, with about 1.0 to
+  1.1 GiB of allocations.
+- The size of a config file has a limit: 4 MiB for a project file (`.mcp.json`,
+  `.cursor/mcp.json`) and for a `--config` file, 256 KiB for a Codex TOML file, and 32 MiB for a
+  global JSON file such as `~/.claude.json`, which holds chat history.
+- In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
+  characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
+  when any field was cut. Two server names that differ only after the cut are equal in the JSON,
+  but the `server_index` of each finding and each diff tells such servers apart (see
+  [Scan output](scan-output.md#json-output)). Diffs, commands, URLs and argv are never cut.
+- `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
+  hostile description can try to influence the model. Its findings are advisory, and with `--llm`
+  your tool names and descriptions leave your machine.
+- `--llm` classifies at most 500 tools in one scan, shared fairly between the servers (see
+  [Optional LLM classification](llm.md)). The tools of a server over its share are not
+  classified, and the scan exits with 2. So a hostile server can make a `--llm` scan exit with 2 on
+  purpose, but it cannot use up the share of the other servers.
+- The LLM step of a `--llm` scan stops after 10 minutes, and no flag changes this. A slow or busy
+  provider can use up this time: the tools that are not classified by then give exit code 2.
+- With `--llm-provider openai` and a base URL that is not the default OpenAI API (an
+  OpenAI-compatible server), mcpmoat sets no cap on the output tokens of the model (see
+  [Output cap](llm.md)).
+- A tool that the provider refuses (HTTP 400, 413 or 422) is not classified. It gets a `medium`
+  finding, not a rating. That is below the default `--fail-on high`, so a hostile server that makes
+  the provider refuse its tool descriptions can keep their LLM rating from reaching `high`. When
+  the provider refuses every tool that it answers, the LLM step fails and the scan exits with 2.
+- The report on the terminal and the `--json` output show each configured value that a server
+  echoes in its tool text as `********`: the env values, the header values, the expanded
+  placeholder values, the secrets in the args and the secret URL parts, and the credential pieces
+  inside them, such as one cookie (see [Scan output](scan-output.md), and
+  [What is sent](llm.md) for the pieces). This mask has limits:
+  - A value shorter than 8 bytes is not masked.
+  - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
+    masked. The same is true for a changed letter case: a server that echoes the hex value
+    `deadbeef...` as `DEADBEEF...` is not masked.
+  - The mask compares the text after the JSON decode. A configured value that holds characters
+    that the output escapes (a backslash sequence such as the `\t` and `\n` of the Windows path
+    `C:\tools\new_dir`, a quote, a control character, or a `\uXXXX` written as plain characters)
+    is not found when the server sends the real characters (a tab, a newline). The pin diff or the
+    quoted tool name then shows those characters as escapes, so the value can show again.
+  - A value that a server splits over two JSON strings (for example a key and its value) or over
+    the tool name and the description is not found.
+  - The password of the Oracle form `scott/pw@orcl` in an env value, an expanded value or a header
+    value is not masked alone. Only the whole value is.
+  - The decoded text `name:password` of a `Basic` header value is not masked as a whole. Only the
+    password (8 bytes or more) and the base64 forms are, so the name can show.
+  - The mask uses the values that are configured now. A value that is no longer configured (for
+    example a rotated token) can still show on the pinned side of a pin diff.
+  - The mask of a pin diff can also hide text that is not secret. It uses every env value of 8
+    bytes or more and the plain words that the arg check finds on purpose. So a config value can
+    hide that text from the diff that you read before `pin --accept`. The hash still changes and
+    the rules still read the raw text, so no detection is lost. Only your review of the diff is
+    weaker. A server from an untrusted project file runs only when you opt in.
+  - A numeric secret that a server echoes as a JSON number goes through a float64 in the canonical
+    form before the mask. mcpmoat itself can then round an all-digit value of 16 digits or more,
+    and the rounded number in a pin diff shows most of its digits.
+  - A secret that starts or ends with `*`, or holds a whole `********`, can show again across a
+    `********`.
+  - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
+    masked a value.
+- `--llm` replaces with `********` only the configured values that look like a credential in the
+  tool text that it sends (see [What is sent](llm.md)). The limits of the report mask above apply
+  here too. Also:
+  - A plain config value that a server echoes reaches the provider, for example the env value
+    `production` of `NODE_ENV`, or a password under a key that does not look secret.
+  - A secret in an arg that mcpmoat does not recognise is not removed, for example
+    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`. The password
+    of a positional `admin:pw` or `scott/pw@orcl` is removed only when the whole value looks like
+    a token.
+  - The check fails closed, so some text that is not secret is removed too: a word of 32 bytes or
+    more (also a readable path segment, such as a segment of the macOS `$TMPDIR`), a nix hash, a
+    UUID, or a header value that starts with an auth scheme word, such as `Token count`. The model
+    then sees `********` in its place, and the message has `"redacted": true`.
+  - A tool whose text had a credential removed gets a `medium` finding at least. A config that you
+    do not control can choose which text is removed, for example an env value under a secret-like
+    key that equals an injection phrase in a tool description. The finding is `medium`, not
+    `high`, so the default `--fail-on high` does not fail on it. A phrase under a key that does
+    not look secret is not removed, so the model reads it. The rule findings still read the full
+    text.
+- In the args and inside a config value, mcpmoat reads the value of a pair with a secret-like key
+  whole, also a quoted one (see [What is sent](llm.md)). It does not read these forms whole, so a
+  server that echoes the value alone can show a part of it in the report, and `--llm` can send it:
+  - A quote inside another quoted value (`conn='password="a b"'`).
+  - A value that ends with a backslash in a format with no backslash escapes (ADO.NET
+    `Password="C:\"`).
+  - A JSON `\uXXXX` escape. Only the raw form is kept.
+  - A value on more than one line with no quotes. It ends at the newline.
+  - A key that is not a plain name. Only the run of name bytes before the `=` counts as the key.
+  - A pair inside a quoted value whose own key is not secret-like (`conn='password=a b'`). Its
+    value ends at the next space or `;`, or keeps the closing quote.
+  - The other way, a `NAME=value` arg with a secret-like NAME also gives its first word alone
+    (`correct` of `APP_SEED=correct horse`), so that word can be masked or removed too.
+- When a server fails, mcpmoat removes the configured values and their credential pieces from the
+  failure text. A value or piece shorter than 8 bytes is removed only where it stands as a whole
+  word (see [Placeholders](stdio-servers.md#placeholders)). The limits:
+  - The whole-word rule stops an accidental echo only. A hostile server can glue a letter to a
+    short value (`1234x`) or split it (`1_2_3_4`), and then the value shows.
+  - A common word that is also a short configured value is masked too (with the value `1`,
+    `exit status 1` shows as `exit status ********`). The arg check finds more text than the
+    secrets on purpose, so words such as `unknown` or `2.0` from JSON or `key=value` args, and a
+    short word of a URL query (`eng` of `?workspace=eng`), can be masked too.
+- When you give a wrong argument, every command hides the user info of each URL in the error text
+  (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
+  `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors
+  of `mcpmoat`, `scan` and `pin`, an unknown command name, the `unexpected arguments` error of
+  every command and the `pin --accept <name>` messages. The limits:
+  - `pin` has no `--llm-base-url` flag. When an `--accept`, `--config` or `--project` value holds a
+    `--llm-base-url` value (`--accept --llm-base-url=user:pass@host`), `pin` stops with exit code 2
+    and a fixed message that does not print the value. A very short `--llm-base-url` value that
+    also shows inside one of these values stops `pin` too, also when no secret is in it.
+  - A raw `/`, `?` or `#` in a password ends the user info early, so the password can show. RFC
+    3986 says that a URL must percent-encode these characters in the user info. The value of
+    `--llm-base-url` is still hidden whole.
+  - A value with no scheme is not hidden when it is the value of another flag and no dash comes
+    before the flag name, for example `--timeout=llm-base-url=user:PASS@host`.
+  - The errors about the `--config` and `--project` paths are not scrubbed, because these values
+    are paths, not URLs.
+- The pins lock (the file `pins.json.lock` in the pins directory) is advisory. mcpmoat v0.1.0 does
+  not lock, so a v0.1.0 run in parallel with a newer run can lose an update. A file system that
+  cannot lock (some network mounts) and Windows run without the lock, after one warning.
+- You and root can still hold the pins lock, for example with a process that hangs with the lock
+  file open. Then `scan` and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
+- The owner and mode check covers the pins directory, `pins.json`, the lock file and each parent
+  directory of the pins directory. On macOS it also checks the ACL of each of them. On Windows the
+  owner, mode and parent checks are skipped.
+- The check for a removed `pins.json` looks only at whether the file exists, so it can miss a file
+  that another run removes and creates again (see **New pins file** in [Pins and rug
+  pulls](pins.md)).
+- `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
+  The project servers may use at most 16 MiB of it together, so a hostile project config cannot
+  fill the whole file. But all projects share these 16 MiB, so one hostile project config can use
+  them up, and the servers of other projects are then not pinned. The `projects.<path>` servers of
+  your own `~/.claude.json` count as project servers too, so they are not pinned either. A server
+  that does not fit is reported and not pinned (see **Full pins file** in [Pins and rug
+  pulls](pins.md)).
+- For the detail, see [Pins and rug pulls](pins.md) and [Known
+  limits](ARCHITECTURE.md#the-pinsjson-store).
+
+## See also
+
+- [How mcpmoat starts stdio servers](stdio-servers.md)
+- [Optional LLM classification](llm.md)
+- [Pins and rug pulls](pins.md)
+- [Exit codes](exit-codes.md)
+- [Threat model and non-goals](PRD.md#2-goals-and-non-goals)

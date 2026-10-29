@@ -3,11 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -21,10 +18,10 @@ import (
 )
 
 // This file tests "mcpmoat scan --llm" (FR-17) in process with the real LLM
-// client (llm.New). The client sends its requests to llmAPI, a fake Anthropic
-// Messages API on a loopback httptest server. scan_llm_test.go holds the tests
-// with a fake classifier, and network_test.go uses llmAPI for the no-network
-// proof (NFR-01).
+// client (llm.New). The client sends its requests to fakeProvider
+// (llm_fake_provider_test.go) in its Anthropic flavour. scan_llm_test.go holds
+// the tests with a fake classifier, and network_test.go uses fakeProvider for
+// the no-network proof (NFR-01).
 
 // llmSyncLog is the stdout and the stderr of a cli that a request handler
 // reads while the scan runs. It keeps the writes of both streams in order.
@@ -75,159 +72,6 @@ func (l *llmSyncLog) snapshot() (stdout, stderr string, events []llmEvent) {
 	return l.out.String(), l.err.String(), slices.Clone(l.events)
 }
 
-// llmAPI is a fake Anthropic Messages API on a loopback httptest server. It
-// answers each request with the verdict of llmAnswerFor for the tool in the
-// request, and records each request.
-type llmAPI struct {
-	srv *httptest.Server
-	// host is the host and port of the server.
-	host string
-	// status, when not 0, is the status of every answer.
-	status int
-	// onRequest, when not nil, runs first for each request, in the handler
-	// goroutine.
-	onRequest func()
-
-	// newConns counts the new connections (see countNewConns).
-	newConns *atomic.Int32
-	requests atomic.Int32
-
-	mu      sync.Mutex
-	bodies  [][]byte
-	headers []http.Header
-	paths   []string
-}
-
-// newLLMAPI starts a fake API. Set status and onRequest before the first
-// request.
-func newLLMAPI(t *testing.T) *llmAPI {
-	t.Helper()
-	a := &llmAPI{}
-	a.srv = httptest.NewUnstartedServer(http.HandlerFunc(a.handle))
-	a.newConns = countNewConns(a.srv)
-	a.srv.Start()
-	t.Cleanup(a.srv.Close)
-	a.host = a.srv.Listener.Addr().String()
-	return a
-}
-
-// handle answers one request.
-func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
-	a.requests.Add(1)
-	if a.onRequest != nil {
-		a.onRequest()
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	a.mu.Lock()
-	a.bodies = append(a.bodies, body)
-	a.headers = append(a.headers, r.Header.Clone())
-	a.paths = append(a.paths, r.URL.Path)
-	a.mu.Unlock()
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	if a.status != 0 {
-		w.WriteHeader(a.status)
-		return
-	}
-	in, err := llmRequestInput(body)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	v, verr := llmAnswerFor(in)
-	var se *llm.StatusError
-	switch {
-	case errors.As(verr, &se):
-		w.WriteHeader(se.Code)
-		return
-	case verr != nil:
-		// A refusal: the client reports an invalid answer.
-		writeLLMJSON(w, map[string]any{"stop_reason": "refusal", "content": []any{}})
-		return
-	}
-	writeLLMVerdict(w, v)
-}
-
-// writeLLMJSON writes v as a JSON answer.
-func writeLLMJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeLLMVerdict writes the answer of the Anthropic Messages API for the
-// verdict v: one tool_use block named classify, whose input is the risk and
-// the category of v. llmAPI and the fake provider of the E2E tests
-// (e2e_network_test.go) both use it.
-func writeLLMVerdict(w http.ResponseWriter, v llm.Verdict) {
-	writeLLMJSON(w, map[string]any{
-		"id":          "msg_test",
-		"type":        "message",
-		"role":        "assistant",
-		"model":       "claude-test",
-		"stop_reason": "tool_use",
-		"content": []any{map[string]any{
-			"type":  "tool_use",
-			"id":    "toolu_test",
-			"name":  "classify",
-			"input": map[string]string{"risk": string(v.Risk), "category": string(v.Category)},
-		}},
-		"usage": map[string]int{"input_tokens": 1, "output_tokens": 1},
-	})
-}
-
-// llmToolPayload is the user message of a request. Its fields are all the
-// keys that the client may send. The E2E tests (e2e_network_test.go) read it
-// too.
-type llmToolPayload struct {
-	ToolName        string `json:"tool_name"`
-	ToolDescription string `json:"tool_description"`
-	Truncated       bool   `json:"truncated"`
-}
-
-// llmRequestPayload decodes the tool message of an Anthropic Messages request
-// body. The body must have exactly one message, from the user, and the
-// message must have only the keys of llmToolPayload.
-func llmRequestPayload(body []byte) (llmToolPayload, error) {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return llmToolPayload{}, err
-	}
-	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
-		return llmToolPayload{}, errors.New("want one user message")
-	}
-	dec := json.NewDecoder(strings.NewReader(req.Messages[0].Content))
-	dec.DisallowUnknownFields()
-	var p llmToolPayload
-	if err := dec.Decode(&p); err != nil {
-		return llmToolPayload{}, err
-	}
-	return p, nil
-}
-
-// llmRequestInput is llmRequestPayload as an llm.Input: the name and the
-// description of the tool.
-func llmRequestInput(body []byte) (llm.Input, error) {
-	p, err := llmRequestPayload(body)
-	if err != nil {
-		return llm.Input{}, err
-	}
-	return llm.Input{ToolName: p.ToolName, Description: p.ToolDescription}, nil
-}
-
-// snapshot returns copies of the recorded bodies, headers and paths.
-func (a *llmAPI) snapshot() (bodies [][]byte, headers []http.Header, paths []string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.bodies), slices.Clone(a.headers), slices.Clone(a.paths)
-}
-
 // TestScanLLMRealClient runs scan --llm with the real client against a fake
 // API on a loopback server. It checks that the warning is printed before the
 // configs are read, before the client is built and before the first request
@@ -267,7 +111,7 @@ func TestScanLLMRealClient(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			api := newLLMAPI(t)
+			api := newFakeProvider(t, llm.ProviderAnthropic)
 			api.status = tt.status
 			warning := llmWarning("anthropic", api.host)
 			log := &llmSyncLog{}
@@ -316,10 +160,31 @@ func TestScanLLMRealClient(t *testing.T) {
 			if builds.Load() != 1 {
 				t.Errorf("newClassifier calls = %d, want 1", builds.Load())
 			}
-			// One request for each tool. The first failed request stops the
-			// step, so with HTTP 503 the second request may never start.
-			if n := api.requests.Load(); n != 2 && (tt.status == 0 || n != 1) {
-				t.Errorf("the API got %d requests, want 2 (one per tool; 1 is also fine after a failure)", n)
+			// One request for each tool. With HTTP 503 the client tries each
+			// tool 3 times in total (the fake sends "Retry-After: 0"). The
+			// tool whose last try fails first stops the step, so it got
+			// exactly 3 requests, and the other tool got 0 to 3: its
+			// requests that the stop cancelled can end before they reach
+			// the fake.
+			reqs := api.snapshot()
+			perTool := api.perTool()
+			if tt.status == 0 {
+				if want := map[string]int{"t1": 1, "t2": 1}; !maps.Equal(perTool, want) {
+					t.Errorf("requests for each tool = %v, want %v", perTool, want)
+				}
+			} else {
+				full := 0
+				for name, n := range perTool {
+					if n > llm.RetryMaxTries {
+						t.Errorf("tool %s got %d requests, want at most %d", name, n, llm.RetryMaxTries)
+					}
+					if n == llm.RetryMaxTries {
+						full++
+					}
+				}
+				if full == 0 {
+					t.Errorf("requests for each tool = %v, want one tool with %d (the retries of the failed tool)", perTool, llm.RetryMaxTries)
+				}
 			}
 			// The warning is the first line on stderr, it shows once, and no
 			// stdout write comes before it.
@@ -355,41 +220,39 @@ func TestScanLLMRealClient(t *testing.T) {
 			llmAssertNoKey(t, llmTestKey, stdout, stderr)
 			assertNoLeakBoth(t, stdout, stderr)
 
-			bodies, headers, paths := api.snapshot()
 			var got []llm.Input
-			for i, body := range bodies {
-				if paths[i] != "/v1/messages" {
-					t.Errorf("request path = %q, want /v1/messages", paths[i])
+			for i, req := range reqs {
+				if req.path != "/v1/messages" {
+					t.Errorf("request path = %q, want /v1/messages", req.path)
 				}
-				if headers[i].Get("x-api-key") != llmTestKey {
+				if req.header.Get("x-api-key") != llmTestKey {
 					t.Errorf("request %d has no x-api-key header with the key", i)
 				}
-				for name, values := range headers[i] {
+				for name, values := range req.header {
 					if name == "X-Api-Key" {
 						continue
 					}
 					llmAssertNoKey(t, llmTestKey, strings.Join(values, ","))
 				}
-				llmAssertNoKey(t, llmTestKey, string(body))
+				llmAssertNoKey(t, llmTestKey, string(req.body))
 				for _, c := range canaries {
-					if bytes.Contains(body, []byte(c)) {
+					if bytes.Contains(req.body, []byte(c)) {
 						t.Errorf("request %d body holds the canary %q", i, c)
 					}
 				}
-				in, err := llmRequestInput(body)
-				if err != nil {
-					t.Errorf("request %d: %v\nbody: %s", i, err, body)
+				if req.err != nil {
+					t.Errorf("request %d: %v\nbody: %s", i, req.err, req.body)
 					continue
 				}
-				got = append(got, in)
+				got = append(got, req.payload.input())
 			}
 			slices.SortFunc(got, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
 			want := []llm.Input{{ToolName: "t1", Description: "Read keys. " + llmMarkHigh}, {ToolName: "t2", Description: "Add two numbers."}}
-			if tt.status == 0 && !slices.Equal(got, want) {
+			if tt.status == 0 && !slices.EqualFunc(got, want, llmSameInput) {
 				t.Errorf("tool messages = %+v, want %+v", got, want)
 			}
 			for _, in := range got {
-				if !slices.Contains(want, in) {
+				if !slices.ContainsFunc(want, func(w llm.Input) bool { return llmSameInput(w, in) }) {
 					t.Errorf("tool message %+v is not one of %+v", in, want)
 				}
 			}
@@ -405,7 +268,7 @@ func TestScanLLMRealClient(t *testing.T) {
 func TestScanLLMRealClientTruncated(t *testing.T) {
 	t.Parallel()
 
-	api := newLLMAPI(t)
+	api := newFakeProvider(t, llm.ProviderAnthropic)
 	cl, err := newLLMClassifier(llm.Config{Provider: llm.ProviderAnthropic, BaseURL: api.srv.URL, APIKey: discover.NewSecret(llmTestKey)})
 	if err != nil {
 		t.Fatalf("newLLMClassifier() error = %v", err)
@@ -425,18 +288,31 @@ func TestScanLLMRealClientTruncated(t *testing.T) {
 	if f := llmRows[0]; f.Risk != llm.TruncatedText || f.Tool != "t1 (other)" {
 		t.Errorf("t1 Risk, Tool = %q, %q; want %q, %q", f.Risk, f.Tool, llm.TruncatedText, "t1 (other)")
 	}
-	bodies, _, _ := api.snapshot()
 	truncated := map[string]bool{}
-	for _, body := range bodies {
-		p, err := llmRequestPayload(body)
-		if err != nil {
-			t.Fatalf("request: %v", err)
+	for _, req := range api.snapshot() {
+		if req.err != nil {
+			t.Fatalf("request: %v", req.err)
 		}
-		truncated[p.ToolName] = p.Truncated
+		truncated[req.payload.ToolName] = req.payload.Truncated
 	}
 	if want := map[string]bool{"t1": true, "t2": false}; !maps.Equal(truncated, want) {
 		t.Errorf("truncated of each request = %v, want %v", truncated, want)
 	}
+}
+
+// llmRetryCodes are the HTTP status codes that the client of package llm
+// tries again: 429, 502, 503, 504 and 529 (the overload code of the Anthropic
+// API, which net/http has no name for). It is the one list of these codes in
+// the tests of this package. For such a code the client sends at most
+// llm.RetryMaxTries requests for one tool (the first request and 2 retries);
+// the tests use that constant, and TestRetryPolicyDefaults in internal/llm
+// pins its value.
+var llmRetryCodes = []int{
+	http.StatusTooManyRequests,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+	529,
 }
 
 // llmJSONOrTerminalRows returns the LLM findings of stdout, from the JSON

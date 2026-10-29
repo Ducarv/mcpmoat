@@ -495,6 +495,47 @@ var dangerousCanaries = []string{
 	"Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3",
 }
 
+// secretPartLen is the length of the shortest part of a secret that
+// secretPartLeak looks for.
+const secretPartLen = 8
+
+// secretPartLeak returns the first part of secret of secretPartLen bytes that
+// out holds, and true. It returns false when out holds no such part.
+func secretPartLeak(secret, out string) (string, bool) {
+	for i := 0; i+secretPartLen <= len(secret); i++ {
+		if strings.Contains(out, secret[i:i+secretPartLen]) {
+			return secret[i : i+secretPartLen], true
+		}
+	}
+	return "", false
+}
+
+// TestSecretPartLeak checks the leak helper itself: it must find the whole
+// secret and a part of it, and pass text without it.
+func TestSecretPartLeak(t *testing.T) {
+	t.Parallel()
+
+	secret := dangerousCanaries[1]
+	tests := []struct {
+		name string
+		out  string
+		leak bool
+	}{
+		{"clean", "mcpmoat scan: warning: x", false},
+		{"whole secret", "token=" + secret, true},
+		{"part of the secret", "..." + secret[5:15] + "...", true},
+		{"short part", secret[:7], false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, leak := secretPartLeak(secret, tt.out); leak != tt.leak {
+				t.Errorf("secretPartLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
+			}
+		})
+	}
+}
+
 // configModes are the two ways a test gives scan its config: "auto"
 // (auto-discovery in the home folder) and "config" (--config on one file).
 var configModes = []string{"auto", "config"}
@@ -808,15 +849,31 @@ func relativePathCases() []relativePathCase {
 // path and the path of its marker file. The script creates the marker file
 // when it runs, so a test can prove that a configured command never started.
 // The script is executable, so a start would really work. It needs a Unix
-// shell.
+// shell. The script quotes the marker path, so a dir with a single quote
+// fails the test.
 func writeMarkerScript(t *testing.T, dir string) (script, marker string) {
 	t.Helper()
 	marker = filepath.Join(dir, "marker")
+	if strings.Contains(marker, "'") {
+		t.Fatalf("marker path %q holds a single quote, which the script cannot quote", marker)
+	}
 	script = filepath.Join(dir, "server.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
 		t.Fatal(err)
 	}
 	return script, marker
+}
+
+// assertMarker checks whether the marker file of writeMarkerScript exists.
+func assertMarker(t *testing.T, marker string, want bool) {
+	t.Helper()
+	_, err := os.Stat(marker)
+	switch {
+	case want && err != nil:
+		t.Errorf("marker file is missing (err = %v): the server did not start", err)
+	case !want && !errors.Is(err, fs.ErrNotExist):
+		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
+	}
 }
 
 // symlink makes link point to target. It creates the parent directory of
@@ -925,6 +982,13 @@ const scanPrefix = "mcpmoat scan: "
 // scanWarnPrefix is the start of every scan warning line.
 const scanWarnPrefix = scanPrefix + "warning: "
 
+// fileCannotIgnoreWarning returns the stderr line (without the end of line)
+// that scan prints when a .mcpmoat-ignore entry matches a finding of the rule
+// id but is not applied (see fileCannotIgnore).
+func fileCannotIgnoreWarning(id string) string {
+	return scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + id + "; use --ignore on the command line"
+}
+
 // writeFileOrSkip writes content to dir/name. The file system may refuse a file
 // name (a name with a control rune, for example). That is not a failure of
 // mcpmoat, so the test skips.
@@ -975,11 +1039,11 @@ const maxFloodLines = 101
 // show that the loader stopped early.
 const floodGuard = 30 * time.Second
 
-// assertFast fails the test when more than floodGuard has passed since start.
-func assertFast(t *testing.T, start time.Time) {
+// assertFast fails the test when more than limit has passed since start.
+func assertFast(t *testing.T, start time.Time, limit time.Duration) {
 	t.Helper()
-	if d := time.Since(start); d > floodGuard {
-		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	if d := time.Since(start); d > limit {
+		t.Errorf("the run took %v, want less than %v", d, limit)
 	}
 }
 

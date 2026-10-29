@@ -1,0 +1,80 @@
+name: govulncheck
+
+# GitHub reads a schedule only from the file on the default branch (dev).
+# This job checks out main, the released code. For the failure notice and the
+# 60-day rule, see docs/releasing.md, Weekly vulnerability check.
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Monday 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No cache here, so a cache from another workflow cannot change the scan.
+          cache: false
+
+      - name: Check for known vulnerabilities
+        env:
+          # Dependabot does not bump this version string. The ci-scripts
+          # job in ci.yml checks that ci.yml and release.yml pin the same
+          # version.
+          GOVULNCHECK_VERSION: v1.9.0
+        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
+
+  # A failed scan sends a notice only to the maintainer who last edited the
+  # cron line. This job opens one issue, or adds a comment to it, so everyone
+  # sees the failure. It is a separate job so that the scan job keeps
+  # contents: read and gets no write permission. It needs no checkout.
+  notify-failure:
+    needs: govulncheck
+    # A scan that hits its timeout may end as cancelled, not failure. Both
+    # count as a failed check. internal/pincheck and notify-failure-test.sh
+    # match the next value exactly. Change all three together.
+    if: failure() || needs.govulncheck.result == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    # One fixed group, and no cancel, so that two runs cannot make two issues.
+    # GitHub keeps one pending job per group. If three runs fail close
+    # together, the middle notice is lost. The red runs still show.
+    concurrency:
+      group: weekly-vulnerability-check-issue
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Open or update the failure issue
+        run: |
+          set -euo pipefail
+          title="Weekly vulnerability check failed"
+          label=security
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # A list call, not a search, so a new issue shows at once. jq filters the
+          # title, so the test can use a simple fake gh.
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --label "$label" --state open --limit 200 --json number,title |
+            jq -r --arg t "$title" 'first(.[] | select(.title == $t) | .number) // empty')
+          if [ -z "$number" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label "$label" \
+              --body "The weekly vulnerability check failed or was cancelled. Open the run to read the failure: $run_url. This job does not report a disabled schedule."
+          else
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" \
+              --body "The weekly vulnerability check failed or was cancelled again. Run: $run_url"
+          fi

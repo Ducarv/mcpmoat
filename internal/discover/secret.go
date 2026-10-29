@@ -12,6 +12,12 @@ import (
 // Mask is the text that replaces a secret value in all output.
 const Mask = "********"
 
+// MinSecretBytes is the length of the shortest value that Result.Secrets
+// and the tool-text redaction of internal/llm keep. The scrub of error text
+// in internal/inspect uses it too. A shorter value (such as "1" or "true")
+// matches ordinary words, so removing it would hide those words.
+const MinSecretBytes = 8
+
 // The build fails if Secret stops implementing one of these interfaces.
 var (
 	_ fmt.Formatter            = Secret{}

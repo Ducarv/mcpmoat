@@ -306,6 +306,136 @@ func SecretQueryParts(rawQuery string) []string {
 	return parts
 }
 
+// maskedURLParts returns the parts of raw that RedactURL masks, for
+// ArgSecrets, when RedactURL does not mask raw whole:
+//
+//   - the user info as written; the password as written and unescaped; and
+//     the name as written and unescaped when IsSecretUserName reports true
+//     for it: when there is no password, as in https://<token>@host/, or
+//     when the name looks like a token, as in
+//     https://<token>:x-oauth-basic@github.com/ (a name next to a password
+//     is often a plain word);
+//   - SecretPathSegments and SecretQueryParts;
+//   - the fragment as written and unescaped.
+//
+// Each part is not empty. It returns nil when raw does not parse.
+func maskedURLParts(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var parts []string
+	if u.User != nil {
+		info := RawUserinfo(raw)
+		parts = appendForms(parts, info, "")
+		name, password, _ := strings.Cut(info, ":")
+		plainPassword, _ := u.User.Password()
+		parts = append(parts, userinfoSecrets(name, password, u.User.Username(), plainPassword)...)
+	}
+	parts = append(parts, SecretPathSegments(raw)...)
+	parts = append(parts, SecretQueryParts(u.RawQuery)...)
+	if _, fragment, found := strings.Cut(raw, "#"); found {
+		parts = appendForms(parts, fragment, u.Fragment)
+	}
+	return parts
+}
+
+// appendForms appends written and plain to parts. written is a part as it
+// is in the URL. plain is its unescaped form. Each one is added when it is
+// not empty, and plain is not added again when it equals written.
+func appendForms(parts []string, written, plain string) []string {
+	if written != "" {
+		parts = append(parts, written)
+	}
+	if plain != "" && plain != written {
+		parts = append(parts, plain)
+	}
+	return parts
+}
+
+// userinfoSecrets returns the secret parts of a user info: the password, and
+// the user name when IsSecretUserName says it is a secret. name and password
+// are the user info as written in the URL, and plainName and plainPassword
+// are the unescaped forms (see appendForms).
+func userinfoSecrets(name, password, plainName, plainPassword string) []string {
+	parts := appendForms(nil, password, plainPassword)
+	if IsSecretUserName(plainName, plainPassword) {
+		parts = appendForms(parts, name, plainName)
+	}
+	return parts
+}
+
+// wholeURLParts returns the inner parts of raw, a text with "://" or "//"
+// that RedactURL masks whole, for ArgSecrets. RedactURL masks such a text
+// whole when the scheme is not on its list ("jdbc:postgresql://h/db?...") or
+// when it cannot show the URL safely, so ArgSecrets keeps the whole text.
+// A server can echo a password or a query value alone, so this is a best
+// effort to find them: it cuts raw at its first "//" and gives the parts of
+// the rest that maskedURLParts gives for a URL with no scheme. When the rest
+// does not parse, it gives the user info as written, found as url.Parse
+// would find it (see RawUserinfo), its password and, by the rule of
+// IsSecretUserName, its name. It over-matches at worst: raw is masked
+// already. It returns nil when raw has no "//" or no such part.
+func wholeURLParts(raw string) []string {
+	i := strings.Index(raw, "//")
+	if i < 0 {
+		return nil
+	}
+	rest := raw[i:]
+	if parts := maskedURLParts(rest); parts != nil {
+		return parts
+	}
+	info := RawUserinfo(rest)
+	if info == "" {
+		return nil
+	}
+	name, password, _ := strings.Cut(info, ":")
+	return append([]string{info}, userinfoSecrets(name, password, name, password)...)
+}
+
+// IsSecretUserName reports whether name, the unescaped user name of a URL or
+// of a Basic credential with the unescaped password, is a secret by itself,
+// and not only a plain word next to the password. That is so when password
+// is empty, as in https://<token>@host/, because then the name is the
+// credential. With a password, it is so when name looks like a token: by
+// the RedactArgs rules (a known token prefix such as "ghp_", or a long
+// random-looking word), or when name has MinSecretBytes or more bytes
+// and holds a digit. GitHub documents
+// https://<token>:x-oauth-basic@github.com/ for a token in the name.
+//
+// A caller that removes the name from other text applies its own length
+// floor. It never prints or stores name or password. It is exported so that
+// ArgSecrets and the error scrub of internal/inspect agree on the rule.
+func IsSecretUserName(name, password string) bool {
+	if password == "" || containsToken(name) {
+		return true
+	}
+	return len(name) >= MinSecretBytes && strings.ContainsAny(name, "0123456789")
+}
+
+// RawUserinfo returns the user info of raw as written, the text between "//"
+// and the last "@" of the authority, without the "@", or "" when there is
+// none. It finds the authority as url.Parse does: after the first "//" (a
+// scheme has no "/"), up to the first "/", "?" or "#". It works on text that
+// does not parse too. The result can hold a raw secret: never print, log or
+// store it. It is exported so that the redaction and the error scrub of
+// internal/inspect read the user info in the same way. hideUserinfo in
+// cmd/mcpmoat/argscrub.go applies the same rule to text inside an argument.
+func RawUserinfo(raw string) string {
+	_, authority, found := strings.Cut(raw, "//")
+	if !found {
+		return ""
+	}
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return ""
+	}
+	return authority[:at]
+}
+
 // isSecretPathSegment reports whether seg, one escaped path segment with no
 // ";" part, must be masked. It fails closed: a segment that does not
 // unescape, or whose unescaped form has "=", "," or ";", is masked.

@@ -33,7 +33,7 @@ const (
 	wnPassword    = "pa55word-SECRET"
 	wnQueryValue  = "qu3ry-tok-SECRET"
 	wnPathSegment = "9f1c2b7e-0a4d-4e8b-b3c6-5d7e8f901234" // a UUID segment is a secret
-	// wnShortValue is shorter than minBareSecretLen. classify keeps such a
+	// wnShortValue is shorter than discover.MinSecretBytes. classify keeps such a
 	// value in error text, but the warning must still count it.
 	wnShortValue = "hunt3r"
 )
@@ -157,7 +157,7 @@ func TestCleartextWarnings(t *testing.T) {
 			want:   []Warning{{Kind: WarnCleartextSecrets, URLSecrets: true}},
 		},
 		{
-			// urlSecrets drops values shorter than minBareSecretLen; the
+			// urlSecrets drops values shorter than discover.MinSecretBytes; the
 			// warning must not.
 			name:   "http non-loopback with a short query value",
 			rawURL: "http://mcp.example.com/mcp?pw=" + wnShortValue,

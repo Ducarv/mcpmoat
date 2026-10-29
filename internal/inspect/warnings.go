@@ -70,8 +70,8 @@ func cleartextWarnings(srv discover.Server, u *url.URL) []Warning {
 // URL can leak into a Warning.
 //
 // It does not use urlSecrets, which drops the parts shorter than
-// minBareSecretLen. That length limit keeps classify from removing short,
-// common words from error text. For the warning, a short password in the
+// discover.MinSecretBytes. That length limit keeps classify from removing
+// short, common words from error text. For the warning, a short password in the
 // query still goes out in clear text, so every part counts. RedactURL masks
 // every query value, so a query such as "?page=1" gets the warning too. This
 // errs on the safe side: mcpmoat cannot tell a harmless value from a short

@@ -225,7 +225,7 @@ func TestHeuristicMixedScript(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compileHeuristic(%v) error = %v", tt.params, err)
 			}
-			if got := fn(text); !slices.Equal(got, tt.want) {
+			if got := fn(prepareText(text)); !slices.Equal(got, tt.want) {
 				t.Errorf("params %v: fn() = %v, want %v", tt.params, got, tt.want)
 			}
 		}
@@ -543,7 +543,8 @@ func TestEdgeLookalikes(t *testing.T) {
 	t.Parallel()
 	table := edgeLookalikes[:]
 	// A new version of TR39 or of the Unicode tables can change the count:
-	// make the list again.
+	// make the list again with TestGenTables (see the comment of
+	// edgeLookalikes) and update edgeLookalikesSize.
 	if len(table) != edgeLookalikesSize {
 		t.Errorf("len(edgeLookalikes) = %d, want %d (TR39 %s, Unicode %s)", len(table), edgeLookalikesSize, confusablesVersion, scriptTablesVersion)
 	}

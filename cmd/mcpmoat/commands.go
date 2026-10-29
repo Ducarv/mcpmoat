@@ -10,7 +10,7 @@ import (
 
 // runVersion implements "mcpmoat version".
 func (c *cli) runVersion(_ options, args []string) int {
-	if c.rejectArgs("version", args) {
+	if c.rejectArgs("version", newBaseURLHider(args), args) {
 		return exitError
 	}
 	fprintf(c.stdout, "%s\n", c.build)
@@ -19,23 +19,29 @@ func (c *cli) runVersion(_ options, args []string) int {
 
 // runHelp implements "mcpmoat help".
 func (c *cli) runHelp(_ options, args []string) int {
-	if c.rejectArgs("help", args) {
+	if c.rejectArgs("help", newBaseURLHider(args), args) {
 		return exitError
 	}
 	c.usage(c.stdout)
 	return exitOK
 }
 
-// rejectArgs is for commands that take no arguments. If args is not empty, it
-// prints an error to stderr and returns true. The arguments come from the
-// user, so each one goes through quoteArg to stop terminal escape injection.
-func (c *cli) rejectArgs(name string, args []string) bool {
+// rejectArgs is for the arguments that a command does not take. If args is
+// not empty, it prints an error to stderr and returns true. The arguments come
+// from the user, so each one goes through quoteArg to stop terminal escape
+// injection. Before that, h.errorText hides it: h is the argHider of the full
+// argument list of the command (newBaseURLHider(args)), so a
+// --llm-base-url value does not show, also one without a scheme such as
+// "user:pass@host", and neither does the user info of any URL, as in a stray
+// "https://user:pass@host" (see argscrub.go). Every command uses this one
+// rule.
+func (c *cli) rejectArgs(name string, h argHider, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	quoted := make([]string, len(args))
 	for i, a := range args {
-		quoted[i] = quoteArg(a)
+		quoted[i] = quoteArg(h.errorText(a))
 	}
 	c.usageError(name, "unexpected arguments [%s]", strings.Join(quoted, " "))
 	return true

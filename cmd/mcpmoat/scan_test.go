@@ -489,7 +489,8 @@ func (i slowInspector) Inspect(ctx context.Context, s discover.Server) (inspect.
 // with one server of each outcome: "ok" with its tools and a cleartext-secrets
 // warning (the header key only), "timeout" and "failed". The status and the
 // warnings are part of the SUMMARY on stdout. They are no warning lines on
-// stderr any more: stderr holds only the "pinned" notice of the first run.
+// stderr any more: stderr holds only the new pins file notice and the
+// "pinned" notice of the first run.
 func TestScanConnectStatusGolden(t *testing.T) {
 	t.Parallel()
 
@@ -525,8 +526,13 @@ func TestScanConnectStatusGolden(t *testing.T) {
 	if code != exitFindings {
 		t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, out, errOut)
 	}
-	assertStderrLines(t, errOut, []lineWant{exactLine("mcpmoat scan: pinned 2 tools for web")})
-	assertContainsNone(t, "stderr", errOut, []string{"warning", "timeout", "refused", "cleartext"})
+	pinsPath := filepath.Join(xdg, "mcpmoat", "pins.json")
+	assertStderrLines(t, errOut, []lineWant{
+		exactLine(newPinsNoticeLine("scan", pinsPath)),
+		exactLine("mcpmoat scan: pinned 2 tools for web"),
+	})
+	// Check the words without the notice line: it holds a temp path.
+	assertContainsNone(t, "stderr", withoutPinsFileNotice(t, errOut, "scan", pinsPath), []string{"warning", "timeout", "refused", "cleartext"})
 	assertContainsNone(t, "stdout", out, []string{fakeHeader})
 	assertNoLeakBoth(t, out, errOut)
 	assertNoEscape(t, out, errOut)
@@ -1014,9 +1020,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 		}
 	}
 	if marker != "" {
-		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("marker file exists or cannot be checked (err = %v): the script ran", err)
-		}
+		assertMarker(t, marker, false)
 	}
 }
 
@@ -1339,9 +1343,7 @@ func TestScanFindingsExitCodes(t *testing.T) {
 			code:   exitError,
 			stderr: []string{"mcpmoat scan: cannot write output"},
 		})
-		if got := column(tableRows(t, table.String()), 0); !slices.Equal(got, []string{"leaky"}) {
-			t.Errorf("table servers = %v, want [leaky]\ntable:\n%s", got, table.String())
-		}
+		assertServerNames(t, table.String(), "leaky")
 		// The summary came before the findings, so it was written.
 		if got := summaryRows(t, table.String()); len(got) != 1 || got[0].Name != "leaky" || got[0].Findings != 1 {
 			t.Errorf("summary = %+v, want one row for leaky with 1 finding\ntable:\n%s", got, table.String())

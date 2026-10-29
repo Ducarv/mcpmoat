@@ -47,6 +47,33 @@ func sdkReadPID(t *testing.T, path string) int {
 	return pid
 }
 
+// sdkPathSecrets returns the segments of paths that discover.RedactArgs
+// masks. A stdio Result.Secrets holds the argv secrets (see
+// discover.ArgSecrets), so it also holds such segments of the fixture path
+// and of the t.TempDir paths in the args: the random names of the temp
+// directories, and on macOS a segment of $TMPDIR. They depend on the machine,
+// so a test cannot write them by hand. This helper reads the masks from the
+// RedactArgs output, segment by segment, and does not call ArgSecrets, so a
+// bug in what ArgSecrets collects cannot hide in the want. inspect.WantSecrets
+// drops the short ones.
+func sdkPathSecrets(t *testing.T, paths ...string) []string {
+	t.Helper()
+	var segments []string
+	for _, p := range paths {
+		in := strings.Split(p, "/")
+		out := strings.Split(discover.RedactArgs([]string{p})[0], "/")
+		if len(in) != len(out) {
+			t.Fatalf("RedactArgs masks the test path %q as %q, want only whole segments masked", p, out)
+		}
+		for i, seg := range in {
+			if out[i] == discover.Mask && seg != discover.Mask {
+				segments = append(segments, seg)
+			}
+		}
+	}
+	return segments
+}
+
 // sdkBenign returns a stdio server that runs the benign fixture with args.
 func sdkBenign(t *testing.T, args ...string) discover.Server {
 	t.Helper()

@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime/debug"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
@@ -18,13 +19,19 @@ import (
 )
 
 // Exit codes (PRD FR-16): 0 no finding that is not ignored at or above
-// --fail-on, 1 such a finding, 2 execution or usage error. README.md#exit-codes
+// --fail-on, 1 such a finding, 2 execution or usage error. docs/exit-codes.md
 // is the exact contract.
 const (
 	exitOK       = 0 // success; for scan: no finding that counts for --fail-on
 	exitFindings = 1 // a finding that is not ignored has severity at or above --fail-on (default high)
 	exitError    = 2 // execution or usage error
 )
+
+// defaultPinsLockWait is the time that scan and pin --accept wait for the pins
+// lock (pins.json.lock) in a real run (see cli.pinsLockWait). Another run
+// holds the lock only while it reads, changes and saves pins.json, so a short
+// wait is enough.
+const defaultPinsLockWait = 10 * time.Second
 
 // options holds the resolved global flags. The cli passes it explicitly to
 // each command, so commands never read global state.
@@ -59,6 +66,38 @@ type cli struct {
 	// without the flag no LLM code runs (NFR-01). Tests inject a fake, or a
 	// stub that fails to prove that it is never called.
 	newClassifier func(llm.Config) (toolClassifier, error)
+	// toolBudget is the time that the tool rule step of scan can use for the
+	// tools of one server. Zero means the default, toolRulesBudget, so
+	// runWithContext does not set it. A negative value is used up at once
+	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
+	// not enough, because the context can still be live for a short time.
+	toolBudget time.Duration
+	// llmStepTimeout is the time limit of the whole LLM step of scan --llm
+	// (FR-17). Zero means the default, the constant defaultLLMStepTimeout, so
+	// runWithContext does not set it and no flag changes it. Tests set a
+	// short value to reach the limit (see runLLMJobs). A negative value is
+	// used up at once: no request starts.
+	llmStepTimeout time.Duration
+	// pinsLockWait is how long scan and pin --accept wait for another run that
+	// holds the pins lock (pins.json.lock), before they stop with exit code 2
+	// (see readPinsLocked). runWithContext sets it to defaultPinsLockWait.
+	// Tests that build a cli directly keep the zero value: try once, no wait.
+	pinsLockWait time.Duration
+	// maxToolRows is the largest number of tool finding rows that scan keeps
+	// for one server. Zero means the default, maxToolRowsPerServer, so
+	// runWithContext does not set it. Tests set a small value, so that they
+	// do not need a thousand findings. Use the maxToolRowsOrDefault method.
+	maxToolRows int
+	// maxConfigRows is the largest number of config finding rows that scan
+	// keeps for one server. Zero means the default (configRowsPerServer), so runWithContext
+	// does not set it. Tests set a small value, so that they do not need a
+	// hundred findings. The cap for the whole scan is fixed and has no hook.
+	maxConfigRows int
+	// toolStepBudget is the time limit of the whole tool rule step of scan,
+	// for all servers together. Zero means the default
+	// (toolRulesStepBudget), so runWithContext does not set it. toolBudget is the limit for one server
+	// inside this step. Tests set a short value to reach the limit.
+	toolStepBudget time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -106,6 +145,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		inspector: inspect.New(inspect.SDKOptions{HiddenEnv: []string{llm.KeyEnv}}),
 		// Called only by scan --llm. It sends no request.
 		newClassifier: newLLMClassifier,
+		pinsLockWait:  defaultPinsLockWait,
 	}
 	// Decide from the writer that the report goes to, not from os.Stdout. A
 	// writer that is not a file (a buffer, a pipe wrapper) is never a terminal.
@@ -153,8 +193,10 @@ func (c *cli) dispatch(args []string) int {
 		// termsafe.Quote escapes the whole message: it stays as it is when it
 		// is safe, and it shows quoted only when it holds an unsafe rune.
 		// quoteArg, for an argument that we hold on its own, always quotes.
-		// scan.go does the same for the scan flags.
-		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(err.Error()))
+		// scan.go does the same for the scan flags. The error can hold a
+		// secret, as in "---llm-base-url=https://user:pass@host", so
+		// argErrorText hides it first (see argscrub.go).
+		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(argErrorText(args, err.Error())))
 		c.usage(c.stderr)
 		return exitError
 	}
@@ -171,8 +213,10 @@ func (c *cli) dispatch(args []string) int {
 		}
 	}
 
-	// The command name comes from the user, so quoteArg escapes it.
-	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(name))
+	// The command name comes from the user, so quoteArg escapes it, and
+	// argErrorText first hides a secret in it, as in a stray URL with a
+	// password.
+	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(argErrorText(args, name)))
 	c.usage(c.stderr)
 	return exitError
 }
@@ -233,7 +277,7 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  0  no finding that is not ignored at or above --fail-on\n")
 	fprintf(w, "  1  a finding that is not ignored at or above --fail-on (default high)\n")
 	fprintf(w, "  2  execution or usage error, also when there are findings\n")
-	fprintf(w, "     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n")
+	fprintf(w, "     (https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/exit-codes.md lists the causes and when the report still prints)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -247,7 +291,8 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
 	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
 	fprintf(tw, "  --rules <dir>\tLoad extra *.yaml and *.yml rules from this folder (not recursive)\n")
-	fprintf(tw, "  \tA folder with no rule file, or a rule ID that clashes with a built-in rule, is an error\n")
+	fprintf(tw, "  \tA folder with no rule file, a rule ID that clashes with a built-in rule, or a reserved native rule ID is an error\n")
+	fprintf(tw, "  \tRules with target description or schema apply to the tools. Rules with target config are not applied\n")
 	fprintf(tw, "  --timeout <duration>\tTime limit for each server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
@@ -259,8 +304,11 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  \tstdout is empty when the scan stops before the report (exit 2)\n")
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
-	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  --%s\tAlso ignore the findings that the %s file in the working directory lists. Off by default\n", flagUseIgnoreFile, rules.IgnoreFileName)
+	fprintf(tw, "  \tOne \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n")
+	fprintf(tw, "  \tWithout this flag scan does not read the file. When the file exists, scan prints a note on stderr\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding that config findings were left out (MOAT-T4-005), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tUse this flag only with a file that you trust. In CI, guard the file, for example with CODEOWNERS\n")
 	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
 	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
 	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
@@ -289,10 +337,29 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
 	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
-	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
+	fprintf(w, "  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n")
+	fprintf(w, "  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n")
+	fprintf(w, "  The rule analysis has a time limit of %s for all servers. Each server gets a fair share of the time left,\n", toolRulesStepBudget)
+	fprintf(w, "  up to a time budget of %s. A server that uses it up, or that scan reaches after the limit, is a finding (MOAT-T1-023):\n", toolRulesBudget)
+	fprintf(w, "  high, or critical when a description or schema rule from --rules is critical.\n")
+	fprintf(w, "  The part of an analysis that cannot be stopped at its deadline (one regex and one text conversion) also uses\n")
+	fprintf(w, "  the limit for all servers. So servers early in the order can use up the time of later servers.\n")
+	fprintf(w, "  Those later servers get MOAT-T1-023 too, never a silent pass.\n")
+	fprintf(w, "  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer)
+	fprintf(w, "  at least high.\n")
+	fprintf(w, "  scan lists at most %d config findings for each server and %d for the whole scan. A server that loses\n", configRowsPerServer, configRowsTotal)
+	fprintf(w, "  config findings to a limit gets a finding (MOAT-T4-005), at least high. The limits do not count this finding.\n")
+	fprintf(w, "  scan keeps the most severe config findings across the whole scan, not the findings of the first servers.\n")
+	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
-	fprintf(w, "  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools)
+	fprintf(w, "  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n")
+	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut or a configured value was removed from it), and the scan goes on.\n")
+	fprintf(w, "  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools)
+	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
+	fprintf(w, "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries)
+	fprintf(w, "  scan waits for a Retry-After of up to %s before the next try; a longer Retry-After means no retry.\n", durationText(llm.RetryAfterCap))
+	fprintf(w, "  The LLM step stops after %s: the tools that are not classified yet give exit 2; the report still prints.\n", durationText(defaultLLMStepTimeout))
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

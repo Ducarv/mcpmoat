@@ -1,0 +1,18 @@
+# Test fixture: invalid on purpose. The file passes Parse and Validate, but its
+# regex "(unclosed" has an unclosed group, so Go RE2 cannot compile it. A scan
+# that compiles the rules (rules.NewAnalyzer) must fail with exit code 2.
+id: MOAT-X-002
+title: Tool description holds a pattern that cannot compile
+severity: low
+target: description
+match:
+  any_regex:
+    - '(unclosed'
+risk: The rule cannot run, so the scan must stop with an error and not skip the rule.
+remediation: Fix the regex so that Go RE2 can compile it.
+references:
+  - https://example.com/mcpmoat/rules/moat-x-002
+should_match:
+  - This text has an unclosed group.
+should_not_match:
+  - Lists the files in a folder.

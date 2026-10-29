@@ -43,6 +43,11 @@ type Set struct {
 // built-in rule stays and the external rule is reported with
 // ReasonBuiltinIDClash. An ID that differs only in case would look like the
 // built-in ID in a report.
+//
+// When an external rule has an ID that ReservedRuleID reports, the external
+// rule is reported with ReasonReservedID. Such an ID belongs to a finding
+// that mcpmoat makes in Go code, for example a pin finding. NewSet does not
+// check the built-in rules for reserved IDs: a test does.
 func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 	if len(builtin)+len(external) > maxRules {
 		return nil, []*LoadError{newLoadError(setLabel, ReasonTooManyRules)}
@@ -51,9 +56,18 @@ func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 	var errs []*LoadError
 	// dropped counts the errors after the cap. They are counted, not built.
 	dropped := 0
-	add := func(r, other Rule, reason Reason) {
+	// full reports whether errs already holds maxSetErrors errors. In that
+	// case it counts one more dropped error, and the caller must not build
+	// the error.
+	full := func() bool {
 		if len(errs) >= maxSetErrors {
 			dropped++
+			return true
+		}
+		return false
+	}
+	add := func(r, other Rule, reason Reason) {
+		if full() {
 			return
 		}
 		errs = append(errs, duplicateIDError(r, other, reason))
@@ -83,6 +97,12 @@ func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 	// externalByID maps an ID to the first external rule that uses it.
 	externalByID := make(map[string]Rule, len(external))
 	for _, r := range external {
+		if ReservedRuleID(r.ID) {
+			if !full() {
+				errs = append(errs, reservedIDError(r))
+			}
+			continue
+		}
 		if b, ok := builtinByFold[strings.ToLower(r.ID)]; ok {
 			add(r, b, ReasonBuiltinIDClash)
 			continue
@@ -123,6 +143,58 @@ func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 func duplicateIDError(r, other Rule, reason Reason) *LoadError {
 	err := errors.New("already defined in " + other.Source)
 	return newLoadError(r.Source, reason).inField("id").wrap(err)
+}
+
+// reservedIDError returns the error for the external rule r, whose ID is
+// reserved (see ReservedRuleID). The error names the file of r and holds no
+// rule text: the reason is fixed text and Err is nil.
+func reservedIDError(r Rule) *LoadError {
+	return newLoadError(r.Source, ReasonReservedID).inField("id")
+}
+
+// Prefixes of the reserved rule ID families (see ReservedRuleID).
+const (
+	// pinRuleIDPrefix starts the IDs of the pin findings: MOAT-T2-001 to
+	// MOAT-T2-004 (internal/pins, ChangeKind.RuleID). pins.IsPinRuleID treats
+	// every ID with this prefix as a pin rule, so the whole family is
+	// reserved, not only the four IDs.
+	pinRuleIDPrefix = "MOAT-T2-"
+	// llmRuleIDPrefix starts the IDs of the LLM findings: MOAT-LLM-001 and
+	// MOAT-LLM-002 (internal/llm, RuleID and RuleIDInvalid).
+	llmRuleIDPrefix = "MOAT-LLM-"
+)
+
+// ReservedRuleID reports whether id is reserved for a native rule: a rule
+// with no YAML file that mcpmoat makes findings for in Go code. A rule from
+// --rules must not use such an ID (NewSet refuses it with ReasonReservedID).
+// Otherwise --ignore for the external rule would also drop the native
+// findings, and a report could show a fake pin or LLM finding.
+//
+// The reserved IDs are:
+//
+//   - RuleAnalysisBudget (MOAT-T1-023), the rule analysis budget finding.
+//   - RuleToolFindingCap (MOAT-T1-024), the summary finding for a server with
+//     more tool findings than the per-server cap.
+//   - RuleConfigFindingCap (MOAT-T4-005), the summary finding for a server
+//     whose config findings the cap cuts.
+//   - Every ID that starts with "MOAT-T2-", the pin findings MOAT-T2-001 to
+//     MOAT-T2-004 of internal/pins.
+//   - Every ID that starts with "MOAT-LLM-", the LLM findings MOAT-LLM-001
+//     and MOAT-LLM-002 of internal/llm.
+//
+// The comparison ignores case (strings.EqualFold), so "moat-t2-001" is
+// reserved too: it would look like MOAT-T2-001 in a report.
+//
+// This list is the one place for the reserved IDs. The rules package cannot
+// read the IDs from internal/pins and internal/llm without a dependency on
+// them, so a test (TestReservedRuleIDCoversNativeIDs) checks that the list
+// covers their IDs.
+func ReservedRuleID(id string) bool {
+	if strings.EqualFold(id, RuleAnalysisBudget) || strings.EqualFold(id, RuleToolFindingCap) ||
+		strings.EqualFold(id, RuleConfigFindingCap) {
+		return true
+	}
+	return hasPrefixFold(id, pinRuleIDPrefix) || hasPrefixFold(id, llmRuleIDPrefix)
 }
 
 // Rules returns the rules of the set, sorted by ID. It returns a new slice, so

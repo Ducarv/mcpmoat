@@ -2,14 +2,17 @@ package pins_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/pins"
@@ -220,54 +223,133 @@ func TestLoadNotFirstRun(t *testing.T) {
 			t.Skipf("symlinks not available: %v", err)
 		}
 	}
+	// The pins directory and its parent, as the part of the path that the
+	// error names.
+	pinsDir := filepath.Dir
+	parentDir := func(path string) string { return filepath.Dir(filepath.Dir(path)) }
+	const notDir = "is not a directory, or it is a symlink with a missing target"
 	tests := []struct {
 		name string
 		path func(t *testing.T) string
-		want string
+		// named, when set, is the part of the path that is not a directory. The
+		// error must then be exactly "read <path>: <named> " + notDir.
+		named func(path string) string
+		want  string // used when named is nil
 	}{
-		{"pins.json symlink with a missing target", func(t *testing.T) string {
+		{name: "pins.json symlink with a missing target", path: func(t *testing.T) string {
 			path := storeTestPath(t)
 			symlink(t, "gone.json", path)
 			return path
-		}, "the target of the symlink is missing"},
-		{"directory symlink with a missing target", func(t *testing.T) string {
+		}, want: "the target of the symlink is missing"},
+		{name: "directory symlink with a missing target", path: func(t *testing.T) string {
 			link := filepath.Join(t.TempDir(), "mcpmoat")
 			symlink(t, filepath.Join(t.TempDir(), "gone"), link)
 			return filepath.Join(link, "pins.json")
-		}, "is not a directory, or it is a symlink with a missing target"},
-		{"directory is a file", func(t *testing.T) string {
+		}, named: pinsDir},
+		{name: "directory is a file", path: func(t *testing.T) string {
 			dir := filepath.Join(t.TempDir(), "mcpmoat")
 			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return filepath.Join(dir, "pins.json")
-		}, "is not a directory, or it is a symlink with a missing target"},
-		{"a parent of the directory is a symlink with a missing target", func(t *testing.T) string {
+		}, named: pinsDir},
+		{name: "a parent of the directory is a symlink with a missing target", path: func(t *testing.T) string {
 			link := filepath.Join(t.TempDir(), "config")
 			symlink(t, filepath.Join(t.TempDir(), "gone"), link)
 			return filepath.Join(link, "mcpmoat", "pins.json")
-		}, "is not a directory, or it is a symlink with a missing target"},
-		{"a parent of the directory is a file", func(t *testing.T) string {
+		}, named: parentDir},
+		// The same text as "directory is a file" (#157): ENOTDIR below the file
+		// keeps the walk going up to the file.
+		{name: "a parent of the directory is a file", path: func(t *testing.T) string {
 			file := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return filepath.Join(file, "mcpmoat", "pins.json")
-		}, "not a directory"},
+		}, named: parentDir},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := tt.path(t)
 			s, err := pins.Load(path)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Load() error = %v, want text %q", err, tt.want)
+			if err == nil {
+				t.Fatal("Load() error = nil, want error")
+			}
+			if tt.named != nil {
+				want := "read " + path + ": " + tt.named(path) + " " + notDir
+				if err.Error() != want {
+					t.Errorf("Load() error = %q, want %q", err, want)
+				}
+			} else if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Load() error = %v, want text %q", err, tt.want)
 			}
 			if s != nil {
 				t.Errorf("Load() store = %v, want nil", s)
 			}
 		})
 	}
+}
+
+// TestCheckFirstRunWith fakes lstat and stat for file system states that are
+// hard to make on disk.
+func TestCheckFirstRunWith(t *testing.T) {
+	t.Parallel()
+	missing := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	denied := func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+	path := filepath.Join(string(filepath.Separator)+"a", "b", "pins.json")
+	tests := []struct {
+		name        string
+		op          string // "read" or "save"
+		path        string
+		lstat, stat func(string) (fs.FileInfo, error)
+		wantText    string   // text the error must hold
+		wantIs      error    // optional
+		wantNotText []string // texts the error must not hold
+	}{
+		{
+			name: "nothing on the path exists", op: "read", path: path, lstat: missing, stat: missing,
+			wantText: "read " + path + ": no directory on the path exists",
+		},
+		{
+			name: "save names its op", op: "save", path: path, lstat: missing, stat: missing,
+			wantText: "save " + path + ": no directory on the path exists",
+		},
+		{
+			name: "ENOTDIR all the way up", op: "read", path: path,
+			lstat: func(string) (fs.FileInfo, error) { return nil, syscall.ENOTDIR }, stat: missing,
+			wantText: "no directory on the path exists",
+		},
+		{
+			name: "lstat error that is not missing", op: "read", path: path, lstat: denied, stat: missing,
+			wantText: "read " + path + ": ", wantIs: fs.ErrPermission, wantNotText: []string{"no directory"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := pins.CheckFirstRunWith(tt.op, tt.path, tt.lstat, tt.stat)
+			if err == nil || !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("CheckFirstRunWith() error = %v, want text %q", err, tt.wantText)
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("CheckFirstRunWith() error = %v, want errors.Is %v", err, tt.wantIs)
+			}
+			for _, bad := range tt.wantNotText {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("CheckFirstRunWith() error = %q, must not hold %q", err, bad)
+				}
+			}
+		})
+	}
+
+	t.Run("real first run", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "no", "such", "pins.json")
+		if err := pins.CheckFirstRunWith("save", path, os.Lstat, os.Stat); err != nil {
+			t.Errorf("CheckFirstRunWith() error = %v, want nil", err)
+		}
+	})
 }
 
 func TestDefaultPath(t *testing.T) {
@@ -1000,61 +1082,458 @@ func TestSaveSizeLimit(t *testing.T) {
 	sizeID := func(i int) pins.Identity {
 		return pins.Identity{Client: "c", Source: "s", Name: fmt.Sprintf("n%03d", i)}
 	}
-	saveWithExtra := func(t *testing.T, path string, extra int) error {
+	// nameLen is the tool name length of server i: one byte plus an even share
+	// of extra.
+	nameLen := func(extra, i int) int {
+		n := 1 + extra/servers
+		if i < extra%servers {
+			n++
+		}
+		return n
+	}
+	sizePins := func(n int) pins.ServerPins { return storeTestPins(strings.Repeat("a", n), "h") }
+	// fill returns a Store for path with all servers, whose tool names hold
+	// extra bytes on top of one byte each.
+	fill := func(t *testing.T, path string, extra int) *pins.Store {
 		t.Helper()
 		s := storeTestMustLoad(t, path)
-		share := 1 + extra/servers // Each name has one byte plus an even share of extra.
 		for i := range servers {
-			n := share
-			if i < extra%servers {
-				n++
-			}
-			storeTestMustSet(t, s, sizeID(i), storeTestPins(strings.Repeat("a", n), "h"))
+			storeTestMustSet(t, s, sizeID(i), sizePins(nameLen(extra, i)))
 		}
-		return s.Save()
+		return s
 	}
+	newID := pins.Identity{Client: "c", Source: "s", Name: "new"}
 	probe := storeTestPath(t)
-	if err := saveWithExtra(t, probe, 0); err != nil {
-		t.Fatal(err)
-	}
+	storeTestMustSave(t, fill(t, probe, 0))
 	base := len(pins.ReadFile(t, probe))
+	full := limit - base // the extra bytes that fill the file exactly
+
+	// The subtests are not parallel: each one holds a store and a file of
+	// about 32 MiB, so they run one at a time to keep memory modest.
 
 	t.Run("exactly at the limit saves and loads", func(t *testing.T) {
-		t.Parallel()
 		path := storeTestPath(t)
-		if err := saveWithExtra(t, path, limit-base); err != nil {
-			t.Fatalf("Save() at the limit error = %v, want nil", err)
-		}
+		storeTestMustSave(t, fill(t, path, full))
 		if got := len(pins.ReadFile(t, path)); got != limit {
 			t.Fatalf("file size = %d, want %d", got, limit)
 		}
 		storeTestMustLoad(t, path)
 	})
 
-	t.Run("one byte over is refused", func(t *testing.T) {
-		t.Parallel()
+	t.Run("Set refuses one byte over with ErrStoreFull", func(t *testing.T) {
 		path := storeTestPath(t)
-		old := storeTestMustLoad(t, path)
-		// The oversized save replaces this server, so the size is exact.
-		storeTestMustSet(t, old, sizeID(0), storeTestPins("t", "h"))
-		storeTestMustSave(t, old)
-		before := pins.ReadFile(t, path)
+		s := fill(t, path, full)
+		storeTestMustSave(t, s)
+		before := sha256.Sum256(pins.ReadFile(t, path))
+		old0, _ := s.Get(sizeID(0))
 
-		err := saveWithExtra(t, path, limit-base+1)
-		if err == nil {
-			t.Fatal("Save() error = nil, want error over the limit")
+		refusals := []struct {
+			name string
+			id   pins.Identity
+			p    pins.ServerPins
+		}{
+			{"a new server", newID, storeTestPins("t", "h")},
+			{"one more byte in a server", sizeID(0), sizePins(nameLen(full, 0) + 1)},
 		}
-		want := fmt.Sprintf("save %s: pins data is %d bytes, larger than the %d byte limit", path, limit+1, limit)
-		if err.Error() != want {
-			t.Errorf("Save() error = %q, want %q", err, want)
+		for _, r := range refusals {
+			err := s.Set(r.id, r.p)
+			if !errors.Is(err, pins.ErrStoreFull) {
+				t.Errorf("Set(%s) error = %v, want errors.Is ErrStoreFull", r.name, err)
+			}
 		}
-		if after := pins.ReadFile(t, path); !bytes.Equal(before, after) {
-			t.Error("failed Save changed the old file")
+		// The growth by one byte gives a file one byte over the limit.
+		err := s.Set(sizeID(0), sizePins(nameLen(full, 0)+1))
+		if want := fmt.Sprintf("%d bytes with this server", limit+1); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Set() error = %v, want text %q", err, want)
 		}
+
+		// The refusals changed nothing.
+		if _, ok := s.Get(newID); ok {
+			t.Error("Get() of the refused new server ok = true, want false")
+		}
+		storeTestWantPins(t, s, sizeID(0), old0)
+		if got := s.TrackedFileSize(); got != limit {
+			t.Errorf("TrackedFileSize() after the refusals = %d, want %d", got, limit)
+		}
+		storeTestMustSave(t, s)
+		if after := sha256.Sum256(pins.ReadFile(t, path)); after != before {
+			t.Error("Save after the refused Sets wrote other bytes")
+		}
+
+		// A smaller replacement is accepted, and the new server then fits in
+		// the bytes it gave back.
+		storeTestMustSet(t, s, sizeID(1), sizePins(1))
+		storeTestMustSet(t, s, newID, storeTestPins("t", "h"))
+		storeTestMustSave(t, s)
+		got := storeTestMustLoad(t, path)
+		storeTestWantPins(t, got, newID, storeTestPins("t", "h"))
+		storeTestWantPins(t, got, sizeID(1), sizePins(1))
+		storeTestWantPins(t, got, sizeID(2), sizePins(nameLen(full, 2)))
 		if names, want := pins.DirNames(t, filepath.Dir(path)), []string{"pins.json"}; !slices.Equal(names, want) {
 			t.Errorf("dir entries = %v, want %v", names, want)
 		}
 	})
+
+	// A hand-edited compact file can be under the limit while the indented
+	// file that Save writes is over it. Save's own check is the backstop.
+	t.Run("compact file over the limit once indented", func(t *testing.T) {
+		compact := func(extra int) string {
+			var b strings.Builder
+			b.WriteString(`{"version":1,"servers":[`)
+			for i := range servers {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				fmt.Fprintf(&b, `{"client":"c","source":"s","project_path":"","name":%q,"tools":{%q:%s}}`,
+					sizeID(i).Name, strings.Repeat("a", nameLen(extra, i)), storeTestPinJSON("h"))
+			}
+			b.WriteString("]}")
+			return b.String()
+		}
+		const under = 1000 // the compact file is this many bytes under the limit
+		path := storeTestWrite(t, compact(limit-under-len(compact(0))))
+		fileSum := sha256.Sum256(pins.ReadFile(t, path))
+		s := storeTestMustLoad(t, path)
+		over := s.TrackedFileSize() - limit
+		if over <= 1 {
+			t.Fatalf("setup: the indented file is %d bytes over the limit, want more than 1", over)
+		}
+
+		wantSaveErr := func(t *testing.T, size int) {
+			t.Helper()
+			err := s.Save()
+			want := fmt.Sprintf("save %s: pins data is %d bytes, larger than the 32 MiB limit", path, size)
+			if err == nil || err.Error() != want {
+				t.Errorf("Save() error = %v, want %q", err, want)
+			}
+			if got := sha256.Sum256(pins.ReadFile(t, path)); got != fileSum {
+				t.Error("a failed Save changed the old file")
+			}
+		}
+		wantSaveErr(t, limit+over)
+
+		// Growth is refused; a shrink is accepted, also while still over.
+		if err := s.Set(newID, storeTestPins("t", "h")); !errors.Is(err, pins.ErrStoreFull) {
+			t.Errorf("Set() of a new server error = %v, want errors.Is ErrStoreFull", err)
+		}
+		storeTestMustSet(t, s, sizeID(0), sizePins(nameLen(limit-under-len(compact(0)), 0)-1))
+		wantSaveErr(t, limit+over-1)
+
+		// Shrink under the limit: Save works and writes the tracked size.
+		storeTestMustSet(t, s, sizeID(1), sizePins(1))
+		tracked := s.TrackedFileSize()
+		storeTestMustSave(t, s)
+		if got := len(pins.ReadFile(t, path)); got != tracked || got > limit {
+			t.Errorf("file size = %d, want the tracked size %d, at most %d", got, tracked, limit)
+		}
+	})
+}
+
+// TestTrackedSizeMatchesSave checks that the size that the Store tracks for
+// ErrStoreFull is exactly the size of the file that Save writes.
+func TestTrackedSizeMatchesSave(t *testing.T) {
+	t.Parallel()
+	awkwardPins := pins.ServerPins{
+		"ctl \x00\x01\x1f\x7f\n\t\"\\": {Hash: "h\"q\\", Canonical: "<b>&amp;</b> \u2028\u2029"},
+		"emoji \U0001F600 \u00e9 <>&":  {Hash: "sha256-v1:x", Canonical: `{"a":"\"q\"","b":"\u0007"}`},
+		"plain":                        storeTestPin("h"),
+	}
+	awkwardID := pins.Identity{Client: "c<&>\x1b", Source: "/p/\u2028\"q\"", ProjectPath: "\U0001F600\\", Name: "n\t\u2029"}
+	set := func(id pins.Identity, p pins.ServerPins) func(*testing.T, *pins.Store) {
+		return func(t *testing.T, s *pins.Store) {
+			t.Helper()
+			storeTestMustSet(t, s, id, p)
+		}
+	}
+	tests := []struct {
+		name    string
+		content string // pins.json to load first; empty means none
+		steps   []func(*testing.T, *pins.Store)
+	}{
+		{name: "empty store"},
+		{name: "one server", steps: []func(*testing.T, *pins.Store){set(idA, storeTestPins("t", "h"))}},
+		{name: "server with no tools", steps: []func(*testing.T, *pins.Store){set(idA, nil)}},
+		{name: "several servers with awkward strings", steps: []func(*testing.T, *pins.Store){
+			set(idA, awkwardPins), set(awkwardID, awkwardPins), set(idB, storeTestPins("t", "h")),
+		}},
+		{name: "replace with a bigger server", steps: []func(*testing.T, *pins.Store){
+			set(idA, storeTestPins("t", "h")), set(idB, nil), set(idA, awkwardPins),
+		}},
+		{name: "replace with a smaller server", steps: []func(*testing.T, *pins.Store){
+			set(idA, awkwardPins), set(idB, nil), set(idA, storeTestPins("t", "h")),
+		}},
+		{name: "replace the only server with no tools", steps: []func(*testing.T, *pins.Store){
+			set(idA, awkwardPins), set(idA, nil),
+		}},
+		{
+			name: "compact hand-written file",
+			// Escapes that Save writes in another form, and no whitespace.
+			content: `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n\u0041",` +
+				`"tools":{"t\u2028\u00e9":{"hash":"h\/x","canonical":"\u003cb\u003e\ud83d\ude00"}}},` +
+				`{"client":"c","source":"s","project_path":"","name":"m","tools":{}}]}`,
+		},
+		{
+			name:    "compact file, then a change",
+			content: `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"m","tools":{}}]}`,
+			steps:   []func(*testing.T, *pins.Store){set(idA, awkwardPins)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := storeTestPath(t)
+			if tt.content != "" {
+				path = storeTestWrite(t, tt.content)
+			}
+			s := storeTestMustLoad(t, path)
+			for _, step := range tt.steps {
+				step(t, s)
+			}
+			tracked := s.TrackedFileSize()
+			storeTestMustSave(t, s)
+			if got := len(pins.ReadFile(t, path)); got != tracked {
+				t.Errorf("TrackedFileSize() = %d, Save wrote %d bytes", tracked, got)
+			}
+			// Load of the saved file tracks the same size.
+			if got := storeTestMustLoad(t, path).TrackedFileSize(); got != tracked {
+				t.Errorf("TrackedFileSize() after Load = %d, want %d", got, tracked)
+			}
+		})
+	}
+}
+
+func TestClone(t *testing.T) {
+	t.Parallel()
+
+	t.Run("changes do not cross", func(t *testing.T) {
+		t.Parallel()
+		path := storeTestPath(t)
+		s := storeTestMustLoad(t, path)
+		storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+		origSize := s.TrackedFileSize()
+
+		c := s.Clone()
+		if got := c.TrackedFileSize(); got != origSize {
+			t.Errorf("clone TrackedFileSize() = %d, want %d", got, origSize)
+		}
+		storeTestWantPins(t, c, idA, storeTestPins("t", "h"))
+
+		// Set on the clone: a new server and a replaced one.
+		storeTestMustSet(t, c, idB, storeTestPins("u", "h2"))
+		storeTestMustSet(t, c, idA, storeTestPins("t", "h", "v", "h3"))
+		cloneSize := c.TrackedFileSize()
+		if _, ok := s.Get(idB); ok {
+			t.Error("original Get(idB) ok = true after Set on the clone, want false")
+		}
+		storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
+		if got := s.TrackedFileSize(); got != origSize {
+			t.Errorf("original TrackedFileSize() = %d after Set on the clone, want %d", got, origSize)
+		}
+
+		// Set on the original.
+		storeTestMustSet(t, s, idC, storeTestPins("w", "h4"))
+		if _, ok := c.Get(idC); ok {
+			t.Error("clone Get(idC) ok = true after Set on the original, want false")
+		}
+		if got := c.TrackedFileSize(); got != cloneSize {
+			t.Errorf("clone TrackedFileSize() = %d after Set on the original, want %d", got, cloneSize)
+		}
+
+		// The clone saves to the same path, with its own content.
+		storeTestMustSave(t, c)
+		got := storeTestMustLoad(t, path)
+		storeTestWantPins(t, got, idB, storeTestPins("u", "h2"))
+		if _, ok := got.Get(idC); ok {
+			t.Error("the saved clone holds idC from the original")
+		}
+
+		// The clone replaced idA. When the two shared their size records, the
+		// original would now subtract the size of the clone's idA.
+		storeTestMustSet(t, s, idA, storeTestPins("x", "h5"))
+		tracked := s.TrackedFileSize()
+		storeTestMustSave(t, s)
+		if got := len(pins.ReadFile(t, path)); got != tracked {
+			t.Errorf("original TrackedFileSize() = %d, Save wrote %d bytes", tracked, got)
+		}
+	})
+
+	t.Run("copies Existed and RanWithoutLock", func(t *testing.T) {
+		t.Parallel()
+		existing := storeTestPath(t)
+		storeTestMustSave(t, storeTestMustLoad(t, existing))
+		unlocked, release, err := pins.LoadLockedWith(t.Context(), storeTestPath(t), pins.LockHooks{
+			TryLock: func(*os.File) (bool, error) { return false, pins.ErrLockUnsupported },
+		})
+		if err != nil {
+			t.Fatalf("LoadLockedWith() error = %v", err)
+		}
+		defer release()
+
+		tests := []struct {
+			name                            string
+			s                               *pins.Store
+			wantExisted, wantRanWithoutLock bool
+		}{
+			{"first run", storeTestMustLoad(t, storeTestPath(t)), false, false},
+			{"existing file", storeTestMustLoad(t, existing), true, false},
+			{"unlocked", unlocked, false, true},
+		}
+		for _, tt := range tests {
+			c := tt.s.Clone()
+			if c.Existed() != tt.wantExisted || c.RanWithoutLock() != tt.wantRanWithoutLock {
+				t.Errorf("%s: clone Existed() = %v, RanWithoutLock() = %v; want %v, %v",
+					tt.name, c.Existed(), c.RanWithoutLock(), tt.wantExisted, tt.wantRanWithoutLock)
+			}
+		}
+	})
+
+	t.Run("zero-value Store", func(t *testing.T) {
+		t.Parallel()
+		var s pins.Store
+		c := s.Clone()
+		storeTestMustSet(t, c, idA, storeTestPins("t", "h"))
+		if _, ok := s.Get(idA); ok {
+			t.Error("zero-value Get(idA) ok = true after Set on the clone, want false")
+		}
+		if c.Existed() || c.RanWithoutLock() {
+			t.Error("clone of a zero-value Store has Existed or RanWithoutLock set")
+		}
+		if err := c.Save(); err == nil || !strings.Contains(err.Error(), "no path") {
+			t.Errorf("Save() of the clone error = %v, want the no-path error", err)
+		}
+	})
+}
+
+func TestExisted(t *testing.T) {
+	t.Parallel()
+	loaders := []struct {
+		name string
+		load func(t *testing.T, path string) *pins.Store
+	}{
+		{"Load", storeTestMustLoad},
+		{"LoadLocked", func(t *testing.T, path string) *pins.Store {
+			t.Helper()
+			s, release, err := pins.LoadLocked(t.Context(), path, 0)
+			if err != nil {
+				t.Fatalf("LoadLocked(%q) error = %v, want nil", path, err)
+			}
+			t.Cleanup(release)
+			return s
+		}},
+	}
+	tests := []struct {
+		name string
+		path func(t *testing.T) string
+		want bool
+	}{
+		{"first run, missing file", storeTestPath, false},
+		{"first run, missing directory", func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "no", "such", "pins.json")
+		}, false},
+		{"deleted file in an existing directory", func(t *testing.T) string {
+			path := storeTestPath(t)
+			storeTestMustSave(t, storeTestMustLoad(t, path))
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, false},
+		{"after Save", func(t *testing.T) string {
+			path := storeTestPath(t)
+			s := storeTestMustLoad(t, path)
+			storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+			storeTestMustSave(t, s)
+			return path
+		}, true},
+	}
+	for _, l := range loaders {
+		for _, tt := range tests {
+			t.Run(l.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				s := l.load(t, tt.path(t))
+				if got := s.Existed(); got != tt.want {
+					t.Errorf("Existed() = %v, want %v", got, tt.want)
+				}
+				if l.name == "Load" && s.RanWithoutLock() {
+					t.Error("RanWithoutLock() = true for Load, want false")
+				}
+			})
+		}
+	}
+
+	var zero pins.Store
+	if zero.Existed() || zero.RanWithoutLock() {
+		t.Error("zero-value Store has Existed or RanWithoutLock set")
+	}
+}
+
+// TestPath checks that Path returns the path that the Store was loaded from,
+// for Load and LoadLocked, on a first run and with an existing file, and for
+// a Clone.
+func TestPath(t *testing.T) {
+	t.Parallel()
+	existing := storeTestPath(t)
+	storeTestMustSave(t, storeTestMustLoad(t, existing))
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"first run", storeTestPath(t)},
+		{"first run, missing directory", filepath.Join(t.TempDir(), "no", "such", "pins.json")},
+		{"existing file", existing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := storeTestMustLoad(t, tt.path)
+			if got := s.Path(); got != tt.path {
+				t.Errorf("Load: Path() = %q, want %q", got, tt.path)
+			}
+			if got := s.Clone().Path(); got != tt.path {
+				t.Errorf("Clone: Path() = %q, want %q", got, tt.path)
+			}
+
+			locked, release, err := pins.LoadLocked(t.Context(), tt.path, 0)
+			if err != nil {
+				t.Fatalf("LoadLocked(%q) error = %v, want nil", tt.path, err)
+			}
+			defer release()
+			if got := locked.Path(); got != tt.path {
+				t.Errorf("LoadLocked: Path() = %q, want %q", got, tt.path)
+			}
+		})
+	}
+
+	var zero pins.Store
+	if got := zero.Path(); got != "" {
+		t.Errorf("zero-value Store: Path() = %q, want empty", got)
+	}
+}
+
+// TestLoadLockedDanglingSymlink checks that LoadLocked, like Load, does not
+// treat a pins.json symlink with a missing target as a first run.
+func TestLoadLockedDanglingSymlink(t *testing.T) {
+	t.Parallel()
+	path := storeTestPath(t)
+	if err := os.Symlink("gone.json", path); err != nil {
+		t.Skipf("symlinks not available: %v", err)
+	}
+	s, release, err := pins.LoadLocked(t.Context(), path, 0)
+	if release == nil {
+		t.Fatal("LoadLocked() release = nil, want a function")
+	}
+	release()
+	if want := "read " + path + ": the target of the symlink is missing"; err == nil || err.Error() != want {
+		t.Errorf("LoadLocked() error = %v, want %q", err, want)
+	}
+	if s != nil {
+		t.Errorf("LoadLocked() store = %v, want nil", s)
+	}
+	// The symlink is still there: nothing replaced it.
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("pins.json is no longer a symlink (err = %v)", err)
+	}
 }
 
 func TestSymlinkedConfigDir(t *testing.T) {

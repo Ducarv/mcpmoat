@@ -64,12 +64,12 @@ type Fake struct {
 //  4. an error that wraps [ErrNoResult].
 //
 // The returned Result has its own copies of the Tools, Prompts, Resources,
-// ResourceTemplates and Warnings slices, so a caller can change those slices
-// without an effect on Results. Each Warning also gets its own copies of
-// HeaderKeys and Capabilities. All other copies are shallow: nested slices
-// and pointers, such as Tool.InputSchema, Tool.Annotations (and the hints in
-// it) and Prompt.Arguments, are shared with the entry in Results, so callers
-// must not change them.
+// ResourceTemplates, Warnings and Secrets slices, so a caller can change
+// those slices without an effect on Results. Each Warning also gets its own
+// copies of HeaderKeys and Capabilities. All other copies are shallow: nested
+// slices and pointers, such as Tool.InputSchema, Tool.Annotations (and the
+// hints in it) and Prompt.Arguments, are shared with the entry in Results, so
+// callers must not change them.
 func (f *Fake) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, s.Name)
@@ -94,6 +94,9 @@ func (f *Fake) Inspect(ctx context.Context, s discover.Server) (inspect.Result, 
 	r.Resources = slices.Clone(r.Resources)
 	r.ResourceTemplates = slices.Clone(r.ResourceTemplates)
 	r.Warnings = slices.Clone(r.Warnings)
+	// A discover.Secret cannot be changed in place, so a shallow copy of
+	// the slice is enough.
+	r.Secrets = slices.Clone(r.Secrets)
 	// r.Warnings is now a copy, so a change to its elements does not
 	// reach the entry in Results.
 	for i := range r.Warnings {

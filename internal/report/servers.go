@@ -29,10 +29,13 @@ const emptyServers = "No MCP servers found.\n"
 // bytes), so hostile text can reach a few hundred MB. That is still bounded,
 // and a real config is far from it.
 const (
-	// maxShortCellRunes is the cap for the short cells: NAME, CLIENT,
-	// TRANSPORT and STATE. 80 runes is more than any real server name, client,
-	// transport or state needs.
-	maxShortCellRunes = 80
+	// MaxShortCellRunes is the cap, in runes, for the short cells of the
+	// terminal report: NAME, CLIENT, TRANSPORT and STATE here, and the short
+	// cells of the summary, the findings and the diffs. 80 runes is more than
+	// any real server name, client, transport or state needs. A longer cell is
+	// cut and ends with termsafe.CutMarker. It is exported so that a caller
+	// can check that a fixed text of its own (a reason, for example) fits.
+	MaxShortCellRunes = 80
 
 	// maxPathRunes is the cap for SCOPE and SOURCE, which hold file paths. 256
 	// keeps a real path readable, so the reader can see which file a server came
@@ -74,7 +77,7 @@ const untrustedMarker = " (untrusted)"
 // are cut at 256 runes, and an invalid UTF-8 byte counts as one rune. The cut
 // is made on the raw text, before escaping, so an escaped cell can be longer
 // than the cap. These limits stop padding amplification: see
-// maxShortCellRunes and maxPathRunes. A padded cell that holds an ASCII space
+// MaxShortCellRunes and maxPathRunes. A padded cell that holds an ASCII space
 // is also quoted, so a space cannot look like a column gap. COMMAND/URL is
 // the last column. tabwriter does not pad it, so it cannot amplify, and it is
 // never cut. So no argument is hidden from a security review.
@@ -113,13 +116,13 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 	write("NAME\tCLIENT\tSCOPE\tTRANSPORT\tSTATE\tSOURCE\tCOMMAND/URL\n")
 	for _, s := range servers {
 		write("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			cell(s.Name, maxShortCellRunes),
-			cell(string(s.Client), maxShortCellRunes),
+			cell(s.Name, MaxShortCellRunes),
+			cell(string(s.Client), MaxShortCellRunes),
 			scopeCell(s.Scope, s.ProjectPath, s.Untrusted),
-			cell(string(s.Transport), maxShortCellRunes),
+			cell(string(s.Transport), MaxShortCellRunes),
 			// The state text is a fixed mcpmoat string, but it goes through
 			// cell like every padded cell.
-			cell(s.State.String(), maxShortCellRunes),
+			cell(s.State.String(), MaxShortCellRunes),
 			cell(s.Source, maxPathRunes),
 			commandCell(s),
 		)

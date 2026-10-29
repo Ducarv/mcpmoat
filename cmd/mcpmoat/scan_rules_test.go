@@ -6,6 +6,7 @@ package main
 // them can run in parallel.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // scanRulesResult is the outcome of one scan run.
@@ -63,42 +65,107 @@ func copyRuleFile(t *testing.T, src, dir, name string) {
 	}
 }
 
-// TestScanRulesAccepted checks that valid rule folders give exit code 0 and
-// the same output as a scan without --rules, because the rules are loaded
-// but not applied yet.
+// scanRulesSchemaRule is an external rule with the target schema. The fixtures
+// under testdata/rules hold no schema rule, so the tests write this one to a
+// t.TempDir(). It matches the keyword "deprecated" in a tool input schema.
+const scanRulesSchemaRule = `id: MOAT-X-004
+title: Fixture rule for a deprecated field in a tool input schema
+severity: low
+target: schema
+match:
+  keywords:
+    - deprecated
+risk: Fixture.
+remediation: Fixture.
+should_match:
+  - '{"description":"This field is deprecated."}'
+should_not_match:
+  - '{"description":"A file name."}'
+`
+
+// scanRulesSchemaDir returns a new folder that holds only scanRulesSchemaRule.
+func scanRulesSchemaDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, dir, "MOAT-X-004.yaml", scanRulesSchemaRule)
+	return dir
+}
+
+// scanRulesDirOf returns a new folder with a copy of each fixture rule file in
+// srcs, under its own base name.
+func scanRulesDirOf(t *testing.T, srcs ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, src := range srcs {
+		copyRuleFile(t, src, dir, filepath.Base(src))
+	}
+	return dir
+}
+
+// The fixture rules from --rules: MOAT-X-001 has the target description and
+// MOAT-X-003 has the target config. Both are low.
+var (
+	scanRulesExtraFile  = filepath.Join(scanRulesFixture("extra"), "MOAT-X-001.yaml")
+	scanRulesConfigFile = filepath.Join(scanRulesFixture("configtarget"), "MOAT-X-003.yaml")
+)
+
+// TestScanRulesAccepted checks valid rule folders with --no-connect. Without a
+// connection scan applies no description or schema rule, and it never applies
+// a config rule from --rules. So the exit code is 0 and stdout is the same as
+// for a scan without --rules. The only change is on stderr: one notice for
+// each kind of rule that scan does not apply, in a fixed order.
 func TestScanRulesAccepted(t *testing.T) {
 	t.Parallel()
-
-	extraFile := filepath.Join(scanRulesFixture("extra"), "MOAT-X-001.yaml")
 
 	tests := []struct {
 		name string
 		// dir returns the rules folder for the case.
 		dir func(t *testing.T) string
+		// wantNotices are the lines that scan adds on stderr, in this order.
+		wantNotices []string
 	}{
-		{
-			name: "valid external rule",
-			dir:  func(*testing.T) string { return scanRulesFixture("extra") },
-		},
+		// The fixture folder "extra" as it is: see
+		// TestScanRulesNoConnectSkipsToolRules.
 		{
 			name: "yml file name",
 			dir: func(t *testing.T) string {
 				dir := t.TempDir()
-				copyRuleFile(t, extraFile, dir, "MOAT-X-001.yml")
+				copyRuleFile(t, scanRulesExtraFile, dir, "MOAT-X-001.yml")
 				return dir
 			},
+			wantNotices: []string{toolRulesNoConnectNotice},
 		},
 		{
 			name: "folder and txt file are ignored",
 			dir: func(t *testing.T) string {
 				dir := t.TempDir()
-				copyRuleFile(t, extraFile, dir, "MOAT-X-001.yaml")
+				copyRuleFile(t, scanRulesExtraFile, dir, "MOAT-X-001.yaml")
 				// A rule in a subfolder or in a .txt file is not loaded. If it
 				// were, its bad content would fail the scan.
 				writeTestFile(t, dir, filepath.Join("sub", "broken.yaml"), "not: [valid\n")
 				writeTestFile(t, dir, "notes.txt", "not: [valid\n")
 				return dir
 			},
+			wantNotices: []string{toolRulesNoConnectNotice},
+		},
+		{
+			name:        "schema target rule",
+			dir:         scanRulesSchemaDir,
+			wantNotices: []string{toolRulesNoConnectNotice},
+		},
+		{
+			name:        "config target rule",
+			dir:         func(*testing.T) string { return scanRulesFixture("configtarget") },
+			wantNotices: []string{configRulesNotice},
+		},
+		{
+			// The description rule loads first (MOAT-X-001 sorts before
+			// MOAT-X-003), but the config notice still comes first.
+			name: "config and description rules",
+			dir: func(t *testing.T) string {
+				return scanRulesDirOf(t, scanRulesExtraFile, scanRulesConfigFile)
+			},
+			wantNotices: []string{configRulesNotice, toolRulesNoConnectNotice},
 		},
 	}
 
@@ -114,9 +181,8 @@ func TestScanRulesAccepted(t *testing.T) {
 
 			got := scanIn(t, home, work, "--no-connect", "--rules", dir)
 
-			// The only change is the notice that the rules are not applied.
-			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
-			wantStderr := base.stderr + rulesNotAppliedNotice + "\n"
+			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK, stderr: tt.wantNotices})
+			wantStderr := base.stderr + strings.Join(tt.wantNotices, "\n") + "\n"
 			if got.stdout != base.stdout || got.stderr != wantStderr {
 				t.Errorf("output differs from the scan without --rules\nstdout: %q (want %q)\nstderr: %q (want %q)",
 					got.stdout, base.stdout, got.stderr, wantStderr)
@@ -126,34 +192,299 @@ func TestScanRulesAccepted(t *testing.T) {
 	}
 }
 
-// TestScanRulesWithConnect checks the mode without --no-connect. The rules
-// are loaded before the step that connects, and scan does not apply them, so
-// valid rules give the same result as a scan without --rules plus the notice
-// that the rules are not applied. The scan never starts a server: the
-// inspector is a fake. The first scan pins the tools of the server, so the
-// second scan, with --rules, has no pin notice and no pin finding.
+// scanRulesTool returns the tool "lookup" with the description and the raw
+// JSON input schema given.
+func scanRulesTool(description, schema string) inspect.Tool {
+	return inspect.Tool{Name: "lookup", Description: description, InputSchema: json.RawMessage(schema)}
+}
+
+// The tools of the tests below. The texts hold no secret and no word that a
+// built-in rule matches: each test first checks that a scan without --rules
+// gives no finding.
+var (
+	// scanRulesPlainTool has no "deprecated" keyword.
+	scanRulesPlainTool = scanRulesTool("Lists the files in a folder.", `{"type":"object"}`)
+	// scanRulesDeprecatedTool has the keyword of MOAT-X-001 in its
+	// description, and none in its input schema.
+	scanRulesDeprecatedTool = scanRulesTool("Lists the files in a folder. This tool is deprecated.", `{"type":"object"}`)
+	// scanRulesDeprecatedSchemaTool has the keyword of MOAT-X-004 in its input
+	// schema, and none in its description.
+	scanRulesDeprecatedSchemaTool = scanRulesTool("Lists the files in a folder.",
+		`{"properties":{"path":{"description":"This field is deprecated.","type":"string"}},"type":"object"}`)
+)
+
+// scanRulesToolTexts are parts of the tool texts above. A finding row holds no
+// tool text, so they must never show on stdout or stderr.
+var scanRulesToolTexts = []string{"Lists the files", "This tool is deprecated", "This field is deprecated"}
+
+// scanRulesPinned is the stderr of the first scan of the server ok-srv with
+// one tool, which pins that tool.
+const scanRulesPinned = "mcpmoat scan: pinned 1 tool for ok-srv\n"
+
+// TestScanRulesWithConnect checks the mode without --no-connect. Scan applies
+// the description and schema rules from --rules to the tools of each server.
+// A hit is a row with the field "tool", the tool name, and the target of the
+// rule ("description" or "schema") in parentheses. The exit code follows
+// --fail-on: the fixture rules are low, so the default --fail-on high gives
+// exit code 0 and --fail-on low gives exit code 1. With a connection scan
+// prints no notice for a description or schema rule, but it still prints the
+// notice for a config rule, which it never applies.
+//
+// The scan never starts a server: the inspector is a fake. A first scan
+// without --rules pins the tool, so the scan with --rules has no pin notice and
+// no pin finding.
 func TestScanRulesWithConnect(t *testing.T) {
+	t.Parallel()
+
+	descRow := []string{"MOAT-X-001", "low", "ok-srv", "tool", "lookup", "(description)"}
+	schemaRow := []string{"MOAT-X-004", "low", "ok-srv", "tool", "lookup", "(schema)"}
+	failOnLow := []string{"--fail-on", "low"}
+
+	tests := []struct {
+		name string
+		// dir returns the rules folder for the case.
+		dir  func(t *testing.T) string
+		tool inspect.Tool
+		// args are more scan flags after --rules.
+		args        []string
+		wantCode    int
+		wantRows    [][]string
+		wantNotices []string
+	}{
+		{
+			name:     "description rule, tool without the keyword",
+			dir:      func(*testing.T) string { return scanRulesFixture("extra") },
+			tool:     scanRulesPlainTool,
+			wantCode: exitOK,
+		},
+		{
+			name:     "description rule hit, default fail-on high",
+			dir:      func(*testing.T) string { return scanRulesFixture("extra") },
+			tool:     scanRulesDeprecatedTool,
+			wantCode: exitOK,
+			wantRows: [][]string{descRow},
+		},
+		{
+			name:     "description rule hit, fail-on low",
+			dir:      func(*testing.T) string { return scanRulesFixture("extra") },
+			tool:     scanRulesDeprecatedTool,
+			args:     failOnLow,
+			wantCode: exitFindings,
+			wantRows: [][]string{descRow},
+		},
+		{
+			name:     "description rule does not read the schema",
+			dir:      func(*testing.T) string { return scanRulesFixture("extra") },
+			tool:     scanRulesDeprecatedSchemaTool,
+			args:     failOnLow,
+			wantCode: exitOK,
+		},
+		{
+			name:     "schema rule hit, fail-on low",
+			dir:      scanRulesSchemaDir,
+			tool:     scanRulesDeprecatedSchemaTool,
+			args:     failOnLow,
+			wantCode: exitFindings,
+			wantRows: [][]string{schemaRow},
+		},
+		{
+			name:     "schema rule does not read the description",
+			dir:      scanRulesSchemaDir,
+			tool:     scanRulesDeprecatedTool,
+			args:     failOnLow,
+			wantCode: exitOK,
+		},
+		{
+			name:        "config rule only",
+			dir:         func(*testing.T) string { return scanRulesFixture("configtarget") },
+			tool:        scanRulesDeprecatedTool,
+			args:        failOnLow,
+			wantCode:    exitOK,
+			wantNotices: []string{configRulesNotice},
+		},
+		{
+			name: "config and description rules",
+			dir: func(t *testing.T) string {
+				return scanRulesDirOf(t, scanRulesExtraFile, scanRulesConfigFile)
+			},
+			tool:        scanRulesDeprecatedTool,
+			args:        failOnLow,
+			wantCode:    exitFindings,
+			wantRows:    [][]string{descRow},
+			wantNotices: []string{configRulesNotice},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			writeServers(t, home, ".claude.json", okServer)
+			fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {tt.tool}})
+			dir := tt.dir(t)
+			before := dirSnapshot(t, dir)
+
+			// The first scan, without --rules, pins the tool. It also proves
+			// that no built-in rule matches the tool, so every row below
+			// comes from the rules in dir.
+			base := scanInWith(t, fake, home, work, tt.args...)
+			assertScanResult(t, base.code, base.stdout, base.stderr, scanWant{
+				code:   exitOK,
+				stdout: []string{"ok-srv"},
+				stderr: []string{scanRulesPinned},
+			})
+			if rows := findingRows(t, base.stdout); len(rows) != 0 {
+				t.Fatalf("the scan without --rules has findings %q, want none", rows)
+			}
+
+			got := scanInWith(t, fake, home, work, append([]string{"--rules", dir}, tt.args...)...)
+
+			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
+				code:     tt.wantCode,
+				stdout:   []string{"ok-srv"},
+				noStdout: scanRulesToolTexts,
+				stderr:   tt.wantNotices,
+			})
+			if rows := findingRows(t, got.stdout); !slices.EqualFunc(rows, tt.wantRows, slices.Equal) {
+				t.Errorf("finding rows = %q, want %q\nstdout:\n%s", rows, tt.wantRows, got.stdout)
+			}
+			if len(tt.wantRows) == 0 && got.stdout != base.stdout {
+				t.Errorf("--rules with no hit changes stdout\ngot:  %q\nwant: %q", got.stdout, base.stdout)
+			}
+			// No notice for the tool rules: scan applies them. No pin
+			// notice: the first scan pinned the tool.
+			wantStderr := ""
+			if len(tt.wantNotices) > 0 {
+				wantStderr = strings.Join(tt.wantNotices, "\n") + "\n"
+			}
+			if got.stderr != wantStderr {
+				t.Errorf("stderr = %q, want %q", got.stderr, wantStderr)
+			}
+			assertContainsNone(t, "stderr", got.stderr, scanRulesToolTexts)
+			assertDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+// TestScanRulesWithConnectJSON checks the JSON row of a description rule from
+// --rules: the rule ID, the severity of the rule, the server, the field
+// "tool", the tool name as the key and the target "description" as the
+// related text. The tool text is not in the document.
+func TestScanRulesWithConnectJSON(t *testing.T) {
 	t.Parallel()
 
 	home, work := t.TempDir(), t.TempDir()
 	writeServers(t, home, ".claude.json", okServer)
-	fake := &inspecttest.Fake{Results: map[string]inspect.Result{"ok-srv": inspecttest.BenignResult()}}
+	fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {scanRulesDeprecatedTool}})
 
-	base := scanInWith(t, fake, home, work)
-	assertScanResult(t, base.code, base.stdout, base.stderr, scanWant{
-		code:   exitOK,
-		stdout: []string{"ok-srv"},
-		stderr: []string{"mcpmoat scan: pinned 2 tools for ok-srv\n"},
+	got := scanInWith(t, fake, home, work, "--json", "--rules", scanRulesFixture("extra"))
+
+	// The first scan of the server creates pins.json (no XDG_CONFIG_HOME, so
+	// it is under home/.config) and pins its tool. The low finding does not
+	// reach the default --fail-on high.
+	wantStderr := newPinsFileNotice("scan", filepath.Join(home, ".config", "mcpmoat", "pins.json")) + scanRulesPinned
+	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
+		code:     exitOK,
+		noStdout: scanRulesToolTexts,
+		stderr:   []string{scanRulesPinned},
 	})
-
-	got := scanInWith(t, fake, home, work, "--rules", scanRulesFixture("extra"))
-
-	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
-	if got.stdout != base.stdout {
-		t.Errorf("valid --rules changes stdout\ngot:  %q\nwant: %q", got.stdout, base.stdout)
+	if got.stderr != wantStderr {
+		t.Errorf("stderr = %q, want %q", got.stderr, wantStderr)
 	}
-	if want := rulesNotAppliedNotice + "\n"; got.stderr != want {
+	doc := decodeScanJSON(t, got.stdout)
+	want := []report.JSONFinding{toolRow("MOAT-X-001", "low", "ok-srv", "lookup", "description")}
+	if !slices.Equal(doc.Findings, want) {
+		t.Errorf("JSON findings = %+v\nwant            %+v", doc.Findings, want)
+	}
+}
+
+// TestScanRulesNoConnectSkipsToolRules checks that --no-connect applies no
+// description rule from --rules, also when the server has a tool that the rule
+// would match: scan does not start the server, prints exactly
+// toolRulesNoConnectNotice on stderr and gives no finding, also with
+// --fail-on low. It reads and writes no pins. This is the one test of that
+// notice with a description rule; TestScanRulesAccepted checks other folder
+// shapes and TestScanToolsNoConnect the built-in rules.
+func TestScanRulesNoConnectSkipsToolRules(t *testing.T) {
+	t.Parallel()
+
+	home, work := t.TempDir(), t.TempDir()
+	writeServers(t, home, ".claude.json", okServer)
+	fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {scanRulesDeprecatedTool}})
+	homeBefore := dirSnapshot(t, home)
+
+	got := scanInWith(t, fake, home, work, "--no-connect", "--fail-on", "low", "--rules", scanRulesFixture("extra"))
+
+	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
+		code:     exitOK,
+		stdout:   []string{"ok-srv"},
+		noStdout: append([]string{"MOAT-X-001", findingsHeading}, scanRulesToolTexts...),
+		stderr:   []string{toolRulesNoConnectNotice},
+	})
+	if want := toolRulesNoConnectNotice + "\n"; got.stderr != want {
 		t.Errorf("stderr = %q, want %q", got.stderr, want)
+	}
+	if rows := findingRows(t, got.stdout); len(rows) != 0 {
+		t.Errorf("finding rows = %q, want none\nstdout:\n%s", rows, got.stdout)
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("inspector calls = %q, want none with --no-connect", calls)
+	}
+	// --no-connect reads and writes no pins. Without XDG_CONFIG_HOME,
+	// pins.json is under home (see pins.DefaultPath), so an unchanged home
+	// means that no pins were written.
+	assertDirUnchanged(t, home, homeBefore)
+}
+
+// TestScanRulesBadRegex checks a rule from --rules whose regex does not
+// compile. Scan compiles every rule from --rules before it looks at
+// --no-connect, also a config rule that it never applies. So both modes give
+// exit code 2, an empty stdout and one stderr line that names the file and the
+// field "match". Scan never starts the server and writes no pins.
+func TestScanRulesBadRegex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// fixture is the folder under testdata/rules, and file the rule file
+		// in it.
+		fixture, file string
+	}{
+		{name: "description rule", fixture: "badregex", file: "MOAT-X-002.yaml"},
+		{name: "config rule", fixture: "badregexconfig", file: "MOAT-X-005.yaml"},
+	}
+	for _, tt := range tests {
+		dir := scanRulesFixture(tt.fixture)
+		file := filepath.Join(dir, tt.file)
+		for _, mode := range scanModes {
+			t.Run(tt.name+" "+mode.name, func(t *testing.T) {
+				t.Parallel()
+				home, work := t.TempDir(), t.TempDir()
+				writeServers(t, home, ".claude.json", okServer)
+				fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {scanRulesDeprecatedTool}})
+				homeBefore := dirSnapshot(t, home)
+				dirBefore := dirSnapshot(t, dir)
+
+				got := scanInWith(t, fake, home, work, append(slices.Clone(mode.args), "--rules", dir)...)
+
+				assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
+					code:   exitError,
+					stderr: []string{"mcpmoat scan: " + file + ": ", "field match"},
+				})
+				assertEmptyStdout(t, got.stdout)
+				if lines := nonEmptyLines(got.stderr); len(lines) != 1 {
+					t.Errorf("stderr has %d lines, want 1\nstderr: %q", len(lines), got.stderr)
+				}
+				// The pattern text of the rule never shows.
+				assertContainsNone(t, "stderr", got.stderr, []string{"(unclosed"})
+				assertTerminalSafe(t, got.stderr)
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Errorf("inspector calls = %q, want none: the rules error comes before the connect step", calls)
+				}
+				assertDirUnchanged(t, home, homeBefore)
+				assertDirUnchanged(t, dir, dirBefore)
+			})
+		}
 	}
 }
 
@@ -215,6 +546,12 @@ func TestScanRulesErrors(t *testing.T) {
 			name:       "path is a regular file",
 			dir:        regularFile,
 			wantStderr: []string{"mcpmoat scan: ", "cannot read directory"},
+		},
+		{
+			// rules.NewAnalyzer compiles the regex, also with --no-connect.
+			name:       "regex that does not compile",
+			dir:        scanRulesFixture("badregex"),
+			wantStderr: []string{"mcpmoat scan: ", "MOAT-X-002.yaml", "field match"},
 		},
 	}
 
@@ -651,7 +988,7 @@ func TestScanRulesErrorFlood(t *testing.T) {
 
 	got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-	assertFast(t, start)
+	assertFast(t, start, floodGuard)
 	assertFloodResult(t, got.code, got.stdout, got.stderr)
 }
 
@@ -682,7 +1019,7 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 
 			got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-			assertFast(t, start)
+			assertFast(t, start, floodGuard)
 			assertIDFloodResult(t, got.code, got.stdout, got.stderr, tt.reason, tt.more)
 			assertDirUnchanged(t, dir, before)
 		})

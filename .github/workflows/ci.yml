@@ -67,8 +67,9 @@ jobs:
       - name: Check for known vulnerabilities
         if: runner.os == 'Linux'
         env:
-          # Dependabot does not bump this version string. The release-check
-          # job checks that release.yml pins the same version.
+          # Dependabot does not bump this version string. The ci-scripts
+          # job checks that release.yml and govulncheck.yml pin the same
+          # version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
 
@@ -126,8 +127,58 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: .github/scripts/run-offline.sh
 
+  # Guards the tool version pins, checks the shell scripts in
+  # .github/scripts/, tests the shared test harness, tests the failure issue
+  # job of the weekly vulnerability check, tests the guard step of the release
+  # job and tests the publish script. The header of each test script lists
+  # the tools that it needs, and this runner has all of them. The pin check is
+  # a Go program (internal/pincheck), so the job sets up Go. It is a separate
+  # small job, with no GoReleaser, so that it can be a required check on every
+  # branch.
+  ci-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck is preinstalled on ubuntu-latest.
+      - name: Lint the scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No cache here, so this short job cannot save a small cache for the other jobs.
+          cache: false
+
+      # The other test scripts source the harness, so a broken harness fails here first.
+      - name: Test the test harness
+        run: .github/scripts/test-harness-test.sh
+
+      - name: Test the pin check
+        run: .github/scripts/check-tool-pins-test.sh
+
+      - name: Check the tool version pins
+        run: .github/scripts/check-tool-pins.sh
+
+      - name: Test the failure issue job
+        run: .github/scripts/notify-failure-test.sh
+
+      - name: Test the release guard step
+        run: .github/scripts/release-guard-test.sh
+
+      - name: Test the verify and publish script
+        run: .github/scripts/verify-and-publish-test.sh
+
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
-  # fails here and not at tag time. It uses no secrets: a snapshot does not
+  # fails here and not at tag time. It then tests the snapshot check script and
+  # checks the snapshot artifacts. It uses no secrets: a snapshot does not
   # publish, so the tap token is not needed.
   release-check:
     runs-on: ubuntu-latest
@@ -135,9 +186,8 @@ jobs:
     permissions:
       contents: read
     env:
-      # Dependabot does not bump this version string. The "Check the tool
-      # version pins" step below checks that release.yml and CONTRIBUTING.md
-      # pin the same version.
+      # Dependabot does not bump this version string. The ci-scripts job
+      # checks that release.yml and CONTRIBUTING.md pin the same version.
       GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
@@ -146,27 +196,6 @@ jobs:
           # GoReleaser reads the git tags to compute the version.
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Check the tool version pins
-        run: |
-          # pin prints the version of an "  NAME: vX.Y.Z" line in a file.
-          pin() {
-            sed -nE 's/^ *'"$1"': *"?(v[0-9][0-9A-Za-z.+-]*[0-9A-Za-z])"? *(#.*)?$/\1/p' "$2"
-          }
-          rel=$(pin GORELEASER_VERSION .github/workflows/release.yml)
-          # CONTRIBUTING.md names the version only in goreleaser/v<major>@<version>.
-          doc=$(grep -oE 'goreleaser(/v[0-9]+)?@v[0-9][0-9A-Za-z.+-]*[0-9A-Za-z]' CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
-          if [ "$rel" != "$GORELEASER_VERSION" ] || [ "$doc" != "$GORELEASER_VERSION" ]; then
-            echo "::error::The GoReleaser pins differ. ci.yml: $GORELEASER_VERSION. release.yml: $rel. CONTRIBUTING.md: $doc."
-            exit 1
-          fi
-          # The release test job runs govulncheck too, with the same pin.
-          vuln_ci=$(pin GOVULNCHECK_VERSION .github/workflows/ci.yml)
-          vuln_rel=$(pin GOVULNCHECK_VERSION .github/workflows/release.yml)
-          if [ -z "$vuln_ci" ] || [ "$vuln_ci" != "$vuln_rel" ]; then
-            echo "::error::The govulncheck pins differ. ci.yml: $vuln_ci. release.yml: $vuln_rel."
-            exit 1
-          fi
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -191,6 +220,11 @@ jobs:
           distribution: goreleaser
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
+
+      # check-snapshot-test.sh reads dist/ from the step above. Its header lists
+      # the tools that it needs, which this job has.
+      - name: Test the snapshot check
+        run: .github/scripts/check-snapshot-test.sh
 
       - name: Check the snapshot artifacts
         run: .github/scripts/check-snapshot.sh

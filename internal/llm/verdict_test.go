@@ -51,7 +51,7 @@ func TestParseVerdictValid(t *testing.T) {
 		{name: "keys in other order", input: `{"category":"tool-shadowing","risk":"none"}`, want: Verdict{Risk: RiskNone, Category: CategoryToolShadowing}},
 		{name: "white space around", input: " \n\t{ \"risk\" : \"high\" ,\r\n \"category\" : \"other\" }\n ", want: Verdict{Risk: RiskHigh, Category: CategoryOther}},
 		{name: "escaped key", input: `{"\u0072isk":"low","category":"other"}`, want: Verdict{Risk: RiskLow, Category: CategoryOther}},
-		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", MaxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{Risk: RiskLow, Category: CategoryOther}},
+		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", maxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{Risk: RiskLow, Category: CategoryOther}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestParseVerdictInvalid(t *testing.T) {
 		{name: "unclosed object", input: `{"risk":"high","category":"other"`},
 		{name: "leading text", input: canary + valid},
 		{name: "markdown fence", input: "```json\n" + valid + "\n```"},
-		{name: "over max length", input: valid + strings.Repeat(" ", MaxVerdictBytes-len(valid)) + " "},
+		{name: "over max length", input: valid + strings.Repeat(" ", maxVerdictBytes-len(valid)) + " "},
 		{name: "huge", input: `{"risk":"high","category":"` + strings.Repeat(canary, 1000) + `"}`},
 		{name: "invalid UTF-8 in value", input: `{"risk":"high` + "\xff" + `","category":"other"}`},
 		{name: "invalid UTF-8 outside value", input: "\xff" + valid},
@@ -171,44 +171,10 @@ func FuzzParseVerdict(f *testing.F) {
 		if v.Truncated {
 			t.Fatalf("parseVerdict(%q) set Truncated, want it set only by Classify", data)
 		}
-		if len(data) > MaxVerdictBytes {
-			t.Fatalf("parseVerdict accepted %d bytes, max %d", len(data), MaxVerdictBytes)
+		if len(data) > maxVerdictBytes {
+			t.Fatalf("parseVerdict accepted %d bytes, max %d", len(data), maxVerdictBytes)
 		}
 	})
-}
-
-func TestRiskSeverity(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		risk   Risk
-		want   string
-		wantOK bool
-	}{
-		{risk: RiskNone, want: "", wantOK: false},
-		{risk: RiskLow, want: "low", wantOK: true},
-		{risk: RiskMedium, want: "medium", wantOK: true},
-		{risk: RiskHigh, want: "high", wantOK: true},
-		{risk: "critical", want: "", wantOK: false},
-		{risk: "", want: "", wantOK: false},
-		{risk: "HIGH", want: "", wantOK: false},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.risk), func(t *testing.T) {
-			t.Parallel()
-			got, ok := tt.risk.Severity()
-			if got != tt.want || ok != tt.wantOK {
-				t.Errorf("%q.Severity() = %q, %v; want %q, %v", tt.risk, got, ok, tt.want, tt.wantOK)
-			}
-		})
-	}
-
-	// The model alone can never give the highest severity.
-	for _, r := range risks {
-		if got, _ := r.Severity(); got == "critical" {
-			t.Errorf("%q.Severity() = critical", r)
-		}
-	}
 }
 
 func TestRiskAndCategoryValid(t *testing.T) {
@@ -257,16 +223,21 @@ func TestFixedTexts(t *testing.T) {
 		"InvalidTitle":       InvalidTitle,
 		"Remediation":        Remediation,
 		"InvalidText":        InvalidText,
+		"RejectedText":       RejectedText,
+		"TruncatedText":      TruncatedText,
 		"InvalidRemediation": InvalidRemediation,
 	}
-	seen := map[string]Category{}
 	for _, c := range categories {
-		text := c.Text()
-		texts["Text "+string(c)] = text
+		texts["Text "+string(c)] = c.Text()
+	}
+	// No two fixed texts are the same, so a reader can tell the findings
+	// apart (for example RejectedText and InvalidText).
+	seen := map[string]string{}
+	for name, text := range texts {
 		if prev, dup := seen[text]; dup {
-			t.Errorf("%q.Text() is the same as %q.Text()", c, prev)
+			t.Errorf("%s is the same as %s", name, prev)
 		}
-		seen[text] = c
+		seen[text] = name
 	}
 	for name, text := range texts {
 		if strings.TrimSpace(text) == "" {
@@ -283,6 +254,24 @@ func TestFixedTexts(t *testing.T) {
 	// never echoes the category.
 	if got := Category(canary).Text(); got != CategoryOther.Text() {
 		t.Errorf("Category(unknown).Text() = %q, want the CategoryOther text", got)
+	}
+}
+
+// TestRejectedText checks that RejectedText is fixed, plain ASCII text with
+// no value from the server: no status code (only the class "4xx") and no
+// URL. TestFixedTexts checks that it differs from the other texts.
+func TestRejectedText(t *testing.T) {
+	t.Parallel()
+	for i := range len(RejectedText) {
+		if b := RejectedText[i]; b < ' ' || b > '~' {
+			t.Errorf("RejectedText holds the byte %#x at %d, want printable ASCII", b, i)
+		}
+	}
+	if rest := strings.ReplaceAll(RejectedText, "4xx", ""); containsAnyByte(rest, "0123456789") {
+		t.Errorf("RejectedText = %q, holds a digit outside %q", RejectedText, "4xx")
+	}
+	if strings.Contains(RejectedText, "://") {
+		t.Errorf("RejectedText = %q, holds a URL", RejectedText)
 	}
 }
 

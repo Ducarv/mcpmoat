@@ -1,0 +1,168 @@
+# Exit codes
+
+This page is the exit-code contract of `mcpmoat scan`. Other docs give a short form and link
+here.
+
+| Code | Meaning |
+|---|---|
+| 0 | No execution error, and no finding that is not ignored has severity at or above `--fail-on`. |
+| 1 | No execution error, and at least one finding that is not ignored has severity at or above `--fail-on`. |
+| 2 | Execution or usage error. Exit code 2 wins over 1. |
+
+- `--fail-on low|medium|high|critical` sets the lowest severity that gives exit code 1. The default
+  is `high`. Only these exact lowercase words work. Another value, an empty value or a second
+  `--fail-on` is a usage error (exit code 2). It is a `scan` flag only. `pin` never exits with
+  code 1.
+- Ignored findings (`--ignore`, or `.mcpmoat-ignore` with `--use-ignore-file`) never give exit
+  code 1. Without `--use-ignore-file`, `scan` does not read the file, so it drops nothing (see
+  [Ignore findings](ignore.md)).
+- With `--llm`, the LLM findings (`MOAT-LLM-001`, `MOAT-LLM-002`) count like any other finding.
+  They are `high` at most.
+- mcpmoat fails closed. A finding with a severity that mcpmoat does not know always counts, at
+  every `--fail-on` value. A finding whose rule ID is not in the rule set counts as critical.
+- No built-in rule is critical yet, so `--fail-on critical` passes every built-in finding, also a
+  rug pull (`MOAT-T2-001` is high). `scan` says so on stderr: `mcpmoat scan: note: no built-in
+  rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1`. It fails
+  only in the two fail-closed cases above, or when a description or schema rule from `--rules` is
+  critical: then a finding of that rule and a `MOAT-T1-023` budget finding or a `MOAT-T1-024` cap
+  finding (see below) give exit code 1.
+- An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
+  `--json`). It does not change the exit code. A pinned server that fails or times out is a high
+  `MOAT-T2-004` finding.
+- The rule analysis shares one time limit between all servers (see [Limits](limits.md)). A server
+  that uses up its share is a `MOAT-T1-023` finding. A server that `scan` does not reach in time
+  is not analysed, and the servers after it are not analysed either. Each of them gets the same
+  finding for all its tools. Its severity is the highest severity
+  of the description and schema rules that `scan` applies, but never lower than high. So it is
+  high with the built-in rules, and critical when a description or schema rule from `--rules` is
+  critical (see the `--fail-on critical` item above). It is not an execution error: it gives exit
+  code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. Only a signal (see
+  below) stops the scan with exit code 2; the end of the time limit does not. `scan` also prints a
+  warning on stderr (see [Scan output](scan-output.md)). A `.mcpmoat-ignore` file cannot drop the
+  finding. Only `--ignore MOAT-T1-023` can.
+- `scan` lists at most 1000 tool rule findings for each server, the most severe ones. It counts the
+  rest and adds one `MOAT-T1-024` finding that says how many it left out ("N more tool findings are
+  not listed; limit M"). Its severity is the highest severity of the description and schema rules that `scan`
+  applies, but never lower than high, as for `MOAT-T1-023`. It is not an execution error: it gives
+  exit code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. The exit code
+  follows `--fail-on` like for any other finding. A `.mcpmoat-ignore` file cannot drop it, also
+  with `--use-ignore-file`, because it can come from a cloned repository. Only
+  `--ignore MOAT-T1-024` can.
+- `scan` lists at most 100 config findings (`MOAT-T4-*` and `MOAT-T5-*`) for each server and
+  10,000 for the whole scan, the most severe ones. A server that loses config findings to a limit
+  gets one `MOAT-T4-005` finding that says how many it left out ("N more config findings are not
+  listed; limit M"). Its severity is high, or higher when a finding that it left out is higher. It
+  is not an execution error: it gives exit code 1 with the default `--fail-on`, and the JSON
+  `complete` stays `true`. A `.mcpmoat-ignore` file cannot drop it. Only `--ignore MOAT-T4-005`
+  can (see [Limits](limits.md)).
+
+Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
+a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
+`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved (see [Pins
+errors](#pins-errors)), a report
+that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
+an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, a provider
+refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM
+step, or tools over the 500-tool cap), an internal error of the tool rule step, or another
+internal error. One tool that the provider refuses (HTTP 400, 413 or 422) is not an execution
+error: it is a `medium` finding, and the scan goes on (see [Optional LLM classification](llm.md)).
+That is below the default `--fail-on high`, so a hostile server that makes the provider refuse its
+tool descriptions can keep their LLM rating from reaching `high`. Some of these errors still print
+the report on stdout first, so you can read the findings:
+
+| Execution error | Report |
+|---|---|
+| A problem in a config file | Printed, then the problems. A `--config` file with a problem and no server prints only the problem. |
+| A `pins.json` that cannot be read or saved | Printed |
+| An internal error of the inspection (`inspect.Run`) | Printed |
+| An LLM provider failure, a provider refusal of every tool, the 10-minute time limit of the LLM step, an internal error of the LLM step, or tools over the 500-tool cap with `--llm` | Printed |
+| A signal before the save of new pins | Printed |
+| A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
+| A signal during the inspection, the tool rule step or the LLM step | Not printed |
+| An internal error of the tool rule step. `scan` prints `mcpmoat scan: server <name>: the rule analysis failed (internal error)` | Not printed |
+| A report that cannot be written | Not printed |
+
+A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
+
+- While `scan` reads the configs. The read stops, and the file it did not read is a config file
+  problem with the reason `canceled`. If `scan` found a server and you did not use `--no-connect`,
+  it then stops at the inspection, as in the next item: it prints the line below and no report.
+  A `pins.json` that cannot be read is the exception: `scan` reads it before the inspection, so
+  it prints the report and the `pins.json` error, without the line below.
+- During the inspection. `scan` stops the stdio servers that it started, prints
+  `mcpmoat scan: interrupted; no pins were saved`, saves nothing and prints no report.
+- During the tool rule step, which applies the description and schema rules to the tools after
+  the inspection. `scan` stops the rule analysis, prints the same line, saves nothing and prints no
+  report.
+- During the LLM step of a `--llm` scan. `scan` stops the requests and then does the same: it
+  prints the same line, saves nothing and prints no report. The 10-minute time limit of the LLM
+  step is not a signal: it prints the report (see the table above).
+- After the report, before the save of new pins. `scan` prints the same line and saves nothing.
+  This applies only when the scan has new servers to pin.
+
+At other times the scan ends with exit code 0 or 1, as if no signal came. A second signal ends
+mcpmoat at once.
+
+To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git hooks](ci.md).
+
+## Pins errors
+
+`scan` and `pin --accept` exit with code 2 when they cannot read or update `pins.json`. With
+`scan`, the report is still printed. The causes are:
+
+- The pins directory, a parent directory of it, or `pins.json` is unsafe: another user owns it,
+  group or others can write it, a macOS ACL lets a user or group write the pins directory or
+  `pins.json`, or `pins.json` is a symlink, or another user owns a symlink on the path to the pins
+  directory. A parent passes the owner check when root owns it (group or other write without the
+  sticky bit is still refused), and a parent with the sticky bit (as `/tmp`) passes the write
+  check. The error names the path and gives a fix (see [Pins and rug pulls](pins.md)).
+- On macOS, an ACL entry of a parent directory of the pins directory lets a user or group change
+  it: an allow entry with a write right, for any user or group. A deny entry passes, so the default
+  `everyone deny delete` entry of a home directory is fine. The error names the directory and the
+  index of the entry, and the fix removes only that entry: `chmod -a# <index> <path>` (or "ask root
+  to run" it, or "ask the owner or root to run" it, when you do not own the directory).
+  `ls -led <path>` shows the entries.
+- No part of the pins path exists, or a part of it is a file.
+- The lock file `pins.json.lock` in the pins directory is unsafe: it is not a regular file (a
+  symlink, for example), another user owns it, its group or others have any access (mode 0600
+  passes, 0644 is refused), or on macOS an ACL entry lets a user or group open it. mcpmoat never
+  changes the mode of an existing lock file. The fix is `rm -- '<path>', then mcpmoat makes a new
+  one with mode 0600` (`rmdir -- '<path>', ...` when the lock entry is a directory). For an ACL
+  entry that comes back after that, the entry is inherited from the pins directory, and the hint
+  also gives `chmod -N -- '<directory>'`. `scan` takes the lock only when it has new servers to pin.
+- You own the lock file and it has no group or other access, but you cannot open it (mode 0400 or
+  0000, for example after a run was killed while it made the file). The error is `open the pins
+  lock file <path>: permission denied (fix: rm -- '<path>', then mcpmoat makes a new one with mode
+  0600; first run mcpmoat again, in case another run is still making the file)`.
+- The pins directory is read-only and has no lock file yet, so mcpmoat cannot create
+  `pins.json.lock`. The error names the lock file and the reason, for example `create the pins
+  lock file <path>: permission denied`. A read-only pins directory with a lock file gets past the
+  lock, and then the save fails.
+- Another process still holds the lock on `pins.json.lock` after 10 seconds. The command prints
+  two lines on stderr: the read error, then a line that tells you to run the command again (see
+  [Pins and rug pulls](pins.md)).
+- The pins directory was moved, removed or replaced while the command ran. Right before it replaces
+  `pins.json`, the save checks that the path still names the directory that the command opened. If
+  not, it saves nothing, and the error says `the pins directory <path> was moved, removed or
+  replaced while this command ran, and nothing was saved`.
+- `pins.json` existed at the first read of the command, but it was removed while the command ran.
+  The command saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A
+  real first run is not affected.
+- At save time, a first-run server no longer fits in `pins.json` (32 MiB), because another run made
+  the file larger after the report. `scan` prints a warning for that server and still saves the
+  other servers (see [Pins and rug pulls](pins.md)). The same applies to a project-scope server
+  that no longer fits in the share of the project servers (16 MiB).
+- `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
+  32 MiB. It prints a message that the pins file is full and saves nothing. For a project-scope
+  server past the 16 MiB share of the project servers, the message says `the project share of the
+  pins file is full (16 MiB)` and tells you to remove project servers you no longer use.
+
+A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
+not an execution error. That is also true for a first-run project-scope server past the 16 MiB
+share of the project servers.
+
+## See also
+
+- [Using mcpmoat in CI and git hooks](ci.md)
+- [Pins and rug pulls](pins.md)
+- [Scan output](scan-output.md)
