@@ -41,7 +41,7 @@ type scanJSONInput struct {
 	// configPath is the --config value of the scan, or empty.
 	configPath string
 	// configProblem is true when a config file has a problem. The accept
-	// command of a server depends on it (see acceptAdvice).
+	// command of a server depends on it (see acceptDecision).
 	configProblem bool
 }
 
