@@ -357,6 +357,38 @@ func TestExtractPackage(t *testing.T) {
 	}
 }
 
+func TestRegistryName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		spec PackageSpec
+		want string
+	}{
+		{name: "docker.io prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "docker.io/mcp/fetch"}, want: "mcp/fetch"},
+		{name: "index.docker.io prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "index.docker.io/mcp/fetch"}, want: "mcp/fetch"},
+		{name: "registry-1.docker.io prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "registry-1.docker.io/mcp/fetch"}, want: "mcp/fetch"},
+		{name: "registry.hub.docker.com prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "registry.hub.docker.com/mcp/fetch"}, want: "mcp/fetch"},
+		{name: "registry.hub.docker.com prefix in upper case", spec: PackageSpec{Runner: RunnerDocker, Name: "Registry.Hub.Docker.com/MCP/Fetch"}, want: "mcp/fetch"},
+		{name: "registry.hub.docker.com with library", spec: PackageSpec{Runner: RunnerDocker, Name: "registry.hub.docker.com/library/postgres"}, want: "postgres"},
+		{name: "library prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "library/postgres"}, want: "postgres"},
+		{name: "no prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "mcp/fetch"}, want: "mcp/fetch"},
+		{name: "other registry keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "ghcr.io/mcp/fetch"}, want: "ghcr.io/mcp/fetch"},
+		{name: "look-alike host keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "registry.hub.docker.com.evil.io/mcp/fetch"}, want: "registry.hub.docker.com.evil.io/mcp/fetch"},
+		{name: "prefix only inside the name is kept", spec: PackageSpec{Runner: RunnerDocker, Name: "evil/registry.hub.docker.com/fetch"}, want: "evil/registry.hub.docker.com/fetch"},
+		{name: "only one prefix is dropped", spec: PackageSpec{Runner: RunnerDocker, Name: "docker.io/registry.hub.docker.com/fetch"}, want: "registry.hub.docker.com/fetch"},
+		{name: "pypi separators", spec: PackageSpec{Runner: RunnerUVX, Name: "MCP_Server.Fetch"}, want: "mcp-server-fetch"},
+		{name: "npm keeps case folded name", spec: PackageSpec{Runner: RunnerNPX, Name: "@Scope/Name"}, want: "@scope/name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := registryName(tt.spec); got != tt.want {
+				t.Errorf("registryName(%+v) = %q, want %q", tt.spec, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUnpinned(t *testing.T) {
 	t.Parallel()
 

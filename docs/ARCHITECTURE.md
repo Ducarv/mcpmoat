@@ -107,7 +107,8 @@ docs/                   PRD and other documentation
   not `cmd/pincheck`, because `cmd/` holds only the programs that ship. `internal/` keeps the tool out
   of the release build, and `./...` still covers it with build, vet and lint. The rules are in
   [CONTRIBUTING.md](../CONTRIBUTING.md#checks).
-- `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
+- `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. Each line of
+  that list is `kind:name`, and the kind is `npm`, `pypi` or `docker`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
   holds example client configs. Other folders hold fixtures for single packages.
@@ -226,10 +227,15 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    uses the same function, so both commands read the configs with the same trust rules.
 5. It runs the built-in config rules on every server it found, also a disabled one, as `discover`
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
-   from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
-   some findings. The rule set gives the severity of each one that is left. `configStep` runs this
-   step with `configChecks.findings` (both in `cmd/mcpmoat/scan_findings.go`), and it caps the rows
-   (#213):
+   from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). A package is an exact
+   popular match only when its kind and its name both match. The runner gives the kind: `npx` and
+   `bunx` are npm, `uvx` and `pipx` are PyPI, and `docker` is docker. An npm or PyPI package with
+   the name of a popular package of the other kind gives a finding with a fixed message. A docker
+   image whose last path component equals a popular docker image, under another namespace or
+   registry host, also gives a finding. The check skips a name shared by two or more popular docker
+   images, and a name under 5 characters. The ignore list drops some findings. The rule set gives
+   the severity of each one that is left. `configStep` runs this step with `configChecks.findings`
+   (both in `cmd/mcpmoat/scan_findings.go`), and it caps the rows (#213):
    - The caps count the rows after the ignore list. First a server keeps at most 100 rows
      (`configRowsPerServer`). Then, when more than 10,000 rows are left over all the servers, the
      scan keeps 10,000 (`configRowsTotal`). Each cut keeps the most severe rows (`cutConfigHits`, a

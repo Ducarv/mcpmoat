@@ -68,6 +68,34 @@ func (r Runner) isNPM() bool {
 	return r == RunnerNPX || r == RunnerBunx
 }
 
+// RegistryKind names the package registry that a Runner fetches from.
+type RegistryKind string
+
+// The registries that the package runners fetch from.
+const (
+	// KindNPM is the npm registry, used by npx and bunx.
+	KindNPM RegistryKind = "npm"
+	// KindPyPI is the Python Package Index, used by uvx and pipx.
+	KindPyPI RegistryKind = "pypi"
+	// KindDocker is a docker image registry, used by "docker run".
+	KindDocker RegistryKind = "docker"
+)
+
+// kind returns the registry that r fetches from. It returns "" (the zero
+// RegistryKind) for an unknown runner, so the caller can skip it.
+func (r Runner) kind() RegistryKind {
+	switch r {
+	case RunnerNPX, RunnerBunx:
+		return KindNPM
+	case RunnerUVX, RunnerPipx:
+		return KindPyPI
+	case RunnerDocker:
+		return KindDocker
+	default:
+		return ""
+	}
+}
+
 // nameSeparators matches a run of "-", "_", "." and "/". PyPI treats a run of
 // the first three as one "-" (PEP 503); a PyPI name never holds "/". The
 // typosquat check reads server names the same way, so "mcp-fetch" and the
@@ -83,14 +111,17 @@ func nameForm(name string) string {
 // registry resolves and that the popular list uses: lower case; for PyPI,
 // every run of "-", "_" and "." written as "-" (PEP 503), so
 // "mcp_server_fetch" is "mcp-server-fetch"; for docker, without a Docker Hub
-// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch".
+// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch". The
+// Docker Hub prefixes are "docker.io/", "index.docker.io/",
+// "registry-1.docker.io/" and "registry.hub.docker.com/"; they all name the
+// same images.
 func registryName(spec PackageSpec) string {
 	name := strings.ToLower(spec.Name)
 	switch spec.Runner {
 	case RunnerUVX, RunnerPipx:
 		return nameForm(name)
 	case RunnerDocker:
-		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/", "registry.hub.docker.com/"} {
 			if rest, found := strings.CutPrefix(name, prefix); found {
 				name = rest
 				break
