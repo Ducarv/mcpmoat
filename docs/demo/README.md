@@ -29,10 +29,14 @@ reports `MOAT-T2-001` (rug pull) on `clock`/`get_time` and shows the old and new
   [testdata/servers/README.md](../../testdata/servers/README.md).
 - `setup.sh` sets `HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` to a fake home in a new folder
   `~/.cache/mcpmoat-demo.*` (or `$XDG_CACHE_HOME/mcpmoat-demo.*` when `XDG_CACHE_HOME` is an
-  absolute path). The demo does not touch your real home or your real client configs.
+  absolute path). The demo does not read or write your real client configs. `go build` uses your
+  real Go module cache and build cache.
 - The cache folder must be private. If other users can write to it, the demo is not safe.
   `setup.sh` refuses a cache folder that group or others can write to. It does not check the owner
   or the parent folders. That follow-up is not done yet.
+- If other users can write to a parent folder of the cache folder (for example `/tmp`), mcpmoat
+  refuses its run folder. Every scan then shows the servers as failed and still exits 0, so you get
+  an empty GIF and no error.
 - Only the `mcpmoat` binary goes on `PATH`, in `$MCPMOAT_DEMO_DIR/bin`. The config starts the
   fixtures by absolute path.
 - The scans make no network call. The first `go build` in `setup.sh` can download Go modules or a
@@ -62,8 +66,9 @@ vhs writes `docs/demo/demo.gif`. The first run builds mcpmoat and the fixture se
 build cache this takes some time. The tape waits up to 120 s for it. The tape ends with a hidden
 `demo_cleanup`.
 
-If the build fails, or you press Ctrl-C during the build, `setup.sh` removes the demo folder and
-leaves your shell and environment as they were.
+If the build fails, or you press Ctrl-C during the setup, `setup.sh` removes the demo folder and
+leaves your shell, your environment and your Ctrl-C trap as they were. If it cannot remove the
+folder, it prints the path. Then remove the folder with the command below.
 
 If the vhs run fails, for example on a `Wait` timeout, a `mcpmoat-demo.*` folder can stay in the
 cache folder. Make sure that no demo is active in a shell, then remove it:
@@ -79,8 +84,8 @@ commit it.
 
 ## Shell functions
 
-You must source `setup.sh`, not run it: `source docs/demo/setup.sh`. It works in bash and zsh. It
-defines two shell functions for the tape:
+You must source `setup.sh`, not run it: `source docs/demo/setup.sh`. It works in bash and zsh, and
+refuses other shells such as dash. It defines two shell functions for the tape:
 
 - `demo_flip` starts `clock` as `rugpull -variant injected`.
 - `demo_cleanup` removes the demo folder and restores `HOME`, `PATH` and the `XDG_*` variables.

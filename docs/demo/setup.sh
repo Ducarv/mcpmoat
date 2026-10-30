@@ -5,6 +5,13 @@
 # The file is sourced, so it never uses set -e: a failure must not close the
 # caller's shell. Each step returns 1 instead.
 
+# Other shells, such as dash, pass the guard below or cannot save the INT trap.
+[ -n "${BASH_VERSION:-}${ZSH_VERSION:-}" ] || {
+  echo "setup.sh: use bash or zsh" >&2
+  # shellcheck disable=SC2317 # exit runs when the file runs as a script
+  return 1 2>/dev/null || exit 1
+}
+
 # Refuse to run as a script: the demo must change the caller's shell.
 # zsh accepts a top-level return in a script, so it needs ZSH_EVAL_CONTEXT.
 if [ -n "${ZSH_VERSION:-}" ]; then
@@ -16,13 +23,14 @@ fi || {
   exit 1
 }
 
-if [ -n "${MCPMOAT_DEMO_DIR:-}" ]; then
-  echo "setup.sh: a demo is already active in '$MCPMOAT_DEMO_DIR'; run demo_cleanup first" >&2
+if [ -n "${MCPMOAT_DEMO_DIR:-}" ] || [ -n "${MCPMOAT_DEMO_OLD_HOME+x}" ]; then
+  echo "setup.sh: a demo is already active in '${MCPMOAT_DEMO_DIR:-}'; run demo_cleanup first" >&2
   return 1
 fi
 
-_demo_write_config() { # $1 = rugpull args as a JSON array
-  cat >"$MCPMOAT_DEMO_DIR/home/.claude.json" <<JSON
+_mcpmoat_demo_write_config() { # $1 = rugpull args as a JSON array
+  # >| overwrites the file also when the noclobber option is on.
+  cat >|"$MCPMOAT_DEMO_DIR/home/.claude.json" <<JSON
 {"mcpServers":{
  "notes":{"command":"$MCPMOAT_DEMO_DIR/poisoned"},
  "math":{"command":"$MCPMOAT_DEMO_DIR/shadowing"},
@@ -32,29 +40,37 @@ _demo_write_config() { # $1 = rugpull args as a JSON array
 JSON
 }
 
-# Removes the demo folder (if any), restores the saved variables and forgets
-# the demo. Each variable comes back only if setup.sh saved it.
-_demo_reset() {
-  [ -z "${MCPMOAT_DEMO_DIR:-}" ] || rm -rf -- "$MCPMOAT_DEMO_DIR"
-  [ -z "${MCPMOAT_DEMO_OLD_PATH+x}" ] || export PATH="$MCPMOAT_DEMO_OLD_PATH"
-  # The XDG values are saved in the same step as HOME. An unset saved copy
-  # means the variable was unset.
+# Removes the demo folder (if any), restores the saved variables and the
+# caller's INT trap, and forgets the demo. Returns 1 if rm fails.
+_mcpmoat_demo_reset() {
+  local rc=0
+  # rm first: if it is stopped, the demo stays active and can be cleaned again.
+  if [ -n "${MCPMOAT_DEMO_DIR:-}" ] && ! rm -rf -- "$MCPMOAT_DEMO_DIR"; then
+    echo "mcpmoat demo: could not remove the folder; remove it by hand: rm -rf -- '$MCPMOAT_DEMO_DIR'" >&2
+    rc=1
+  fi
+  # Each saved value is "x" and the old value, or empty if the variable was unset.
   if [ -n "${MCPMOAT_DEMO_OLD_HOME+x}" ]; then
-    export HOME="$MCPMOAT_DEMO_OLD_HOME"
-    if [ -n "${MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME+x}" ]; then
-      export XDG_CONFIG_HOME="$MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME"
-    else
-      unset XDG_CONFIG_HOME
-    fi
-    if [ -n "${MCPMOAT_DEMO_OLD_XDG_CACHE_HOME+x}" ]; then
-      export XDG_CACHE_HOME="$MCPMOAT_DEMO_OLD_XDG_CACHE_HOME"
-    else
-      unset XDG_CACHE_HOME
-    fi
+    case $MCPMOAT_DEMO_OLD_HOME in x*) export HOME="${MCPMOAT_DEMO_OLD_HOME#x}" ;; *) unset HOME ;; esac
+    case $MCPMOAT_DEMO_OLD_PATH in x*) export PATH="${MCPMOAT_DEMO_OLD_PATH#x}" ;; *) unset PATH ;; esac
+    case $MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME in
+      x*) export XDG_CONFIG_HOME="${MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME#x}" ;;
+      *) unset XDG_CONFIG_HOME ;;
+    esac
+    case $MCPMOAT_DEMO_OLD_XDG_CACHE_HOME in
+      x*) export XDG_CACHE_HOME="${MCPMOAT_DEMO_OLD_XDG_CACHE_HOME#x}" ;;
+      *) unset XDG_CACHE_HOME ;;
+    esac
+  fi
+  # bash only: zsh restores the trap itself (local_traps in the setup).
+  if [ -n "${_mcpmoat_demo_trap+x}" ]; then
+    eval "${_mcpmoat_demo_trap:-trap - INT}"
+    unset _mcpmoat_demo_trap
   fi
   unset MCPMOAT_DEMO_DIR MCPMOAT_DEMO_CACHE MCPMOAT_DEMO_OLD_HOME \
     MCPMOAT_DEMO_OLD_PATH MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME \
     MCPMOAT_DEMO_OLD_XDG_CACHE_HOME
+  return "$rc"
 }
 
 demo_flip() {
@@ -62,40 +78,48 @@ demo_flip() {
     echo "demo_flip: no active demo; source docs/demo/setup.sh first" >&2
     return 1
   fi
-  _demo_write_config '["-variant","injected"]'
+  _mcpmoat_demo_write_config '["-variant","injected"]'
 }
 
 demo_cleanup() {
   # Remove only a direct child "mcpmoat-demo.*" of the cache folder.
-  local dir="${MCPMOAT_DEMO_DIR:-}" cache="${MCPMOAT_DEMO_CACHE:-}" name safe=
+  local dir="${MCPMOAT_DEMO_DIR:-}" cache="${MCPMOAT_DEMO_CACHE:-}" rc name safe=
   name="${dir#"$cache"/}"
   case $name in
     "$dir" | */*) ;; # not below the cache folder, or not a direct child
     mcpmoat-demo.?*) [ -z "$cache" ] || safe=1 ;;
   esac
-  if [ -z "$safe" ]; then
+  # No folder: a stopped setup saved the variables only. Restore them.
+  if [ -n "$dir" ] && [ -z "$safe" ]; then
     echo "demo_cleanup: refusing to remove '$dir'" >&2
     return 1
   fi
-  _demo_reset
-  unset -f _demo_write_config _demo_reset demo_flip demo_cleanup
+  _mcpmoat_demo_reset
+  rc=$?
+  unset -f _mcpmoat_demo_write_config _mcpmoat_demo_reset demo_flip demo_cleanup
+  return "$rc"
 }
 
-_demo_setup() {
+_mcpmoat_demo_setup() {
   # C locale: in bash 3.2 the A-Za-z range below also matches letters like é.
-  local LC_ALL=C s
+  local LC_ALL=C home
   # zsh puts the caller's INT trap back when this function returns.
   [ -z "${ZSH_VERSION:-}" ] || setopt local_options local_traps
-  # Ctrl-C: remove the half-built demo. bash 3.2 and zsh drop the 1 of this
-  # return, so the caller checks MCPMOAT_DEMO_DIR, which _demo_reset unsets.
-  trap '_demo_reset; return 1' INT
-
-  # Save the caller's values before the demo folder exists.
-  MCPMOAT_DEMO_OLD_HOME="$HOME"
-  MCPMOAT_DEMO_OLD_PATH="$PATH"
-  unset MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME MCPMOAT_DEMO_OLD_XDG_CACHE_HOME
-  [ -z "${XDG_CONFIG_HOME+x}" ] || MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
-  [ -z "${XDG_CACHE_HOME+x}" ] || MCPMOAT_DEMO_OLD_XDG_CACHE_HOME="$XDG_CACHE_HOME"
+  if [ -n "${BASH_VERSION:-}" ]; then
+    _mcpmoat_demo_trap="$(trap -p INT)"
+    # The demo's own trap, left by a stopped setup, is not the caller's trap.
+    case $_mcpmoat_demo_trap in *_mcpmoat_demo_reset*) _mcpmoat_demo_trap= ;; esac
+  fi
+  # Save all the caller's values in one step, before the trap and the folder.
+  MCPMOAT_DEMO_OLD_HOME=${HOME+x$HOME} MCPMOAT_DEMO_OLD_PATH=${PATH+x$PATH} \
+    MCPMOAT_DEMO_OLD_XDG_CONFIG_HOME=${XDG_CONFIG_HOME+x$XDG_CONFIG_HOME} \
+    MCPMOAT_DEMO_OLD_XDG_CACHE_HOME=${XDG_CACHE_HOME+x$XDG_CACHE_HOME}
+  # Ctrl-C: remove the half-built demo. bash runs this trap only when the
+  # Ctrl-C comes during a builtin or a $(...) such as mktemp or find. An
+  # external command such as go build gets the Ctrl-C alone and fails, and
+  # its "|| return 1" cleans up. bash 3.2 and zsh drop the 1 of this return,
+  # so the caller checks MCPMOAT_DEMO_DIR, which the reset unsets.
+  trap '_mcpmoat_demo_reset; return 1' INT
 
   # mcpmoat refuses a run folder below a folder that other users can write to,
   # such as /tmp, so the demo folder goes below the private user cache.
@@ -125,29 +149,34 @@ _demo_setup() {
   # and the run folder check would refuse it.
   mkdir "$MCPMOAT_DEMO_DIR/bin" || return 1
   mkdir -m 700 "$MCPMOAT_DEMO_DIR/home" || return 1
+  # No loop here: in bash 5 a Ctrl-C that stops a command in a loop stops the
+  # whole sourced file, and the cleanup does not run.
   go build -o "$MCPMOAT_DEMO_DIR/bin/mcpmoat" ./cmd/mcpmoat || return 1
-  for s in poisoned shadowing mailer rugpull; do
-    go build -o "$MCPMOAT_DEMO_DIR/$s" "./testdata/servers/$s" || return 1
-  done
-  _demo_write_config '[]' || return 1
+  # With several packages, -o DIR/ writes each binary as DIR/<package folder name>.
+  go build -o "$MCPMOAT_DEMO_DIR/" ./testdata/servers/poisoned ./testdata/servers/shadowing \
+    ./testdata/servers/mailer ./testdata/servers/rugpull || return 1
+  _mcpmoat_demo_write_config '[]' || return 1
   # A Ctrl-C in a nested call can return here with status 0.
   [ -n "${MCPMOAT_DEMO_DIR:-}" ] || return 1
 
-  export HOME="$MCPMOAT_DEMO_DIR/home"
-  export XDG_CONFIG_HOME="$HOME/.config"
-  export XDG_CACHE_HOME="$HOME/.cache"
-  export PATH="$MCPMOAT_DEMO_DIR/bin:$PATH"
+  # One export: a trap cannot run between the four changes.
+  home="$MCPMOAT_DEMO_DIR/home"
+  export HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+    PATH="$MCPMOAT_DEMO_DIR/bin${PATH+:$PATH}"
+  # bash: the demo is ready, so put the caller's INT trap back now.
+  if [ -n "${_mcpmoat_demo_trap+x}" ]; then
+    eval "${_mcpmoat_demo_trap:-trap - INT}"
+    unset _mcpmoat_demo_trap
+  fi
 }
 
-# zsh cannot list traps in $(...); local_traps restores its trap instead.
-[ -n "${ZSH_VERSION:-}" ] || _demo_trap="$(trap -p INT)"
-if ! _demo_setup || [ -z "${MCPMOAT_DEMO_DIR:-}" ]; then
-  [ -z "${MCPMOAT_DEMO_DIR:-}" ] || echo "setup.sh: setup failed; removed '$MCPMOAT_DEMO_DIR'" >&2
-  _demo_reset
+if ! _mcpmoat_demo_setup || [ -z "${MCPMOAT_DEMO_DIR:-}" ]; then
+  [ -z "${MCPMOAT_DEMO_DIR:-}" ] || echo "setup.sh: setup failed; removing '$MCPMOAT_DEMO_DIR'" >&2
+  _mcpmoat_demo_reset
+  unset -f _mcpmoat_demo_write_config _mcpmoat_demo_reset demo_flip demo_cleanup \
+    _mcpmoat_demo_setup
+  return 1
 fi
-[ -n "${ZSH_VERSION:-}" ] || eval "${_demo_trap:-trap - INT}"
-unset -f _demo_setup
-unset _demo_trap
-[ -n "${MCPMOAT_DEMO_DIR:-}" ] || return 1
+unset -f _mcpmoat_demo_setup
 echo "mcpmoat demo folder: $MCPMOAT_DEMO_DIR"
 echo "mcpmoat demo ready"
