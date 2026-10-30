@@ -81,6 +81,9 @@ func ParsePopular(r io.Reader) ([]PopularEntry, error) {
 		if name == "" {
 			return nil, fmt.Errorf("popular server list line %d: the name is empty", lineNo)
 		}
+		if kind == KindDocker && (strings.Contains(name, "@") || strings.Contains(dockerBase(name), ":")) {
+			return nil, fmt.Errorf("popular server list line %d: a docker name has no tag or digest", lineNo)
+		}
 		entries = append(entries, PopularEntry{Kind: kind, Name: name})
 	}
 	if err := scanner.Err(); err != nil {
@@ -143,14 +146,14 @@ type Typosquat struct {
 	ambiguousBase map[string]bool
 }
 
-// NewTyposquat returns a check for the given popular entries. It copies the
-// entries, trims and lowercases the names and kinds, writes each name in the
-// form that registryName gives (see canonicalName), and skips entries with a
-// blank name, so it accepts raw input that did not come from ParsePopular, and
-// the caller may change the slice afterwards. It stores the kind of each entry:
-// Check uses it to decide what is an exact match. It also skips an entry whose
+// NewTyposquat returns a check for the given popular entries. It accepts raw
+// input that did not come from ParsePopular. It copies the entries, so the
+// caller may change the slice afterwards. It trims and lowercases the names and
+// kinds. It writes each name in the form that registryName gives (see
+// canonicalName). It skips an entry with a blank name. It skips an entry whose
 // kind is not valid (see validPopularKind), so a caller cannot add an entry
-// that reports its own exact name as a kind mismatch.
+// that reports its own exact name as a kind mismatch. It stores the kind of
+// each entry: Check uses it to decide what is an exact match.
 func NewTyposquat(popular []PopularEntry) *Typosquat {
 	t := &Typosquat{
 		popular:       make([]popularName, 0, len(popular)),
@@ -181,21 +184,23 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 		}
 		if kind == KindDocker {
 			p.base = dockerBase(full)
-			if first, seen := firstByBase[p.base]; !seen {
-				firstByBase[p.base] = full
-			} else if first != full {
-				t.ambiguousBase[p.base] = true
-			}
+			noteOwner(firstByBase, t.ambiguousBase, p.base, full)
 		}
 		t.popular = append(t.popular, p)
-		first, seen := firstByBare[bare]
-		if !seen {
-			firstByBare[bare] = full
-		} else if first != full {
-			t.ambiguous[bare] = true
-		}
+		noteOwner(firstByBare, t.ambiguous, bare, full)
 	}
 	return t
+}
+
+// noteOwner records that key belongs to the popular name full. The first name
+// seen for a key goes into first. A later, different name marks the key as
+// ambiguous.
+func noteOwner(first map[string]string, ambiguous map[string]bool, key, full string) {
+	if seen, ok := first[key]; !ok {
+		first[key] = full
+	} else if seen != full {
+		ambiguous[key] = true
+	}
 }
 
 // typoCandidate is a name from a server that the check compares.
@@ -223,7 +228,7 @@ func (c typoCandidate) isPackage() bool {
 //
 // A package is not free. The kind comes from the runner: npx and bunx are npm,
 // uvx and pipx are PyPI, "docker run" is docker. A server that runs a popular
-// package exactly gets no finding at all.
+// package of the same kind exactly gets no finding at all.
 //
 // An npm or PyPI package whose name equals a popular name of another kind, such
 // as an npm package named like a popular PyPI server, gets a finding with
@@ -452,15 +457,14 @@ func dockerBase(name string) string {
 	return name[strings.LastIndex(name, "/")+1:]
 }
 
-// hasDockerOwner reports whether the docker image name has an owner, which is
-// a path component before the image name: "evil/fetch", "ghcr.io/evil/fetch"
-// and "evil.com/fetch" have one, "fetch" has none. A single component is an
-// official Docker Hub image. Docker Hub hosts are already dropped (see
-// registryName), and any other registry host has no official "library/"
-// namespace, so an image behind such a host is third party even when the host
-// is its only prefix.
-func hasDockerOwner(name string) bool {
-	return strings.Contains(name, "/")
+// isOfficialHubImage reports whether the docker image name is a single
+// component, such as "postgres": an official Docker Hub image, which only
+// Docker can publish. Docker Hub hosts are already dropped (see registryName),
+// and any other registry host has no official "library/" namespace, so an
+// image behind such a host, such as "evil.com/fetch", is third party even when
+// the host is its only prefix.
+func isOfficialHubImage(name string) bool {
+	return !strings.Contains(name, "/")
 }
 
 // dockerSquat reports whether docker image c copies the name of a popular image
@@ -473,8 +477,8 @@ func hasDockerOwner(name string) bool {
 //     registryName: the Docker Hub host and "library/" are already dropped, so
 //     "docker.io/mcp/fetch" equals "mcp/fetch" and is no finding, while
 //     "ghcr.io/mcp/fetch" is another registry and a finding;
-//   - c has an owner (see hasDockerOwner). A single component such as
-//     "postgres" is an official Docker Hub image and is skipped;
+//   - c is not an official Docker Hub image (see isOfficialHubImage), such as
+//     "postgres", which is skipped;
 //   - the last component of c equals the last component of the popular name;
 //   - that last component has minTyposquatNameLen to maxTyposquatNameLen runes;
 //   - that last component is not in ambiguousBase.
@@ -490,8 +494,14 @@ func hasDockerOwner(name string) bool {
 //   - An image whose last component equals a popular npm or PyPI name, such as
 //     "evil/mcp-server-fetch", is not compared, because only docker entries are
 //     used.
+//   - A false positive: a mirror or private registry that keeps the upstream
+//     path ("mirror.gcr.io/mcp/fetch", "harbor.corp/mcp/fetch") looks like
+//     another registry. The check cannot tell it from a third party host. The
+//     user can hide it with the ignore file.
+//   - A false positive: a legitimate image under another owner whose last
+//     component is the same generic word, such as "someorg/fetch".
 func (t *Typosquat) dockerSquat(c typoCandidate) (string, bool) {
-	if !c.isPackage() || c.kind != KindDocker || !hasDockerOwner(c.full) {
+	if !c.isPackage() || c.kind != KindDocker || isOfficialHubImage(c.full) {
 		return "", false
 	}
 	base := dockerBase(c.full)

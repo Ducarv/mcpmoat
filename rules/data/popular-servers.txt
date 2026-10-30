@@ -1,6 +1,8 @@
 # Popular MCP servers, the reference list for the typosquat check (rule
 # MOAT-T5-001, threat T5). A server name or package that is very close to one
-# of these names, but not equal to it, is reported.
+# of these names, but not equal to it, is reported. So is an equal name under
+# the runner of another kind, and a docker image under another owner with the
+# same last component.
 #
 # Format: one entry per line, written as kind:name. Lines that start with #
 # and empty lines are ignored.

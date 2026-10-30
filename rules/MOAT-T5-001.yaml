@@ -5,7 +5,7 @@ target: config
 match:
   heuristic: typosquat
 risk: The package name is one or two typos away from a popular MCP server, is a popular name on the wrong registry, or sits in a look-alike namespace or registry, so it may run attacker code instead of the real server.
-remediation: Check the exact package name and publisher on the registry. Replace it with the official package if it is a typo, and remove the server if you did not mean to install it.
+remediation: Check the exact package name and publisher on the registry. Replace it with the official package if it is a typo. If it is a popular name on the wrong registry, run it with the runner of its registry (npx for npm, uvx for PyPI). If it is a docker image, pull it from the official owner. Remove the server if you did not mean to install it.
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://owasp.org/www-community/attacks/Typosquatting

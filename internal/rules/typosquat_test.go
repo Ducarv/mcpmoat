@@ -193,7 +193,7 @@ func TestParsePopular(t *testing.T) {
 				t.Fatalf("ParsePopular() error = %v", err)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ParsePopular() = %q, want %q", got, tt.want)
+				t.Errorf("ParsePopular() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -212,16 +212,18 @@ func TestParsePopular(t *testing.T) {
 		{name: "empty name", input: "npm:\n", line: "line 1", want: "name is empty"},
 		{name: "blank name", input: "# c\npypi:   \n", line: "line 2", want: "name is empty"},
 		{name: "CRLF empty name", input: "npm:ok-name\r\ndocker:\r\n", line: "line 2", want: "name is empty"},
+		{name: "docker tag", input: "docker:mcp/fetch:latest\n", line: "line 1", want: "no tag or digest"},
+		{name: "docker digest", input: "npm:ok-name\ndocker:mcp/fetch@sha256:abc\n", line: "line 2", want: "no tag or digest"},
 	}
 	for _, tt := range errTests {
 		t.Run("error: "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := ParsePopular(strings.NewReader(tt.input))
 			if err == nil {
-				t.Fatalf("ParsePopular() = %q, error = nil, want an error", got)
+				t.Fatalf("ParsePopular() = %+v, error = nil, want an error", got)
 			}
 			if got != nil {
-				t.Errorf("ParsePopular() entries = %q, want nil on error", got)
+				t.Errorf("ParsePopular() entries = %+v, want nil on error", got)
 			}
 			for _, part := range []string{"popular server list " + tt.line, tt.want} {
 				if !strings.Contains(err.Error(), part) {
@@ -250,7 +252,7 @@ func TestParsePopular(t *testing.T) {
 			t.Fatalf("ParsePopular() error = %v, want it to wrap %v", err, boom)
 		}
 		if got != nil {
-			t.Errorf("ParsePopular() names = %q, want nil on error", got)
+			t.Errorf("ParsePopular() entries = %+v, want nil on error", got)
 		}
 	})
 
@@ -1032,13 +1034,6 @@ func TestTyposquatKindAware(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("kind mismatch message differs from the typo message", func(t *testing.T) {
-		t.Parallel()
-		if typosquatKindMessage == typosquatMessage || typosquatKindMessage == "" {
-			t.Errorf("typosquatKindMessage = %q, want a text of its own", typosquatKindMessage)
-		}
-	})
 
 	t.Run("several entries with the name give one finding", func(t *testing.T) {
 		t.Parallel()

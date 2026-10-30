@@ -373,6 +373,9 @@ func TestRegistryName(t *testing.T) {
 		{name: "library prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "library/postgres"}, want: "postgres"},
 		{name: "no prefix", spec: PackageSpec{Runner: RunnerDocker, Name: "mcp/fetch"}, want: "mcp/fetch"},
 		{name: "other registry keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "ghcr.io/mcp/fetch"}, want: "ghcr.io/mcp/fetch"},
+		{name: "docker.io with a port", spec: PackageSpec{Runner: RunnerDocker, Name: "docker.io:443/mcp/fetch"}, want: "mcp/fetch"},
+		{name: "registry-1.docker.io with a port and library", spec: PackageSpec{Runner: RunnerDocker, Name: "registry-1.docker.io:443/library/postgres"}, want: "postgres"},
+		{name: "other host keeps its port", spec: PackageSpec{Runner: RunnerDocker, Name: "localhost:5000/mcp/fetch"}, want: "localhost:5000/mcp/fetch"},
 		{name: "look-alike host keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "registry.hub.docker.com.evil.io/mcp/fetch"}, want: "registry.hub.docker.com.evil.io/mcp/fetch"},
 		{name: "prefix only inside the name is kept", spec: PackageSpec{Runner: RunnerDocker, Name: "evil/registry.hub.docker.com/fetch"}, want: "evil/registry.hub.docker.com/fetch"},
 		{name: "only one prefix is dropped", spec: PackageSpec{Runner: RunnerDocker, Name: "docker.io/registry.hub.docker.com/fetch"}, want: "registry.hub.docker.com/fetch"},
@@ -494,4 +497,31 @@ func FuzzExtractPackage(f *testing.F) {
 			t.Errorf("packageAt(%q, %q) index %d is outside args", command, args, at)
 		}
 	})
+}
+
+// Every runner that ExtractPackage accepts must map to a registry kind: the
+// typosquat check treats a package without a kind as a server name.
+func TestRunnerKind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		runner Runner
+		want   RegistryKind
+	}{
+		{RunnerNPX, KindNPM},
+		{RunnerBunx, KindNPM},
+		{RunnerUVX, KindPyPI},
+		{RunnerPipx, KindPyPI},
+		{RunnerDocker, KindDocker},
+	}
+	for _, tt := range tests {
+		if got := tt.runner.kind(); got != tt.want {
+			t.Errorf("%s.kind() = %q, want %q", tt.runner, got, tt.want)
+		}
+		if runnerOf(string(tt.runner)) != tt.runner {
+			t.Errorf("runnerOf(%q) is not %s: the table above misses a runner", tt.runner, tt.runner)
+		}
+	}
+	if got := Runner("unknown").kind(); got != "" {
+		t.Errorf("unknown runner kind = %q, want empty", got)
+	}
 }

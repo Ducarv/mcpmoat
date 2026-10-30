@@ -3,6 +3,7 @@ package rules
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -134,6 +135,12 @@ func canonicalName(kind RegistryKind, name string) string {
 	case KindPyPI:
 		return nameForm(name)
 	case KindDocker:
+		// "docker.io:443/mcp/fetch" names Docker Hub too: drop the port first.
+		if host, rest, found := strings.Cut(name, "/"); found {
+			if hostOnly, _, hasPort := strings.Cut(host, ":"); hasPort && slices.Contains(dockerHubHosts, hostOnly+"/") {
+				name = hostOnly + "/" + rest
+			}
+		}
 		for _, prefix := range dockerHubHosts {
 			if rest, found := strings.CutPrefix(name, prefix); found {
 				name = rest

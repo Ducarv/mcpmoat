@@ -236,3 +236,7 @@ hit npm mcp-server-git mcp-server-git
 # namespace squat. A user can add the server to the ignore file. A fix for this
 # should flip the line to ok.
 hit docker harbor.corp/mcp/fetch mcp/fetch
+hit docker mirror.gcr.io/mcp/fetch mcp/fetch
+
+# --- ok: Docker Hub host with a port is the real image ---
+ok docker docker.io:443/mcp/fetch
