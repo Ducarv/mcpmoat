@@ -126,8 +126,10 @@ mcpmoat scan --llm
 - `scan` starts your configured stdio servers. It passes them only a few env variables, but this is not
   a sandbox: a server runs as you and can read your files and use the network. It never starts a
   server from an untrusted project file.
-- A server can show mcpmoat a different tool list than it shows your AI client (cloaking). The pins
-  cover only what mcpmoat sees.
+- A server can show mcpmoat a different tool list than it shows your AI client (cloaking).
+  mcpmoat does not name itself. It sends the name of the client that owns the config, but a server
+  can still tell it apart. A server that never answers an unknown list request shows as `timeout`.
+  The pins cover only what mcpmoat sees.
 - A clean scan (exit code 0) does not mean that the tools are safe. The tool rules find only known
   patterns, and they do not run with `--no-connect`. The check that compares the tools of two
   servers for shadowing does not run in `scan` yet
