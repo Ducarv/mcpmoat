@@ -20,7 +20,7 @@ Show
 
 Type "# 1. First scan: pins every tool, flags tool poisoning (T1) and shadowing (T3)" Enter
 Sleep 500ms
-Type "mcpmoat scan --no-color 2>&1 | grep -E 'pinned|MOAT-|Server:' | sed -n '1,12p;/pinned/p'" Enter
+Type "mcpmoat scan --no-color 2>&1 | grep -E '^  MOAT-|^    Server:|scan: pinned' | sed -n '1,12p;/pinned/p'" Enter
 Wait
 Sleep 6s
 
