@@ -108,13 +108,13 @@ func nameForm(name string) string {
 	return nameSeparators.ReplaceAllString(name, "-")
 }
 
-// dockerHubHosts holds the host prefixes that all name Docker Hub. registryName
-// drops them from an image name. It is never changed.
+// dockerHubHosts holds the hosts that all name Docker Hub. canonicalName drops
+// one from an image name. It is never changed.
 var dockerHubHosts = []string{
-	"docker.io/",
-	"index.docker.io/",
-	"registry-1.docker.io/",
-	"registry.hub.docker.com/",
+	"docker.io",
+	"index.docker.io",
+	"registry-1.docker.io",
+	"registry.hub.docker.com",
 }
 
 // registryName returns the package name of spec in the form that the
@@ -135,16 +135,15 @@ func canonicalName(kind RegistryKind, name string) string {
 	case KindPyPI:
 		return nameForm(name)
 	case KindDocker:
-		// "docker.io:443/mcp/fetch" names Docker Hub too: drop the port first.
 		if host, rest, found := strings.Cut(name, "/"); found {
-			if hostOnly, _, hasPort := strings.Cut(host, ":"); hasPort && slices.Contains(dockerHubHosts, hostOnly+"/") {
-				name = hostOnly + "/" + rest
-			}
-		}
-		for _, prefix := range dockerHubHosts {
-			if rest, found := strings.CutPrefix(name, prefix); found {
+			hostOnly, port, hasPort := strings.Cut(host, ":")
+			switch {
+			case slices.Contains(dockerHubHosts, hostOnly):
+				// "docker.io:443/mcp/fetch" names Docker Hub too, with any port.
 				name = rest
-				break
+			case hasPort && port == "443":
+				// 443 is the default HTTPS port: "ghcr.io:443/x" is "ghcr.io/x".
+				name = hostOnly + "/" + rest
 			}
 		}
 		return strings.TrimPrefix(name, "library/")

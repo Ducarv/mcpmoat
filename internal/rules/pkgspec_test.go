@@ -375,6 +375,7 @@ func TestRegistryName(t *testing.T) {
 		{name: "other registry keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "ghcr.io/mcp/fetch"}, want: "ghcr.io/mcp/fetch"},
 		{name: "docker.io with a port", spec: PackageSpec{Runner: RunnerDocker, Name: "docker.io:443/mcp/fetch"}, want: "mcp/fetch"},
 		{name: "registry-1.docker.io with a port and library", spec: PackageSpec{Runner: RunnerDocker, Name: "registry-1.docker.io:443/library/postgres"}, want: "postgres"},
+		{name: "default HTTPS port on another host is dropped", spec: PackageSpec{Runner: RunnerDocker, Name: "ghcr.io:443/github/github-mcp-server"}, want: "ghcr.io/github/github-mcp-server"},
 		{name: "other host keeps its port", spec: PackageSpec{Runner: RunnerDocker, Name: "localhost:5000/mcp/fetch"}, want: "localhost:5000/mcp/fetch"},
 		{name: "look-alike host keeps its host", spec: PackageSpec{Runner: RunnerDocker, Name: "registry.hub.docker.com.evil.io/mcp/fetch"}, want: "registry.hub.docker.com.evil.io/mcp/fetch"},
 		{name: "prefix only inside the name is kept", spec: PackageSpec{Runner: RunnerDocker, Name: "evil/registry.hub.docker.com/fetch"}, want: "evil/registry.hub.docker.com/fetch"},

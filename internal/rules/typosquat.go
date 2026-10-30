@@ -81,8 +81,8 @@ func ParsePopular(r io.Reader) ([]PopularEntry, error) {
 		if name == "" {
 			return nil, fmt.Errorf("popular server list line %d: the name is empty", lineNo)
 		}
-		if kind == KindDocker && (strings.Contains(name, "@") || strings.Contains(dockerBase(name), ":")) {
-			return nil, fmt.Errorf("popular server list line %d: a docker name has no tag or digest", lineNo)
+		if kind == KindDocker && hasDockerTagOrDigest(name) {
+			return nil, fmt.Errorf("popular server list line %d: a docker name must not have a tag or digest", lineNo)
 		}
 		entries = append(entries, PopularEntry{Kind: kind, Name: name})
 	}
@@ -138,7 +138,7 @@ type Typosquat struct {
 	// ambiguous holds the bare names that belong to two or more different
 	// popular names, such as "mcp-server". Such a generic name proves
 	// nothing about one scope, so the scope squatting check skips it.
-	ambiguous map[string]bool
+	ambiguousBare map[string]bool
 	// ambiguousBase holds the docker bases (the last "/" component) that belong
 	// to two or more different popular docker names. Such a base proves nothing
 	// about one owner, so the docker squatting check skips it. It is separate
@@ -150,14 +150,15 @@ type Typosquat struct {
 // input that did not come from ParsePopular. It copies the entries, so the
 // caller may change the slice afterwards. It trims and lowercases the names and
 // kinds. It writes each name in the form that registryName gives (see
-// canonicalName). It skips an entry with a blank name. It skips an entry whose
+// canonicalName). It skips an entry with a blank name, and a docker entry with
+// a tag or digest. It skips an entry whose
 // kind is not valid (see validPopularKind), so a caller cannot add an entry
 // that reports its own exact name as a kind mismatch. It stores the kind of
 // each entry: Check uses it to decide what is an exact match.
 func NewTyposquat(popular []PopularEntry) *Typosquat {
 	t := &Typosquat{
 		popular:       make([]popularName, 0, len(popular)),
-		ambiguous:     make(map[string]bool),
+		ambiguousBare: make(map[string]bool),
 		ambiguousBase: make(map[string]bool),
 	}
 	firstByBare := make(map[string]string, len(popular)) // bare name -> first full name
@@ -171,8 +172,8 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 		// such as "pypi:mcp_server_x" or "docker:docker.io/mcp/fetch" still
 		// matches the package it names.
 		full := canonicalName(kind, strings.ToLower(strings.TrimSpace(entry.Name)))
-		if full == "" {
-			continue
+		if full == "" || (kind == KindDocker && hasDockerTagOrDigest(full)) {
+			continue // such a name could never match a scanned package
 		}
 		bare := bareName(full)
 		p := popularName{
@@ -187,7 +188,7 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 			noteOwner(firstByBase, t.ambiguousBase, p.base, full)
 		}
 		t.popular = append(t.popular, p)
-		noteOwner(firstByBare, t.ambiguous, bare, full)
+		noteOwner(firstByBare, t.ambiguousBare, bare, full)
 	}
 	return t
 }
@@ -308,17 +309,26 @@ func (t *Typosquat) otherKindName(c typoCandidate) (string, bool) {
 		return "", false
 	}
 	for _, p := range t.popular {
-		if p.full == c.full && p.kind != c.kind && p.kind != KindDocker {
+		if p.kind == c.kind || p.kind == KindDocker {
+			continue
+		}
+		// PyPI reads "_" and "." as "-" (PEP 503), so compare in that form when
+		// either name is a PyPI name.
+		a, b := c.full, p.full
+		if c.kind == KindPyPI || p.kind == KindPyPI {
+			a, b = nameForm(a), nameForm(b)
+		}
+		if a == b {
 			return p.full, true
 		}
 	}
 	return "", false
 }
 
-// closest returns the full name of the popular server that c resembles most.
-// On a tie the first one in the list wins, so the result is deterministic.
-// It returns false when c is exact, too short or too long, or not close to
-// any popular name.
+// closest returns the full name of the popular server that c resembles, by
+// edit distance or by a squat check (scopeSquat and dockerSquat). On a tie the
+// first one in the list wins, so the result is deterministic. It returns false
+// when c is exact, too short or too long, or not close to any popular name.
 //
 // Exact matching compares the name with the popular names of all kinds. A
 // server name is exact when its form equals a popular name. A package is exact
@@ -388,7 +398,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		consider(c.full, compareForm(c, p))
 		// A bare name that several popular names share, such as
 		// "mcp-server", proves nothing, as in scopeSquat.
-		if (c.full != c.bare || p.full != p.bare) && !t.ambiguous[p.bare] {
+		if (c.full != c.bare || p.full != p.bare) && !t.ambiguousBare[p.bare] {
 			consider(c.bare, p.bare)
 		}
 	}
@@ -433,7 +443,7 @@ func flatName(name string) string {
 // names, never match.
 func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 	n := utf8.RuneCountInString(c.bare)
-	if n < minTyposquatNameLen || n > maxTyposquatNameLen || t.ambiguous[c.bare] {
+	if n < minTyposquatNameLen || n > maxTyposquatNameLen || t.ambiguousBare[c.bare] {
 		return "", false
 	}
 	scoped := strings.HasPrefix(c.full, "@")
@@ -449,6 +459,13 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasDockerTagOrDigest reports whether the docker image name holds a digest
+// ("@sha256:...") or a tag (a ":" in the last component). A registry port is
+// not a tag: it sits in the first component.
+func hasDockerTagOrDigest(name string) bool {
+	return strings.Contains(name, "@") || strings.Contains(dockerBase(name), ":")
 }
 
 // dockerBase returns the last "/" component of a docker image name, such as
