@@ -13,7 +13,7 @@ mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your ma
 they expose, and checks them for tool poisoning, shadowing, rug pulls, dangerous config and
 typosquatting.
 
-**Status: early release, [v0.2.0](https://github.com/Ducarv/mcpmoat/releases/tag/v0.2.0).** `scan`
+**Status: [v1.0.0](https://github.com/Ducarv/mcpmoat/releases/tag/v1.0.0).** `scan`
 runs the config checks and the rug-pull check. When it connects to the servers, it also applies the
 tool poisoning and shadowing rules to the description and the input schema of each tool. A clean
 scan (exit code 0) does not mean that the tools are safe. See
@@ -36,7 +36,7 @@ scan (exit code 0) does not mean that the tools are safe. See
 
 ```sh
 brew install --cask Ducarv/tap/mcpmoat                      # macOS and Linux
-go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.2.0    # needs Go 1.27 or later
+go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v1.0.0    # needs Go 1.27 or later
 ```
 
 You can also download an archive from the [releases page](https://github.com/Ducarv/mcpmoat/releases).
