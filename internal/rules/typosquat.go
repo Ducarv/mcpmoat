@@ -135,14 +135,14 @@ type popularName struct {
 // NewTyposquat.
 type Typosquat struct {
 	popular []popularName
-	// ambiguous holds the bare names that belong to two or more different
+	// ambiguousBare holds the bare names that belong to two or more different
 	// popular names, such as "mcp-server". Such a generic name proves
 	// nothing about one scope, so the scope squatting check skips it.
 	ambiguousBare map[string]bool
 	// ambiguousBase holds the docker bases (the last "/" component) that belong
 	// to two or more different popular docker names. Such a base proves nothing
 	// about one owner, so the docker squatting check skips it. It is separate
-	// from ambiguous because the two maps key different forms of a name.
+	// from ambiguousBare because the two maps key different forms of a name.
 	ambiguousBase map[string]bool
 }
 
