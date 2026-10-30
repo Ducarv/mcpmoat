@@ -41,7 +41,7 @@ jobs:
 
       - name: Install mcpmoat
         # This pins a release tag, and the Go checksum database checks it.
-        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.2.0
+        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v1.0.0
 
       # The install runs before the checkout, so it never runs in the tree of
       # the pull request.
