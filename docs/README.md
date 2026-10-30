@@ -7,6 +7,7 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | Topic | Owner |
 |---|---|
 | Product pitch and the short install and usage summary | [README.md](../README.md) |
+| Demo GIF and its vhs tape | [docs/demo/README.md](demo/README.md) |
 | Install methods and version output | [docs/install.md](install.md) |
 | What `scan` prints (terminal and JSON for users) | [docs/scan-output.md](scan-output.md) |
 | Pins and rug pulls | [docs/pins.md](pins.md) |

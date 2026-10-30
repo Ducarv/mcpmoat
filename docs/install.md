@@ -9,11 +9,11 @@ download.
 - GitHub Releases: download the archive for your system from the
   [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
   `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`.
-  `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds the
+  `<version>` is the release number without the `v`, for example `0.2.0`. Each archive holds the
   `mcpmoat` binary, `LICENSE` and `README.md`. The Linux binary is static. The macOS binary links
   only macOS system libraries, like every Go binary on macOS. Extract the binary and put it on your
   `PATH`.
-- Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.1.0`. It needs Go 1.27 or later (see
+- Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.2.0`. It needs Go 1.27 or later (see
   [go.mod](../go.mod)).
 
 `@latest` builds the latest tagged release, and `@main` builds the latest commit on `main`. A tag
@@ -64,7 +64,7 @@ gh attestation verify checksums.txt -R Ducarv/mcpmoat \
 Then open `Casks/mcpmoat.rb` in the [tap](https://github.com/Ducarv/homebrew-tap) and check these
 points:
 
-- The `version` line is the release number without the `v`, for example `"0.1.0"`.
+- The `version` line is the release number without the `v`, for example `"0.2.0"`.
 - Each `url` is exactly
   `https://github.com/Ducarv/mcpmoat/releases/download/v#{version}/mcpmoat_#{version}_<os>_<arch>.tar.gz`.
   `<os>` is `darwin` in the `on_macos` block and `linux` in the `on_linux` block. `<arch>` is
