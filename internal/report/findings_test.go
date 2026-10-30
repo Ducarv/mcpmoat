@@ -138,6 +138,19 @@ func TestWriteFindingsExact(t *testing.T) {
 				"    Fix: Move it to a secret store.\n",
 		},
 		{
+			// MOAT-T4-005 is a summary of the whole server: no field, no key.
+			name: "empty field and key with a related gives a reason line",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) {
+				r.Field, r.Key, r.Related = "", "", "3 more config findings are not listed; limit 100"
+			})},
+			want: "\nFINDINGS\nHIGH (1)\n" +
+				"  MOAT-T4-001  Secret in env\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Reason: \"3 more config findings are not listed; limit 100\"\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
 			name: "key and related",
 			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Field, r.Key, r.Related = "args", "KEY", "REL" })},
 			want: "\nFINDINGS\nHIGH (1)\n" +

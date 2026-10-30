@@ -21,15 +21,21 @@
 # accepted-gap group are synthetic: they are made-up typos of names in
 # rules/data/popular-servers.txt and are not real packages.
 #
+# The popular list is kind-aware (kind:name). A package is exact only when the
+# list has the same kind and name. The same name on another registry is a hit
+# with the plain popular name as related (the "other kind" groups below). A
+# docker image under another owner with the same last component as a popular
+# image is a namespace squat (dockerSquat in typosquat.go).
+#
 # An ok line for an accepted gap is a known false negative, not a bug. Do not
 # "fix" it by adding it to a hit group. If the rule gets a fix for the gap,
-# the fix must flip those lines to hit. In the same way, the hit line in the
-# accepted-false-positive group is a known false positive: a fix must flip it
-# to ok. The rule is closeDistance in internal/rules/typosquat.go.
+# the fix must flip those lines to hit. In the same way, the hit lines in the
+# accepted-false-positive group are known false positives: a fix must flip
+# them to ok. The rules are closeDistance and dockerSquat in
+# internal/rules/typosquat.go.
 
 # --- ok: real npm packages ---
 ok npm mcp-server-gcp
-ok npm mcp-server-git
 ok npm mcp-server-github
 ok npm mcp-server-gitlab
 ok npm mcp-server-docker
@@ -67,6 +73,14 @@ ok npm mcp-server-linear
 ok npm mcp-server-slack
 ok npm mcp-server-terraform
 ok npm mcp-server-jenkins
+
+# --- ok: popular package on its own registry (exact kind and name) ---
+ok pypi mcp-server-fetch
+ok npm firecrawl-mcp
+ok docker mcp/fetch
+ok docker docker.io/mcp/fetch
+ok docker registry.hub.docker.com/mcp/fetch
+ok docker ghcr.io/github/github-mcp-server
 
 # --- ok: real PyPI packages (mcp-server-tidb is synthetic) ---
 ok pypi mcp-server-docker
@@ -106,6 +120,7 @@ ok docker mcp/puppeteer
 ok docker mcp/slack
 ok docker mcp/sentry
 ok docker mcp/duckduckgo
+ok docker postgres
 
 # --- ok: server name only (synthetic example from issue #113) ---
 ok name mcp-server-gcp
@@ -152,6 +167,16 @@ hit npm @evil/server-filesystem @modelcontextprotocol/server-filesystem
 hit npm @modelcontextprotocl/server-github @modelcontextprotocol/server-github
 hit npm @modelcontextprotocol/server-githubb @modelcontextprotocol/server-github
 
+# --- hit: popular name on another registry (related is the plain popular name) ---
+hit npm mcp-server-fetch mcp-server-fetch
+hit pypi firecrawl-mcp firecrawl-mcp
+
+# --- hit: docker namespace squats (same last component, other owner or host) ---
+hit docker evil/fetch mcp/fetch
+hit docker ghcr.io/evil/github-mcp-server ghcr.io/github/github-mcp-server
+hit docker evil/github-mcp-server ghcr.io/github/github-mcp-server
+hit docker ghcr.io/mcp/fetch mcp/fetch
+
 # --- hit: server name only and docker images ---
 hit name mcp-server-fecth mcp-server-fetch
 hit docker mcp/fecth mcp/fetch
@@ -171,9 +196,47 @@ ok pypi mcp-server-gixx
 ok npm tavily-mxx
 ok npm firecrawl-mpx
 
+# --- ok: accepted gap, docker (synthetic name, not a real image) ---
+# A typo in the last component of a docker image gives no finding, because
+# dockerSquat needs an equal last component and the edit distance of the whole
+# name is too large. A last component under 5 runes is also skipped, but no
+# popular docker entry has one today (mcp/git is not on the list), so there is
+# no line for it. A fix should flip this line to hit.
+ok docker evil/fecth
+
+# --- hit: docker host without owner ---
+# A registry host that is not Docker Hub has no official namespace, so a bare
+# name behind it is a third party image that copies mcp/fetch.
+hit docker ghcr.io/fetch mcp/fetch
+hit docker localhost:5000/fetch mcp/fetch
+hit docker evil.com/github-mcp-server ghcr.io/github/github-mcp-server
+
+# --- ok: accepted gap, docker image named like an npm or PyPI package ---
+# A docker image whose last component equals a popular npm or PyPI name is not
+# compared: only docker entries are used for docker images. A fix must flip
+# this line to hit.
+ok docker evil/mcp-server-fetch
+
 # --- hit: accepted false positive (synthetic name, not a real package) ---
 # Two runes added at the end of a popular name count even after a short last
 # word, so a real product that extends a popular name this way gets a finding.
 # mcp-server-gitee was not on npm or PyPI on 2026-10-23. A fix for this should
 # flip the line to ok.
 hit pypi mcp-server-gitee mcp-server-git
+
+# --- hit: accepted false positive, popular name on another registry ---
+# mcp-server-git is a real npm package (checked with a registry GET on
+# 2026-10-23). The popular list has the PyPI mcp-server-git, so the npm package
+# with the same name gets a finding. A user can add the server to the ignore
+# file. A fix for this should flip the line to ok.
+hit npm mcp-server-git mcp-server-git
+
+# --- hit: accepted false positive, private docker mirror (synthetic name) ---
+# A company registry that mirrors mcp/fetch under its own host looks like a
+# namespace squat. A user can add the server to the ignore file. A fix for this
+# should flip the line to ok.
+hit docker harbor.corp/mcp/fetch mcp/fetch
+hit docker mirror.gcr.io/mcp/fetch mcp/fetch
+
+# --- ok: Docker Hub host with a port is the real image ---
+ok docker docker.io:443/mcp/fetch

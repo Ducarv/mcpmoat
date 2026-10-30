@@ -138,6 +138,10 @@ func autoInstallText(raw string) []Hit {
 // If it has more fields, they are a command line, as in unpinnedPackageText.
 // A blank line gives no hit.
 //
+// Because a single field runs as "npx <name>", a bare popular PyPI name, such
+// as "mcp-server-fetch", gives the kind-mismatch finding (see
+// typosquatKindMessage).
+//
 // The server has no name. Only the package is compared, so the name cannot
 // make a result.
 func newTyposquatText() (func(raw string) []Hit, error) {

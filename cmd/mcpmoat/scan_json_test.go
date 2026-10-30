@@ -1176,8 +1176,18 @@ func assertAcceptMatchesTerminal(t *testing.T, jsonOut, termOut string) []termHi
 		case !h.isCommand && hasCommand:
 			t.Errorf("server %q: accept has the key command (%v) but the terminal shows prose steps %q", h.name, command, h.text)
 		}
+		// reason is there exactly when there is no command, and it is one of the
+		// fixed words.
+		reason, hasReason := g.accept["reason"]
+		reasonWord, _ := reason.(string)
+		switch {
+		case h.isCommand && hasReason:
+			t.Errorf("server %q: accept has the reason %v but the terminal shows a command", h.name, reason)
+		case !h.isCommand && !slices.Contains(report.AcceptReasons(), reasonWord):
+			t.Errorf("server %q: accept.reason = %v, want one of %v (the terminal shows prose steps)", h.name, reason, report.AcceptReasons())
+		}
 		for key := range g.accept {
-			if key != "digest" && key != "command" {
+			if key != "digest" && key != "command" && key != "reason" {
 				t.Errorf("server %q: accept has the unknown key %q", h.name, key)
 			}
 		}
@@ -1217,6 +1227,9 @@ func TestScanJSONAccept(t *testing.T) {
 		wantAccepts []string
 		// wantCommand tells whether the terminal must show a command.
 		wantCommand bool
+		// wantReason is the accept.reason of every hint, or empty when the
+		// terminal shows a command.
+		wantReason string
 	}{
 		{
 			name:    "command",
@@ -1229,6 +1242,7 @@ func TestScanJSONAccept(t *testing.T) {
 			servers: oneServer("srv"),
 			first:   map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": cut},
 			wantAccepts: []string{"srv"},
+			wantReason:  report.AcceptReasonReviewFirst,
 		},
 		{
 			// MOAT-T2-002 (a new tool) is dropped by --ignore, so the report
@@ -1238,6 +1252,7 @@ func TestScanJSONAccept(t *testing.T) {
 			first:   map[string][]inspect.Tool{"srv": short},
 			current: map[string][]inspect.Tool{"srv": {mkTool("a", "Add. Changed."), mkTool("b", "New.")}},
 			flags:   []string{"--ignore", "MOAT-T2-002"}, wantAccepts: []string{"srv"},
+			wantReason: report.AcceptReasonReviewFirst,
 		},
 		{
 			// A name with a space is not a bare shell word.
@@ -1245,6 +1260,7 @@ func TestScanJSONAccept(t *testing.T) {
 			servers: oneServer("my srv"),
 			first:   map[string][]inspect.Tool{"my srv": short}, current: map[string][]inspect.Tool{"my srv": changed},
 			wantAccepts: []string{"my srv"},
+			wantReason:  report.AcceptReasonNotShellSafe,
 		},
 		{
 			// Two global files with one server name: pin refuses the name
@@ -1256,6 +1272,7 @@ func TestScanJSONAccept(t *testing.T) {
 			},
 			first: map[string][]inspect.Tool{"dup": short}, current: map[string][]inspect.Tool{"dup": changed},
 			wantAccepts: []string{"dup", "dup"},
+			wantReason:  report.AcceptReasonAmbiguousName,
 		},
 		{
 			name: "config problem",
@@ -1267,6 +1284,7 @@ func TestScanJSONAccept(t *testing.T) {
 			},
 			first: map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": changed},
 			wantAccepts: []string{"srv"},
+			wantReason:  report.AcceptReasonConfigProblem,
 		},
 	}
 	for _, tt := range tests {
@@ -1324,6 +1342,15 @@ func TestScanJSONAccept(t *testing.T) {
 			}
 			if !slices.Equal(names, tt.wantAccepts) {
 				t.Errorf("hints are for %v, want %v", names, tt.wantAccepts)
+			}
+			for _, srv := range rawServers(t, got.stdout) {
+				acc, has := srv["accept"].(map[string]any)
+				if !has {
+					continue
+				}
+				if gotReason, _ := acc["reason"].(string); gotReason != tt.wantReason {
+					t.Errorf("accept.reason of %v = %q, want %q", srv["name"], gotReason, tt.wantReason)
+				}
 			}
 			if tt.wantCommand {
 				// The exact command: name, the --config of the scan, the digest.

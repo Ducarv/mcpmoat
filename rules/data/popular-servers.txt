@@ -1,53 +1,67 @@
 # Popular MCP servers, the reference list for the typosquat check (rule
 # MOAT-T5-001, threat T5). A server name or package that is very close to one
-# of these names, but not equal to it, is reported.
+# of these names, but not equal to it, is reported. So is an equal name under
+# the runner of another kind, and a docker image under another owner with the
+# same last component.
 #
-# Format: one name per line, lowercase. Lines that start with # and empty
-# lines are ignored. Each name is a full package name (npm with its scope,
-# PyPI, or a docker image) or a well-known server name. Do not add a version
-# or a tag. Keep every name at least 5 characters long. No duplicates.
+# Format: one entry per line, written as kind:name. Lines that start with #
+# and empty lines are ignored.
+#   - kind is one of npm, pypi or docker (lowercase).
+#   - Split at the first colon. The name is everything after it.
+#   - The name is the full package name: npm with its scope, the PyPI project
+#     name, or the docker image with its registry host (for example
+#     ghcr.io/github/github-mcp-server). Docker Hub images such as mcp/fetch
+#     have no host.
+#   - The name is lowercase. Do not add a version or a tag.
+#   - Keep every name at least 5 characters long (runes).
+#   - No duplicate (kind, name) pair. The same name may appear under two kinds
+#     only if it is a genuine popular server on both registries.
+#   - Give every docker entry its own last path component. When two docker
+#     entries share one (mcp/fetch and ghcr.io/x/fetch), the namespace squat
+#     check skips that name and a squat of either image goes unseen.
+# Check the kind against the real registry before you add an entry.
 
 # Reference servers (npm, @modelcontextprotocol)
-@modelcontextprotocol/server-filesystem
-@modelcontextprotocol/server-github
-@modelcontextprotocol/server-gitlab
-@modelcontextprotocol/server-memory
-@modelcontextprotocol/server-postgres
-@modelcontextprotocol/server-everything
-@modelcontextprotocol/server-sequential-thinking
-@modelcontextprotocol/server-puppeteer
-@modelcontextprotocol/server-brave-search
-@modelcontextprotocol/server-slack
-@modelcontextprotocol/server-gdrive
-@modelcontextprotocol/server-google-maps
+npm:@modelcontextprotocol/server-filesystem
+npm:@modelcontextprotocol/server-github
+npm:@modelcontextprotocol/server-gitlab
+npm:@modelcontextprotocol/server-memory
+npm:@modelcontextprotocol/server-postgres
+npm:@modelcontextprotocol/server-everything
+npm:@modelcontextprotocol/server-sequential-thinking
+npm:@modelcontextprotocol/server-puppeteer
+npm:@modelcontextprotocol/server-brave-search
+npm:@modelcontextprotocol/server-slack
+npm:@modelcontextprotocol/server-gdrive
+npm:@modelcontextprotocol/server-google-maps
 
 # Reference servers (PyPI)
-mcp-server-git
-mcp-server-fetch
-mcp-server-time
-mcp-server-sqlite
+pypi:mcp-server-git
+pypi:mcp-server-fetch
+pypi:mcp-server-time
+pypi:mcp-server-sqlite
 
 # Vendor and community servers (npm)
-@playwright/mcp
-@upstash/context7-mcp
-@notionhq/notion-mcp-server
-@stripe/mcp
-@sentry/mcp-server
-@supabase/mcp-server-supabase
-@cloudflare/mcp-server-cloudflare
-@neondatabase/mcp-server-neon
-@mongodb-js/mongodb-mcp-server
-@mapbox/mcp-server
-@browsermcp/mcp
-@executeautomation/playwright-mcp-server
-firecrawl-mcp
-figma-developer-mcp
-chrome-devtools-mcp
-tavily-mcp
-exa-mcp-server
-mcp-server-kubernetes
-mcp-remote
+npm:@playwright/mcp
+npm:@upstash/context7-mcp
+npm:@notionhq/notion-mcp-server
+npm:@stripe/mcp
+npm:@sentry/mcp-server
+npm:@supabase/mcp-server-supabase
+npm:@cloudflare/mcp-server-cloudflare
+npm:@neondatabase/mcp-server-neon
+npm:@mongodb-js/mongodb-mcp-server
+npm:@mapbox/mcp-server
+npm:@browsermcp/mcp
+npm:@executeautomation/playwright-mcp-server
+npm:firecrawl-mcp
+npm:figma-developer-mcp
+npm:chrome-devtools-mcp
+npm:tavily-mcp
+npm:exa-mcp-server
+npm:mcp-server-kubernetes
+npm:mcp-remote
 
 # Docker images
-ghcr.io/github/github-mcp-server
-mcp/fetch
+docker:ghcr.io/github/github-mcp-server
+docker:mcp/fetch

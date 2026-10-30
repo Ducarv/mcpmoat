@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Ducarv/mcpmoat/docs/schema/scan-output.v5.json",
+  "title": "mcpmoat scan output",
+  "description": "The JSON document that `mcpmoat scan --json` writes to stdout. The document never holds env or header values. A finding names the key it is about, never the value. Text fields that come from servers or config files are untrusted: non-printable and invisible non-ASCII characters are written as \\uXXXX escapes. Long names and paths are cut, and then \"fields_truncated\" is true. Every enum lists all the values that mcpmoat writes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool",
+    "mode",
+    "complete",
+    "fields_truncated",
+    "servers",
+    "findings",
+    "diffs",
+    "errors",
+    "ignored"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this output format. It is 5 for this schema.",
+      "const": 5
+    },
+    "tool": {
+      "$ref": "#/$defs/tool"
+    },
+    "mode": {
+      "description": "How the scan ran. \"no-connect\" only reads configs. \"connect\" also connects to the servers.",
+      "enum": ["no-connect", "connect"]
+    },
+    "complete": {
+      "description": "False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read), or the LLM step of a --llm scan did not classify every tool: a provider failure, an internal error of the LLM step, or more tools than the --llm cap. The exit code is then 2, and the reason is on stderr. A failed save of new pins comes after the document is written, so \"complete\" can be true while the exit code is 2. Always check the exit code too.",
+      "type": "boolean"
+    },
+    "fields_truncated": {
+      "description": "True when at least one text field was cut at its length cap. A cut value ends with \"...\" and holds at most 515 characters (a name) or 4099 characters (a path). Each cut field has a maxLength in this schema. The diff text, argv, url, command and digest are never cut.",
+      "type": "boolean"
+    },
+    "servers": {
+      "description": "Every server that the scan found. Empty list when there is none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/server"
+      }
+    },
+    "findings": {
+      "description": "Every finding that is not ignored. Empty list when there is none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "diffs": {
+      "description": "One diff for each tool that differs from the pins. Empty list when there is none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diff"
+      }
+    },
+    "errors": {
+      "description": "Config problems that the scan found. Empty list when there is none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fileError"
+      }
+    },
+    "ignored": {
+      "$ref": "#/$defs/ignored"
+    }
+  },
+  "$defs": {
+    "ignored": {
+      "description": "How many findings an ignore entry (.mcpmoat-ignore or --ignore) dropped from \"findings\". Always present, with zero counts when nothing was ignored.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "rules", "file_entries"],
+      "properties": {
+        "total": {
+          "description": "Number of findings that were dropped. It is the sum of the counts in \"rules\".",
+          "type": "integer",
+          "minimum": 0
+        },
+        "rules": {
+          "description": "Number of dropped findings for each rule. The keys are rule IDs only, never text from the ignore file. Empty object when nothing was ignored.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*$",
+            "maxLength": 64
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "file_entries": {
+          "description": "Number of entries that mcpmoat read from .mcpmoat-ignore (the N in the stderr line 'using N entries'). Some of them may not apply to any finding.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "accept": {
+      "description": "The hint that tells how to accept the changes of a server. It holds what the terminal hint shows.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest"],
+      "oneOf": [
+        {"required": ["command"], "not": {"required": ["reason"]}},
+        {"required": ["reason"], "not": {"required": ["command"]}}
+      ],
+      "properties": {
+        "digest": {
+          "description": "The pin digest that the terminal hint shows: \"pd1:\" and 64 lowercase hex digits. It is never cut.",
+          "type": "string",
+          "pattern": "^pd1:[0-9a-f]{64}$"
+        },
+        "command": {
+          "description": "The command that the terminal hint shows. Present only when the terminal hint prints a command, never when it prints prose steps. It is never cut.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why there is no \"command\". Present only when \"command\" is absent. It names the first cause, in this order: \"review_first\" (a diff was cut, --ignore hid a change, or a diff is only a fixed note: review the tools first), \"pins_full\" (pins.json has no room for the tools), \"project_share_full\" (the project share of pins.json has no room), \"config_problem\" (a config file has a problem, so pin refuses to run), \"ambiguous_name\" (the server name does not select this server alone, so pin needs --config), \"not_shell_safe\" (the server name, the project path or the --config path is not a bare shell word).",
+          "type": "string",
+          "enum": ["review_first", "pins_full", "project_share_full", "config_problem", "ambiguous_name", "not_shell_safe"]
+        }
+      }
+    },
+    "tool": {
+      "description": "The program that made the report.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "description": "Name of the program.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version of the program.",
+          "type": "string"
+        }
+      }
+    },
+    "server": {
+      "description": "One MCP server from a client config. The document has no env, no header and no working directory.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "client",
+        "scope",
+        "project_path",
+        "untrusted",
+        "state",
+        "transport",
+        "source",
+        "inspection"
+      ],
+      "properties": {
+        "name": {
+          "description": "Server name from the config. Untrusted text.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "client": {
+          "description": "The client whose config declares the server.",
+          "enum": ["claude-code", "cursor", "codex"]
+        },
+        "scope": {
+          "description": "\"global\" for a user-wide config. \"project\" for a server of one project.",
+          "enum": ["global", "project"]
+        },
+        "project_path": {
+          "description": "Path of the project for a project server. Empty string means none. Untrusted text.",
+          "type": "string",
+          "maxLength": 4099
+        },
+        "untrusted": {
+          "description": "True for a server from a project file, which a cloned repository can ship.",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "Whether the client config turns the server on. \"project-approved\" means that only files from the repository approved the server.",
+          "enum": [
+            "enabled",
+            "disabled",
+            "unapproved",
+            "project-approved"
+          ]
+        },
+        "transport": {
+          "description": "How mcpmoat talks to the server.",
+          "enum": ["stdio", "http", "sse"]
+        },
+        "source": {
+          "description": "Path of the config file that declares the server. Untrusted text. Not the origin of a finding: that is findings[].source.",
+          "type": "string",
+          "maxLength": 4099
+        },
+        "argv": {
+          "description": "Command line of a stdio server. It is redacted: secret-looking values are masked. Absent for http and sse servers.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url": {
+          "description": "URL of an http or sse server. It is redacted: credentials and secret-looking parts are masked. Absent for stdio servers.",
+          "type": "string"
+        },
+        "inspection": {
+          "$ref": "#/$defs/inspection"
+        },
+        "accept": {
+          "description": "How to accept the changes of this server. Absent when the server has nothing to accept.",
+          "$ref": "#/$defs/accept"
+        }
+      }
+    },
+    "inspection": {
+      "description": "What happened when mcpmoat inspected the server.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "description": "\"not_run\": mcpmoat did not connect. This happens in no-connect mode. It also happens in connect mode when the inspection or the pin step fails as a whole (for example, pins.json cannot be read): then every server is \"not_run\", the exit code is 2 and the reason is on stderr. \"ok\": it connected and listed the tools. \"timeout\": the server did not answer in time. \"failed\": the connection or the tool list failed. \"refused\": mcpmoat chose not to connect, for example to a disabled or untrusted server. Two servers with the same client, source, project_path and name share one status: \"ok\" when one of them was inspected.",
+          "enum": ["not_run", "ok", "timeout", "failed", "refused"]
+        }
+      }
+    },
+    "finding": {
+      "description": "One finding. For every string field except \"source\", an empty string means that the field does not apply.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "severity",
+        "server",
+        "server_index",
+        "field",
+        "key",
+        "related",
+        "source"
+      ],
+      "properties": {
+        "rule_id": {
+          "description": "ID of the rule that matched, for example MOAT-T2-004.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Severity word of the rule. Known values are \"low\", \"medium\", \"high\" and \"critical\". This is a plain string, not an enum, because the Go code accepts any string here and treats an unknown value as failing. Consumers must handle other values.",
+          "type": "string"
+        },
+        "server": {
+          "description": "Name of the server that the finding is about. Untrusted text. Empty string means none.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "server_index": {
+          "description": "0-based position of the server in \"servers\". A long server name is cut, so two names can be the same after the cut. Use this index, not the name, to find the server of the finding.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "field": {
+          "description": "Config field that matched, for example \"env\" or \"args\". Empty string means none.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Key name in the field, for example an env variable name. Only keys, never values. Untrusted text. Empty string means none.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "related": {
+          "description": "A second name that the finding refers to, for example a second server, a fixed reason text, or, for MOAT-LLM-001, the category of the verdict. Untrusted text. Empty string means none.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "source": {
+          "description": "What made the finding (not the config file of a server: that is servers[].source). \"rule\": a finding from a mcpmoat rule (a built-in check or a rule file), not from the LLM. \"llm\": the optional LLM classification (--llm) made it. An \"llm\" finding is advisory: a model made it, not a rule.",
+          "enum": ["rule", "llm"]
+        }
+      }
+    },
+    "diff": {
+      "description": "The diff of one tool against its pin.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "server_index", "tool", "kind", "diff", "diff_truncated", "diff_is_note"],
+      "properties": {
+        "server": {
+          "description": "Name of the server. Untrusted text.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "server_index": {
+          "description": "0-based position of the server in \"servers\". A long server name is cut, so two names can be the same after the cut. Use this index, not the name, to find the server of the diff.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool": {
+          "description": "Name of the tool. Untrusted text.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "kind": {
+          "description": "\"changed\": the pinned and the current text differ. \"new\": the server offers a tool that the pins do not hold. \"unverified\": a pinned tool whose pin cannot be checked.",
+          "enum": ["changed", "new", "unverified"]
+        },
+        "diff": {
+          "description": "Unified diff as raw server text, or a fixed note of mcpmoat when \"diff_is_note\" is true. It is untrusted. JSON escaping covers control characters, and non-printable or invisible non-ASCII characters are written as \\uXXXX escapes. Do not write it to a terminal without care.",
+          "type": "string"
+        },
+        "diff_truncated": {
+          "description": "True when the stored diff was cut, so \"diff\" is not the whole diff.",
+          "type": "boolean"
+        },
+        "diff_is_note": {
+          "description": "True when \"diff\" is a fixed note, not a unified diff: the diff could not be made, or the change does not show in the rendered text.",
+          "type": "boolean"
+        }
+      }
+    },
+    "fileError": {
+      "description": "One config problem. The text of the underlying error is never included.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "project_path",
+        "server",
+        "line",
+        "col",
+        "reason",
+        "untrusted"
+      ],
+      "properties": {
+        "path": {
+          "description": "Path of the config file. Untrusted text.",
+          "type": "string",
+          "maxLength": 4099
+        },
+        "project_path": {
+          "description": "Path of the project for a project config. Empty string means none. Untrusted text.",
+          "type": "string",
+          "maxLength": 4099
+        },
+        "server": {
+          "description": "Name of the server that the problem is about. Empty string means a problem with the whole file. Untrusted text.",
+          "type": "string",
+          "maxLength": 515
+        },
+        "line": {
+          "description": "1-based line of the problem. 0 means unknown.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "col": {
+          "description": "1-based byte column of the problem. 0 means unknown.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Fixed text that tells what is wrong.",
+          "type": "string"
+        },
+        "untrusted": {
+          "description": "True when the problem is in a project file, which a cloned repository can ship.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

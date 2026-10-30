@@ -88,6 +88,17 @@ GitHub cancels a waiting run when a newer one queues behind it. Do not release a
 after a newer one, for example a fix for an old minor line. Its run would point the tap at the older
 version and mark it as the latest release.
 
+After a stable release is published and verified (see [Verify a release](#verify-a-release)), open
+a PR to `dev` that changes the version pins to the new tag:
+
+- the `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@vX.Y.Z` lines in `README.md`,
+  `docs/install.md` and `docs/ci.md`;
+- the release link in the status line of `README.md`;
+- the version examples in `docs/install.md`: the archive name and the cask `version` line.
+
+Do not change them for a prerelease tag. Keep v0.2.0 in the pre-commit `rev` comment of
+`docs/ci.md`: it names the first tag with the hook, not the latest one.
+
 ## Verify a release
 
 Verify an archive and the tap cask with the steps in

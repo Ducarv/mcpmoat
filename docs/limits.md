@@ -8,6 +8,28 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - It does not analyse server source code, so it does not find malware inside a server.
 - It does not protect against prompt injection that arrives in content the agent reads (for example
   a GitHub issue). That is planned for a later phase.
+- A server can show mcpmoat a different tool list than it shows your AI client (cloaking). mcpmoat
+  makes this harder in two ways:
+  - It does not name itself. In the MCP `initialize` request, it sends the client name of the
+    client that owns the config: `claude-code` for Claude Code, `cursor-vscode` for Cursor and
+    `codex-mcp-client` for Codex. For a config of any other kind, it sends the neutral name
+    `mcp-client`. The HTTP User-Agent is the generic Go `net/http` one, unless the config sets a
+    `User-Agent` header.
+  - It always sends the list requests for tools, prompts, resources and resource templates, even
+    when the server does not declare that capability. When an undeclared list returns items,
+    mcpmoat reports them and adds an `undeclared-capability` warning. A server that never answers a
+    list request that it does not know makes mcpmoat wait until the `--timeout` limit (10 seconds
+    by default). mcpmoat then reports that server as `timeout` and keeps none of its lists.
+
+  A server can still tell mcpmoat apart from the real client by:
+  - the client version, which is a fixed value and can differ from the release that you installed;
+  - the client capabilities, which are not the same as those of the real client;
+  - the timing and the order of the requests (mcpmoat sends all the list requests one after the
+    other, right after the handshake);
+  - the HTTP User-Agent of a remote connection, which is not the one of the real client.
+
+  The pins cover only what mcpmoat sees. When a server shows the real client other tools, the pins
+  do not see the difference.
 - `mcpmoat scan` starts each configured stdio server, with the same command your client already
   runs. mcpmoat uses no shell. The server gets only the env from its config plus a small allowlist
   of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as

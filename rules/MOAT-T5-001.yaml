@@ -4,8 +4,8 @@ severity: medium
 target: config
 match:
   heuristic: typosquat
-risk: The package name is one or two typos away from a popular MCP server, so it may be a look-alike package that runs attacker code instead of the real server.
-remediation: Check the exact package name and publisher on the registry. Replace it with the official package if it is a typo, and remove the server if you did not mean to install it.
+risk: The package name is one or two typos away from a popular MCP server, is a popular name on the wrong registry, or sits in a look-alike namespace or registry, so it may run attacker code instead of the real server.
+remediation: Check the exact package name and publisher on the registry. Replace it with the official package if it is a typo. If it is a popular name on the wrong registry, run it with the runner of its registry (npx for npm, uvx for PyPI). If it is a docker image, pull it from the official owner. Remove the server if you did not mean to install it.
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://owasp.org/www-community/attacks/Typosquatting
@@ -20,11 +20,21 @@ should_match:
   - text: mcp-remot
     note: Unscoped name, one letter short of mcp-remote.
   - text: mcp-sever-fecth
-    note: Bare package name, run as uvx. A prefix typo (sever) and a tail typo (fecth) are two edits from mcp-server-fetch.
+    note: Bare package name, run as npx. A prefix typo (sever) and a tail typo (fecth) are two edits from mcp-server-fetch.
   - text: mcp-server-fetchxx
-    note: Bare package name, run as uvx. Two runes are appended to mcp-server-fetch. The part after the last shared separator ("fetch") has 5 runes, so two edits count.
+    note: Bare package name, run as npx. Two runes are appended to mcp-server-fetch. The part after the last shared separator ("fetch") has 5 runes, so two edits count.
   - text: mcp-server-gitxx
-    note: Bare package name, run as uvx. Two runes are appended to the whole name mcp-server-git, so two edits count although the last word ("git") has only 3 runes.
+    note: Bare package name, run as npx. Two runes are appended to the whole name mcp-server-git, so two edits count although the last word ("git") has only 3 runes.
+  - text: docker run -i ghcr.io/evil/github-mcp-server
+    note: Docker namespace squat. Same image name as ghcr.io/github/github-mcp-server, but under another owner.
+  - text: docker run -i evil/fetch
+    note: Docker namespace squat. Same image name as mcp/fetch, but under another owner.
+  - text: docker run -i evil.com/fetch
+    note: Docker namespace squat on another registry. A host that is not Docker Hub has no official namespace, so this is a third party image with the name of mcp/fetch.
+  - text: npx mcp-server-fetch
+    note: Popular PyPI name under an npm runner. The real server runs with uvx, so the npm package may be a squat.
+  - text: uvx firecrawl-mcp
+    note: Popular npm name under a PyPI runner. The real server runs with npx, so the PyPI package may be a squat.
 should_not_match:
   - text: '@modelcontextprotocol/server-filesystem'
     note: Exact popular name, so it is the real server.
@@ -37,3 +47,13 @@ should_not_match:
     note: Too short to compare, under 5 characters.
   - text: mcp-server-gcp
     note: Bare package name, run as npx. A different product, not a typo of mcp-server-git. Two edits in a 3-rune tail ("gcp") are not allowed.
+  - text: docker run -i mcp/fetch
+    note: Exact popular Docker Hub image.
+  - text: docker run -i docker.io/mcp/fetch
+    note: The Docker Hub host is the default, so this is the same image as mcp/fetch.
+  - text: uvx mcp-server-fetch
+    note: Exact popular name under the right runner (PyPI).
+  - text: npx firecrawl-mcp
+    note: Exact popular name under the right runner (npm).
+  - text: docker run -i postgres:16
+    note: Official Docker Hub image with no owner path, so it is not a namespace squat.
