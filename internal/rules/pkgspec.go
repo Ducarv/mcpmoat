@@ -107,21 +107,28 @@ func nameForm(name string) string {
 	return nameSeparators.ReplaceAllString(name, "-")
 }
 
+// dockerHubHosts holds the host prefixes that all name Docker Hub. registryName
+// drops them from an image name. It is never changed.
+var dockerHubHosts = []string{
+	"docker.io/",
+	"index.docker.io/",
+	"registry-1.docker.io/",
+	"registry.hub.docker.com/",
+}
+
 // registryName returns the package name of spec in the form that the
 // registry resolves and that the popular list uses: lower case; for PyPI,
 // every run of "-", "_" and "." written as "-" (PEP 503), so
 // "mcp_server_fetch" is "mcp-server-fetch"; for docker, without a Docker Hub
-// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch". The
-// Docker Hub prefixes are "docker.io/", "index.docker.io/",
-// "registry-1.docker.io/" and "registry.hub.docker.com/"; they all name the
-// same images.
+// host prefix (see dockerHubHosts) or "library/", so "docker.io/mcp/fetch" is
+// "mcp/fetch".
 func registryName(spec PackageSpec) string {
 	name := strings.ToLower(spec.Name)
 	switch spec.Runner {
 	case RunnerUVX, RunnerPipx:
 		return nameForm(name)
 	case RunnerDocker:
-		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/", "registry.hub.docker.com/"} {
+		for _, prefix := range dockerHubHosts {
 			if rest, found := strings.CutPrefix(name, prefix); found {
 				name = rest
 				break

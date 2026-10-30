@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -348,6 +349,9 @@ func TestPopularListFile(t *testing.T) {
 		if strings.ContainsAny(n, " \t") {
 			t.Errorf("name %q contains a space", n)
 		}
+		if e.Kind != KindDocker && strings.IndexFunc(n, unicode.IsSpace) >= 0 {
+			t.Errorf("%s entry %q has whitespace: no real package name has it, so the entry never matches exactly", e.Kind, n)
+		}
 	}
 
 	// Two docker entries with the same last component make that base ambiguous:
@@ -360,6 +364,11 @@ func TestPopularListFile(t *testing.T) {
 		}
 		if strings.Contains(e.Name, "@") || strings.Contains(e.Name[strings.LastIndex(e.Name, "/")+1:], ":") {
 			t.Errorf("docker entry %q has a tag or digest, want the image name only", e.Name)
+		}
+		for _, p := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/", "registry.hub.docker.com/", "library/"} {
+			if strings.HasPrefix(e.Name, p) {
+				t.Errorf("docker entry %q starts with %q, want the canonical form without it: a server config is normalised the same way, so a non-canonical entry never matches exactly", e.Name, p)
+			}
 		}
 		base := dockerBase(e.Name)
 		if first, ok := dockerBases[base]; ok {

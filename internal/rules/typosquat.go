@@ -119,7 +119,7 @@ type popularName struct {
 // Typosquat compares server and package names with a list of popular MCP
 // servers (threat T5). It finds two kinds of look-alike: a name that is a
 // small edit away from a popular name, and a package that copies the bare
-// name of a popular package under another owner: a npm scope (scope squatting,
+// name of a popular package under another owner: an npm scope (scope squatting,
 // such as "@evil/server-filesystem") or a docker owner path (docker namespace
 // squatting, such as "evil/fetch" for "mcp/fetch"). Build it with NewTyposquat.
 type Typosquat struct {
@@ -148,8 +148,8 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 		ambiguous:     make(map[string]bool),
 		ambiguousBase: make(map[string]bool),
 	}
-	owner := make(map[string]string, len(popular))       // bare name -> first full name
-	dockerOwner := make(map[string]string, len(popular)) // docker base -> first full name
+	firstByBare := make(map[string]string, len(popular)) // bare name -> first full name
+	firstByBase := make(map[string]string, len(popular)) // docker base -> first full name
 	for _, entry := range popular {
 		full := strings.ToLower(strings.TrimSpace(entry.Name))
 		if full == "" {
@@ -169,16 +169,16 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 		}
 		if kind == KindDocker {
 			p.base = dockerBase(full)
-			if first, seen := dockerOwner[p.base]; !seen {
-				dockerOwner[p.base] = full
+			if first, seen := firstByBase[p.base]; !seen {
+				firstByBase[p.base] = full
 			} else if first != full {
 				t.ambiguousBase[p.base] = true
 			}
 		}
 		t.popular = append(t.popular, p)
-		first, seen := owner[bare]
+		first, seen := firstByBare[bare]
 		if !seen {
-			owner[bare] = full
+			firstByBare[bare] = full
 		} else if first != full {
 			t.ambiguous[bare] = true
 		}
@@ -192,7 +192,6 @@ type typoCandidate struct {
 	bare      string
 	field     string // the Finding.Field for this name
 	isPackage bool   // a package from the runner args, not a server name
-	isNPM     bool   // an npx or bunx package: only npm has scopes
 
 	// kind is the registry of a package, taken from its runner. It is empty for
 	// a server name, which has no registry.
@@ -205,12 +204,11 @@ type typoCandidate struct {
 // popular package, because a user may name a local server freely, and "_" or
 // "." in it count as "-".
 //
-// A package is not free. It is exact only when the popular list has an entry
-// with the same registry kind and the same name (the kind comes from the
-// runner: npx and bunx are npm, uvx and pipx are PyPI, "docker run" is docker).
-// A server that runs a popular package exactly gets no finding at all.
+// A package is not free. The kind comes from the runner: npx and bunx are npm,
+// uvx and pipx are PyPI, "docker run" is docker. A server that runs a popular
+// package exactly gets no finding at all.
 //
-// A npm or PyPI package whose name equals a popular name of another kind, such
+// An npm or PyPI package whose name equals a popular name of another kind, such
 // as an npm package named like a popular PyPI server, gets a finding with
 // typosquatKindMessage: the name is popular, but on another registry. Its
 // Related is the plain popular name. A docker package never gets this finding.
@@ -235,7 +233,6 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 			bare:      bareName(pkg),
 			field:     FieldArgs,
 			isPackage: true,
-			isNPM:     spec.Runner.isNPM(),
 			kind:      kind,
 		})
 	}
@@ -258,13 +255,13 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 }
 
 // match returns the popular name that c resembles and the finding message for
-// it. A npm or PyPI package with the name of a popular entry of another kind
+// it. An npm or PyPI package with the name of a popular entry of another kind
 // matches that entry with typosquatKindMessage. Anything else goes to closest
 // and uses typosquatMessage. The returned text comes only from constants and the
 // popular list, never from c.
 func (t *Typosquat) match(c typoCandidate) (related, message string, found bool) {
-	if related, ok := t.otherKindName(c); ok {
-		return related, typosquatKindMessage, true
+	if other, ok := t.otherKindName(c); ok {
+		return other, typosquatKindMessage, true
 	}
 	related, found = t.closest(c)
 	return related, typosquatMessage, found
@@ -301,19 +298,19 @@ func (t *Typosquat) otherKindName(c typoCandidate) (string, bool) {
 // It returns false when c is exact, too short or too long, or not close to
 // any popular name.
 //
-// Exact depends on what c is. A package is exact when a popular entry has the
-// same registry kind and the same full name. A server name has no registry, so
-// it is exact when its form equals the popular name of any kind. The edit
-// distance and scope squatting checks compare against the names of all kinds.
-// A package with the name of a popular entry of another kind is not exact here;
-// Check reports it before closest runs (see otherKindName).
+// Exact matching compares the name with the popular names of all kinds. A
+// server name is exact when its form equals a popular name. A package is exact
+// when its full name equals a popular full name, whatever the kinds are. This
+// is on purpose for a docker package: a docker image whose name equals a popular
+// npm or PyPI name is exact, so it never gets the kind finding. An npm or PyPI
+// package with the name of a popular entry of another kind is handled before
+// closest runs (see match and otherKindName), so it does not get here.
 //
 // A server name is compared with the flat form of a scoped popular name
 // ("@playwright/mcp" as "playwright-mcp", see flatName), because a user who
 // names a server after its package writes it that way.
 //
-// A package (field "args") is exact only when its full name is a popular
-// name of its own kind. An npm package whose bare name equals the bare name of a scoped popular
+// An npm package whose bare name equals the bare name of a scoped popular
 // package, under another scope or none, is scope squatting: closest returns
 // the popular full name. So is a scoped package whose bare name equals an
 // unscoped popular name, such as "@evil/mcp-remote". The exception is a
@@ -343,7 +340,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		}
 	}
 
-	if c.isNPM {
+	if c.kind == KindNPM {
 		if related, ok := t.scopeSquat(c); ok {
 			return related, true
 		}
@@ -481,6 +478,12 @@ func hasDockerOwner(name string) bool {
 //     "mcp/git", is skipped. Short names are too common.
 //   - A typo in the last component, such as "evil/fecth", gives no finding. Only
 //     an equal last component counts.
+//   - An image with a registry host but no owner, such as "evil.com/fetch" or
+//     "localhost:5000/fetch", is skipped (see hasDockerOwner). This is a known
+//     bypass.
+//   - An image whose last component equals a popular npm or PyPI name, such as
+//     "evil/mcp-server-fetch", is not compared, because only docker entries are
+//     used.
 func (t *Typosquat) dockerSquat(c typoCandidate) (string, bool) {
 	if !c.isPackage || c.kind != KindDocker || !hasDockerOwner(c.full) {
 		return "", false

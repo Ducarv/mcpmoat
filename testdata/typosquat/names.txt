@@ -121,10 +121,6 @@ ok docker mcp/slack
 ok docker mcp/sentry
 ok docker mcp/duckduckgo
 ok docker postgres
-# A registry host plus a bare name has no owner, so it is no namespace squat of
-# mcp/fetch. This is an accepted gap: ghcr.io/fetch is a real owner-less name
-# on that host and the rule cannot tell it from a squat.
-ok docker ghcr.io/fetch
 
 # --- ok: server name only (synthetic example from issue #113) ---
 ok name mcp-server-gcp
@@ -207,6 +203,19 @@ ok npm firecrawl-mpx
 # popular docker entry has one today (mcp/git is not on the list), so there is
 # no line for it. A fix should flip this line to hit.
 ok docker evil/fecth
+
+# --- ok: accepted gap, docker host without owner (known bypass) ---
+# A registry host plus a bare name has no owner. The code skips it on purpose,
+# but an attacker can use it to imitate mcp/fetch on another host. A fix must
+# flip these lines to hit.
+ok docker ghcr.io/fetch
+ok docker localhost:5000/fetch
+
+# --- ok: accepted gap, docker image named like an npm or PyPI package ---
+# A docker image whose last component equals a popular npm or PyPI name is not
+# compared: only docker entries are used for docker images. A fix must flip
+# this line to hit.
+ok docker evil/mcp-server-fetch
 
 # --- hit: accepted false positive (synthetic name, not a real package) ---
 # Two runes added at the end of a popular name count even after a short last
