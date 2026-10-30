@@ -121,6 +121,14 @@ _mcpmoat_demo_setup() {
   # so the caller checks MCPMOAT_DEMO_DIR, which the reset unsets.
   trap '_mcpmoat_demo_reset; return 1' INT
 
+  # An empty or relative HOME would give a root-level or relative cache folder.
+  case ${HOME:-} in
+    /?*) ;;
+    *)
+      echo "setup.sh: HOME must be an absolute path" >&2
+      return 1
+      ;;
+  esac
   # mcpmoat refuses a run folder below a folder that other users can write to,
   # such as /tmp, so the demo folder goes below the private user cache.
   MCPMOAT_DEMO_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}"
@@ -137,8 +145,11 @@ _mcpmoat_demo_setup() {
   if [ ! -d "$MCPMOAT_DEMO_CACHE" ]; then
     (umask 077 && mkdir -p "$MCPMOAT_DEMO_CACHE") || return 1
   fi
-  if [ -n "$(find -H "$MCPMOAT_DEMO_CACHE" -maxdepth 0 \( -perm -020 -o -perm -002 \))" ]; then
-    echo "setup.sh: group or others can write to '$MCPMOAT_DEMO_CACHE'; run: chmod go-w '$MCPMOAT_DEMO_CACHE'" >&2
+  # Positive test: find prints the path only when no one else can write, so a
+  # find that fails also refuses. -O follows a symlink and checks its target.
+  if [ ! -O "$MCPMOAT_DEMO_CACHE" ] ||
+    [ -z "$(find -H "$MCPMOAT_DEMO_CACHE" -maxdepth 0 ! -perm -020 ! -perm -002)" ]; then
+    echo "setup.sh: '$MCPMOAT_DEMO_CACHE' must be yours and not writable by group or others; run: chmod go-w '$MCPMOAT_DEMO_CACHE'" >&2
     return 1
   fi
 

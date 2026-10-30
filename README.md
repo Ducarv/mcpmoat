@@ -7,7 +7,7 @@
 
 An offline-first scanner for malicious or tampered MCP servers, built for the individual developer.
 
-![mcpmoat scan in a terminal. The first scan pins every tool and finds tool poisoning (T1) and shadowing (T3). Then the clock server changes a tool, and the next scan reports a rug pull (T2) with a diff.](docs/demo/demo.gif)
+![mcpmoat scan in a terminal: the first scan finds tool poisoning and shadowing, then a changed tool shows as a rug pull with a diff.](docs/demo/demo.gif)
 
 mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your machine, reads the tools
 they expose, and checks them for tool poisoning, shadowing, rug pulls, dangerous config and

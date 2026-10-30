@@ -18,6 +18,7 @@ Type "clear" Enter
 Sleep 300ms
 Show
 
+# The grep and sed filters below depend on the format of the scan output.
 Type "# 1. First scan: pins every tool, flags tool poisoning (T1) and shadowing (T3)" Enter
 Sleep 500ms
 Type "mcpmoat scan --no-color 2>&1 | grep -E '^  MOAT-|^    Server:|scan: pinned' | sed -n '1,12p;/pinned/p'" Enter

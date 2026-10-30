@@ -16,8 +16,8 @@ The demo config has four stdio servers. Each one is a test fixture:
 
 Scene 1 is the first scan. It finds T1 tool poisoning on `notes` and T3 shadowing on `math`, for
 example `MOAT-T3-001`. The `pinned N tools` lines show that the first scan pins the tools of each
-server. `mailer` shows no finding. It is the target of the cross-server shadowing check, and `scan`
-does not run that check yet (#200). For the rule IDs of each fixture, see
+server. `mailer` shows no finding, because `scan` does not run the cross-server shadowing check yet
+(see [docs/limits.md](../limits.md)). For the rule IDs of each fixture, see
 [testdata/servers/README.md](../../testdata/servers/README.md).
 
 Scene 2 is the rug pull. `demo_flip` makes `clock` serve a changed `get_time` tool. The second scan
@@ -32,8 +32,8 @@ reports `MOAT-T2-001` (rug pull) on `clock`/`get_time` and shows the old and new
   absolute path). The demo does not read or write your real client configs. `go build` uses your
   real Go module cache and build cache.
 - The cache folder must be private. If other users can write to it, the demo is not safe.
-  `setup.sh` refuses a cache folder that group or others can write to. It does not check the owner
-  or the parent folders. That follow-up is not done yet.
+  `setup.sh` refuses a cache folder that you do not own, or that group or others can write to. It
+  does not check the parent folders yet (#266).
 - If other users can write to a parent folder of the cache folder (for example `/tmp`), mcpmoat
   refuses its run folder. Every scan then shows the servers as failed and still exits 0, so you get
   an empty GIF and no error.
@@ -46,12 +46,15 @@ reports `MOAT-T2-001` (rug pull) on `clock`/`get_time` and shows the old and new
 
 - Go, at the version in `go.mod`.
 - vhs 0.12 or later, with `ttyd` and `ffmpeg`. On macOS, `brew install vhs` installs all three.
-- Record on a single-user machine. vhs runs ttyd, a local terminal server, for the recording.
+- Record on a single-user machine. vhs runs ttyd, a local terminal server, for the recording. While
+  vhs runs, any local user can connect to ttyd and type commands in your shell.
 
 ## Regenerate the GIF
 
-Regenerate the GIF before a release, or when the GIF no longer matches the scan output. Each new
-GIF adds about 260 KB to the git history.
+Regenerate the GIF before a release, or when the GIF no longer matches the scan output. The `grep`
+and `sed` filters in `demo.tape` depend on the format of the `scan` output. When that format
+changes, check that the filters still show the right lines. Each new GIF adds about 260 KB to the
+git history.
 
 From the repo root, on macOS or Linux:
 
@@ -74,18 +77,19 @@ If the vhs run fails, for example on a `Wait` timeout, a `mcpmoat-demo.*` folder
 cache folder. Make sure that no demo is active in a shell, then remove it:
 
 ```sh
-rm -rf ~/.cache/mcpmoat-demo.*   # or "$XDG_CACHE_HOME"/mcpmoat-demo.*
+rm -rf ~/.cache/mcpmoat-demo.*   # or "${XDG_CACHE_HOME:?}"/mcpmoat-demo.* for an absolute path
 ```
 
-When you source `setup.sh` by hand, it prints the folder path in its `mcpmoat demo folder:` line.
-
-Keep the GIF short: under 30 s and a few hundred KB. Check the size and the length before you
+Keep the GIF short: under 30 s and under 500 KB. Check the size and the length before you
 commit it.
 
 ## Shell functions
 
 You must source `setup.sh`, not run it: `source docs/demo/setup.sh`. It works in bash and zsh, and
-refuses other shells such as dash. It defines two shell functions for the tape:
+refuses other shells such as dash. The file has many guards because it runs in your own shell: a
+failure must not close the shell or leave your environment changed. When you source it by hand, it
+prints the folder path in its `mcpmoat demo folder:` line. It defines two shell functions for the
+tape:
 
 - `demo_flip` starts `clock` as `rugpull -variant injected`.
 - `demo_cleanup` removes the demo folder and restores `HOME`, `PATH` and the `XDG_*` variables.
