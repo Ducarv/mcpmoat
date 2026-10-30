@@ -46,6 +46,7 @@ const (
 	unpinnedPackageMessage = "package runner fetches an unpinned package"
 	autoInstallMessage     = "npx runs with its yes option on (-y, --yes or npm_config_yes)"
 	typosquatMessage       = "name is close to a popular MCP server"
+	typosquatKindMessage   = "name is a popular MCP server on another registry"
 )
 
 // Values of Finding.Field: the config field that a finding is about. For env

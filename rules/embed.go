@@ -22,8 +22,9 @@ import "embed"
 var FS embed.FS
 
 // PopularServers is the curated list of popular MCP server package names that
-// the typosquatting check (MOAT-T5-001) compares against. internal/rules
-// parses it with ParsePopular.
+// the typosquatting check (MOAT-T5-001) compares against. Each line is
+// kind:name, where kind is npm, pypi or docker. internal/rules parses it with
+// ParsePopular.
 //
 //go:embed data/popular-servers.txt
 var PopularServers string
