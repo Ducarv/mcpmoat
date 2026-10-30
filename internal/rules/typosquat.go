@@ -70,7 +70,7 @@ func ParsePopular(r io.Reader) ([]PopularEntry, error) {
 		if !found {
 			return nil, fmt.Errorf("popular server list line %d: want kind:name, found no colon", lineNo)
 		}
-		kind := RegistryKind(strings.ToLower(strings.TrimSpace(rawKind)))
+		kind := normalizeKind(rawKind)
 		if kind == "" {
 			return nil, fmt.Errorf("popular server list line %d: the kind is empty", lineNo)
 		}
@@ -87,6 +87,12 @@ func ParsePopular(r io.Reader) ([]PopularEntry, error) {
 		return nil, fmt.Errorf("read popular server list: %w", err)
 	}
 	return entries, nil
+}
+
+// normalizeKind trims and lowercases a kind written in the popular list or in
+// a PopularEntry.
+func normalizeKind(s string) RegistryKind {
+	return RegistryKind(strings.ToLower(strings.TrimSpace(s)))
 }
 
 // validPopularKind reports whether k is a registry kind that the popular list
@@ -117,11 +123,13 @@ type popularName struct {
 }
 
 // Typosquat compares server and package names with a list of popular MCP
-// servers (threat T5). It finds two kinds of look-alike: a name that is a
-// small edit away from a popular name, and a package that copies the bare
+// servers (threat T5). It finds three kinds of look-alike: a name that is a
+// small edit away from a popular name; a package that copies the bare
 // name of a popular package under another owner: an npm scope (scope squatting,
 // such as "@evil/server-filesystem") or a docker owner path (docker namespace
-// squatting, such as "evil/fetch" for "mcp/fetch"). Build it with NewTyposquat.
+// squatting, such as "evil/fetch" for "mcp/fetch"); and an npm or PyPI package
+// with the name of a popular package of the other kind. Build it with
+// NewTyposquat.
 type Typosquat struct {
 	popular []popularName
 	// ambiguous holds the bare names that belong to two or more different
@@ -136,7 +144,8 @@ type Typosquat struct {
 }
 
 // NewTyposquat returns a check for the given popular entries. It copies the
-// entries, trims and lowercases the names and kinds, and skips entries with a
+// entries, trims and lowercases the names and kinds, writes each name in the
+// form that registryName gives (see canonicalName), and skips entries with a
 // blank name, so it accepts raw input that did not come from ParsePopular, and
 // the caller may change the slice afterwards. It stores the kind of each entry:
 // Check uses it to decide what is an exact match. It also skips an entry whose
@@ -151,12 +160,15 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 	firstByBare := make(map[string]string, len(popular)) // bare name -> first full name
 	firstByBase := make(map[string]string, len(popular)) // docker base -> first full name
 	for _, entry := range popular {
-		full := strings.ToLower(strings.TrimSpace(entry.Name))
-		if full == "" {
+		kind := normalizeKind(string(entry.Kind))
+		if !validPopularKind(kind) {
 			continue
 		}
-		kind := RegistryKind(strings.ToLower(strings.TrimSpace(string(entry.Kind))))
-		if !validPopularKind(kind) {
+		// Write the name in the form that Check compares it with, so an entry
+		// such as "pypi:mcp_server_x" or "docker:docker.io/mcp/fetch" still
+		// matches the package it names.
+		full := canonicalName(kind, strings.ToLower(strings.TrimSpace(entry.Name)))
+		if full == "" {
 			continue
 		}
 		bare := bareName(full)
@@ -188,14 +200,19 @@ func NewTyposquat(popular []PopularEntry) *Typosquat {
 
 // typoCandidate is a name from a server that the check compares.
 type typoCandidate struct {
-	full      string
-	bare      string
-	field     string // the Finding.Field for this name
-	isPackage bool   // a package from the runner args, not a server name
+	full  string
+	bare  string
+	field string // the Finding.Field for this name
 
 	// kind is the registry of a package, taken from its runner. It is empty for
 	// a server name, which has no registry.
 	kind RegistryKind
+}
+
+// isPackage reports whether c is a package from the runner args, not a server
+// name.
+func (c typoCandidate) isPackage() bool {
+	return c.kind != ""
 }
 
 // Check returns the findings for server s: at most one for the server name
@@ -229,11 +246,10 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 			return nil
 		}
 		candidates = append(candidates, typoCandidate{
-			full:      pkg,
-			bare:      bareName(pkg),
-			field:     FieldArgs,
-			isPackage: true,
-			kind:      kind,
+			full:  pkg,
+			bare:  bareName(pkg),
+			field: FieldArgs,
+			kind:  kind,
 		})
 	}
 
@@ -278,15 +294,16 @@ func (t *Typosquat) hasExact(kind RegistryKind, full string) bool {
 
 // otherKindName looks for a popular entry with the same name as package c but
 // another registry kind. It returns that name and true. It skips server names
-// and docker packages: only npm and PyPI packages get this finding, because a
-// docker image name and an npm or PyPI name are separate namespaces that often
-// share a word by chance. On a tie the first entry in the list wins.
+// and docker packages, and it skips docker entries of the list: only an npm or
+// PyPI package with the name of an npm or PyPI entry gets this finding, because
+// a docker image name and an npm or PyPI name are separate namespaces that
+// often share a word by chance. On a tie the first entry in the list wins.
 func (t *Typosquat) otherKindName(c typoCandidate) (string, bool) {
-	if !c.isPackage || (c.kind != KindNPM && c.kind != KindPyPI) {
+	if !c.isPackage() || (c.kind != KindNPM && c.kind != KindPyPI) {
 		return "", false
 	}
 	for _, p := range t.popular {
-		if p.full == c.full && p.kind != c.kind {
+		if p.full == c.full && p.kind != c.kind && p.kind != KindDocker {
 			return p.full, true
 		}
 	}
@@ -335,7 +352,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		if c.full == compareForm(c, p) {
 			return "", false
 		}
-		if !c.isPackage && (c.full == p.bareForm || c.bare == p.bareForm) {
+		if !c.isPackage() && (c.full == p.bareForm || c.bare == p.bareForm) {
 			return "", false // a server name is free to copy a bare name
 		}
 	}
@@ -352,7 +369,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 	best, related := 0, ""
 	for _, p := range t.popular {
 		limit := 0 // 0 means the normal threshold of closeDistance
-		if c.isPackage && sameScope(c.full, p.full) {
+		if c.isPackage() && sameScope(c.full, p.full) {
 			limit = sameScopeMaxDistance
 		}
 		// Compare like with like: full with full, bare with bare. The bare
@@ -377,7 +394,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 // the full name of c: the full name for a package, the flat form for a
 // server name.
 func compareForm(c typoCandidate, p popularName) string {
-	if c.isPackage {
+	if c.isPackage() {
 		return p.full
 	}
 	return p.flatForm
@@ -436,20 +453,14 @@ func dockerBase(name string) string {
 }
 
 // hasDockerOwner reports whether the docker image name has an owner, which is
-// a path component before the image name. If the first component looks like a
-// registry host (it holds "." or ":", or it is "localhost"), the owner is the
-// next component, so the name needs at least two more components after the
-// host: "ghcr.io/evil/fetch" has an owner, "ghcr.io/fetch" has none. Else the
-// name needs at least two components: "evil/fetch" has an owner, "fetch" has
-// none.
+// a path component before the image name: "evil/fetch", "ghcr.io/evil/fetch"
+// and "evil.com/fetch" have one, "fetch" has none. A single component is an
+// official Docker Hub image. Docker Hub hosts are already dropped (see
+// registryName), and any other registry host has no official "library/"
+// namespace, so an image behind such a host is third party even when the host
+// is its only prefix.
 func hasDockerOwner(name string) bool {
-	parts := strings.Split(name, "/")
-	first := parts[0]
-	isHost := strings.ContainsAny(first, ".:") || first == "localhost"
-	if isHost {
-		return len(parts) >= 3
-	}
-	return len(parts) >= 2
+	return strings.Contains(name, "/")
 }
 
 // dockerSquat reports whether docker image c copies the name of a popular image
@@ -463,29 +474,24 @@ func hasDockerOwner(name string) bool {
 //     "docker.io/mcp/fetch" equals "mcp/fetch" and is no finding, while
 //     "ghcr.io/mcp/fetch" is another registry and a finding;
 //   - c has an owner (see hasDockerOwner). A single component such as
-//     "postgres" is an official Docker Hub image, and a registry host with a
-//     name but no owner, such as "ghcr.io/fetch", has no owner either; both
-//     are skipped;
+//     "postgres" is an official Docker Hub image and is skipped;
 //   - the last component of c equals the last component of the popular name;
 //   - that last component has minTyposquatNameLen to maxTyposquatNameLen runes;
 //   - that last component is not in ambiguousBase.
 //
-// Example: "evil/github-mcp-server" and "ghcr.io/evil/github-mcp-server" both
-// match "ghcr.io/github/github-mcp-server".
+// Example: "evil/github-mcp-server", "ghcr.io/evil/github-mcp-server" and
+// "evil.com/github-mcp-server" all match "ghcr.io/github/github-mcp-server".
 //
 // Known gaps, accepted on purpose:
 //   - A last component with fewer than minTyposquatNameLen runes, such as
 //     "mcp/git", is skipped. Short names are too common.
 //   - A typo in the last component, such as "evil/fecth", gives no finding. Only
 //     an equal last component counts.
-//   - An image with a registry host but no owner, such as "evil.com/fetch" or
-//     "localhost:5000/fetch", is skipped (see hasDockerOwner). This is a known
-//     bypass.
 //   - An image whose last component equals a popular npm or PyPI name, such as
 //     "evil/mcp-server-fetch", is not compared, because only docker entries are
 //     used.
 func (t *Typosquat) dockerSquat(c typoCandidate) (string, bool) {
-	if !c.isPackage || c.kind != KindDocker || !hasDockerOwner(c.full) {
+	if !c.isPackage() || c.kind != KindDocker || !hasDockerOwner(c.full) {
 		return "", false
 	}
 	base := dockerBase(c.full)

@@ -65,7 +65,7 @@ func (p PackageSpec) Unpinned() bool {
 
 // isNPM reports whether r fetches from the npm registry.
 func (r Runner) isNPM() bool {
-	return r == RunnerNPX || r == RunnerBunx
+	return r.kind() == KindNPM
 }
 
 // RegistryKind names the package registry that a Runner fetches from.
@@ -123,11 +123,17 @@ var dockerHubHosts = []string{
 // host prefix (see dockerHubHosts) or "library/", so "docker.io/mcp/fetch" is
 // "mcp/fetch".
 func registryName(spec PackageSpec) string {
-	name := strings.ToLower(spec.Name)
-	switch spec.Runner {
-	case RunnerUVX, RunnerPipx:
+	return canonicalName(spec.Runner.kind(), strings.ToLower(spec.Name))
+}
+
+// canonicalName writes name, which must be lower case, in the form that
+// registryName gives for a package of the given kind. The popular list uses
+// this form, so NewTyposquat calls it too.
+func canonicalName(kind RegistryKind, name string) string {
+	switch kind {
+	case KindPyPI:
 		return nameForm(name)
-	case RunnerDocker:
+	case KindDocker:
 		for _, prefix := range dockerHubHosts {
 			if rest, found := strings.CutPrefix(name, prefix); found {
 				name = rest

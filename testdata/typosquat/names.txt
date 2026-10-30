@@ -204,12 +204,12 @@ ok npm firecrawl-mpx
 # no line for it. A fix should flip this line to hit.
 ok docker evil/fecth
 
-# --- ok: accepted gap, docker host without owner (known bypass) ---
-# A registry host plus a bare name has no owner. The code skips it on purpose,
-# but an attacker can use it to imitate mcp/fetch on another host. A fix must
-# flip these lines to hit.
-ok docker ghcr.io/fetch
-ok docker localhost:5000/fetch
+# --- hit: docker host without owner ---
+# A registry host that is not Docker Hub has no official namespace, so a bare
+# name behind it is a third party image that copies mcp/fetch.
+hit docker ghcr.io/fetch mcp/fetch
+hit docker localhost:5000/fetch mcp/fetch
+hit docker evil.com/github-mcp-server ghcr.io/github/github-mcp-server
 
 # --- ok: accepted gap, docker image named like an npm or PyPI package ---
 # A docker image whose last component equals a popular npm or PyPI name is not

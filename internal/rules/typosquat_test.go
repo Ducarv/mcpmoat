@@ -265,21 +265,34 @@ func TestParsePopular(t *testing.T) {
 }
 
 // npmEntries builds npm popular entries from names.
-func npmEntries(names ...string) []PopularEntry {
+func npmEntries(names ...string) []PopularEntry { return entriesOf(KindNPM, names...) }
+
+// dockerEntries builds docker popular entries from names.
+func dockerEntries(names ...string) []PopularEntry { return entriesOf(KindDocker, names...) }
+
+// entriesOf builds popular entries of one registry kind from names.
+func entriesOf(kind RegistryKind, names ...string) []PopularEntry {
 	entries := make([]PopularEntry, len(names))
 	for i, n := range names {
-		entries[i] = PopularEntry{Kind: KindNPM, Name: n}
+		entries[i] = PopularEntry{Kind: kind, Name: n}
 	}
 	return entries
 }
 
-// dockerEntries builds docker popular entries from names.
-func dockerEntries(names ...string) []PopularEntry {
-	entries := npmEntries(names...)
-	for i := range entries {
-		entries[i].Kind = KindDocker
+// assertSquatFinding checks the result of Check on a squat test: no finding
+// when wantRelated is empty, else exactly one finding with the typo message and
+// that Related.
+func assertSquatFinding(t *testing.T, got []Finding, wantRelated string) {
+	t.Helper()
+	if wantRelated == "" {
+		if len(got) != 0 {
+			t.Errorf("Check() = %+v, want none", got)
+		}
+		return
 	}
-	return entries
+	if len(got) != 1 || got[0].Related != wantRelated || got[0].Message != typosquatMessage {
+		t.Errorf("Check() = %+v, want one finding related to %q", got, wantRelated)
+	}
 }
 
 // runnerServer builds a server that runs pkg with the runner of the given
@@ -346,10 +359,7 @@ func TestPopularListFile(t *testing.T) {
 		if utf8.RuneCountInString(n) < minTyposquatNameLen {
 			t.Errorf("name %q is shorter than %d runes", n, minTyposquatNameLen)
 		}
-		if strings.ContainsAny(n, " \t") {
-			t.Errorf("name %q contains a space", n)
-		}
-		if e.Kind != KindDocker && strings.IndexFunc(n, unicode.IsSpace) >= 0 {
+		if strings.IndexFunc(n, unicode.IsSpace) >= 0 {
 			t.Errorf("%s entry %q has whitespace: no real package name has it, so the entry never matches exactly", e.Kind, n)
 		}
 	}
@@ -362,15 +372,13 @@ func TestPopularListFile(t *testing.T) {
 		if e.Kind != KindDocker {
 			continue
 		}
-		if strings.Contains(e.Name, "@") || strings.Contains(e.Name[strings.LastIndex(e.Name, "/")+1:], ":") {
+		base := dockerBase(e.Name)
+		if strings.Contains(e.Name, "@") || strings.Contains(base, ":") {
 			t.Errorf("docker entry %q has a tag or digest, want the image name only", e.Name)
 		}
-		for _, p := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/", "registry.hub.docker.com/", "library/"} {
-			if strings.HasPrefix(e.Name, p) {
-				t.Errorf("docker entry %q starts with %q, want the canonical form without it: a server config is normalised the same way, so a non-canonical entry never matches exactly", e.Name, p)
-			}
+		if got := registryName(PackageSpec{Runner: RunnerDocker, Name: e.Name}); got != e.Name {
+			t.Errorf("docker entry %q is not in the canonical form %q: a server config is normalised the same way, so a non-canonical entry never matches exactly", e.Name, got)
 		}
-		base := dockerBase(e.Name)
 		if first, ok := dockerBases[base]; ok {
 			t.Errorf("docker entries %q and %q share the last component %q: the namespace squat check skips an ambiguous base, so a squat of either image would go unseen. Keep one entry for each last component", first, e.Name, base)
 		}
@@ -667,6 +675,28 @@ func TestTyposquatCheck(t *testing.T) {
 			server: stdioServer("docker", "run", "-i", "localhost:5000/evil/fetch"),
 			want:   []want{{FieldArgs, "mcp/fetch"}},
 		},
+		// A registry host that is not Docker Hub has no official namespace: a
+		// bare name behind it is a third party image.
+		{
+			name:   "ghcr.io host with a bare name is a squat",
+			server: stdioServer("docker", "run", "-i", "ghcr.io/fetch"),
+			want:   []want{{FieldArgs, "mcp/fetch"}},
+		},
+		{
+			name:   "localhost with a port and a bare name is a squat",
+			server: stdioServer("docker", "run", "-i", "localhost:5000/fetch"),
+			want:   []want{{FieldArgs, "mcp/fetch"}},
+		},
+		{
+			name:   "localhost without a port and a bare name is a squat",
+			server: stdioServer("docker", "run", "-i", "localhost/fetch"),
+			want:   []want{{FieldArgs, "mcp/fetch"}},
+		},
+		{
+			name:   "other host with a long bare name is a squat",
+			server: stdioServer("docker", "run", "-i", "evil.com/github-mcp-server"),
+			want:   []want{{FieldArgs, "ghcr.io/github/github-mcp-server"}},
+		},
 
 		// Negatives.
 		// Two edits in a short word after a long shared prefix are two
@@ -725,11 +755,6 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "index.docker.io prefix is the real image", server: stdioServer("docker", "run", "-i", "index.docker.io/mcp/fetch:1.0")},
 		{name: "Docker Hub library prefix", server: stdioServer("docker", "run", "-i", "docker.io/library/mcp/fetch")},
 		{name: "registry.hub.docker.com prefix is the real image", server: stdioServer("docker", "run", "-i", "registry.hub.docker.com/mcp/fetch")},
-		// A registry host plus a bare name has no owner: no docker squat.
-		{name: "ghcr.io host with a bare name has no owner", server: stdioServer("docker", "run", "-i", "ghcr.io/fetch")},
-		{name: "localhost with a port and a bare name has no owner", server: stdioServer("docker", "run", "-i", "localhost:5000/fetch")},
-		{name: "localhost without a port and a bare name has no owner", server: stdioServer("docker", "run", "-i", "localhost/fetch")},
-		{name: "ghcr.io host with a long bare name has no owner", server: stdioServer("docker", "run", "-i", "ghcr.io/github-mcp-server")},
 		// "mcp-server" is the bare name of two popular packages, so it proves
 		// nothing in the edit distance either.
 		{name: "server name close to an ambiguous bare name", server: discover.Server{Name: "my-server"}},
@@ -884,16 +909,7 @@ func TestNewTyposquatAmbiguousDockerBases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := ts.Check(stdioServer("docker", "run", "-i", "--rm", tt.image))
-			if tt.wantRelated == "" {
-				if len(got) != 0 {
-					t.Errorf("Check() = %+v, want none", got)
-				}
-				return
-			}
-			if len(got) != 1 || got[0].Related != tt.wantRelated || got[0].Message != typosquatMessage {
-				t.Errorf("Check() = %+v, want one finding related to %q", got, tt.wantRelated)
-			}
+			assertSquatFinding(t, ts.Check(stdioServer("docker", "run", "-i", "--rm", tt.image)), tt.wantRelated)
 		})
 	}
 }
@@ -957,16 +973,7 @@ func TestTyposquatDockerBaseLength(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := ts.Check(stdioServer("docker", "run", "-i", "--rm", tt.image))
-			if tt.wantRelated == "" {
-				if len(got) != 0 {
-					t.Errorf("Check() = %+v, want none", got)
-				}
-				return
-			}
-			if len(got) != 1 || got[0].Related != tt.wantRelated {
-				t.Errorf("Check() = %+v, want one finding related to %q", got, tt.wantRelated)
-			}
+			assertSquatFinding(t, ts.Check(stdioServer("docker", "run", "-i", "--rm", tt.image)), tt.wantRelated)
 		})
 	}
 }
@@ -979,6 +986,7 @@ func TestTyposquatKindAware(t *testing.T) {
 		{Kind: KindNPM, Name: "on-both-registries"},
 		{Kind: KindPyPI, Name: "on-both-registries"},
 		{Kind: KindDocker, Name: "mcp/dockeronly"},
+		{Kind: KindDocker, Name: "dockersingle"},
 	})
 	tests := []struct {
 		name        string
@@ -997,6 +1005,8 @@ func TestTyposquatKindAware(t *testing.T) {
 		{name: "docker runs an npm entry", server: stdioServer("docker", "run", "--rm", "only-on-npm")},
 		{name: "npx runs a docker entry", server: npxServer("x-local", "mcp/dockeronly")},
 		{name: "uvx runs a docker entry", server: stdioServer("uvx", "mcp/dockeronly")},
+		{name: "npx runs a single-component docker entry", server: npxServer("x-local", "dockersingle")},
+		{name: "uvx runs a single-component docker entry", server: stdioServer("uvx", "dockersingle")},
 		// A server name has no registry: it may equal a popular name of any kind.
 		{name: "server name equals a PyPI entry", server: discover.Server{Name: "only-on-pypi"}},
 		{name: "server name equals an npm entry", server: discover.Server{Name: "only-on-npm"}},
@@ -1104,6 +1114,33 @@ func TestNewTyposquatNormalizesInput(t *testing.T) {
 	}
 	if len(ts.popular) != 1 {
 		t.Errorf("popular = %+v, want the blank entries skipped", ts.popular)
+	}
+}
+
+// A popular entry in a non-canonical form must still match the package it
+// names: else Check reports the real package as a typo of itself.
+func TestNewTyposquatCanonicalizesNames(t *testing.T) {
+	t.Parallel()
+	ts := NewTyposquat([]PopularEntry{
+		{Kind: KindPyPI, Name: "Mcp_Server_Xyzzy"},
+		{Kind: KindDocker, Name: "Docker.io/mcp/plugh"},
+		{Kind: KindDocker, Name: "library/frobnicate"},
+	})
+	tests := []struct {
+		name   string
+		server discover.Server
+	}{
+		{name: "PyPI entry with underscores", server: stdioServer("uvx", "mcp-server-xyzzy")},
+		{name: "docker entry with a Docker Hub host", server: stdioServer("docker", "run", "-i", "mcp/plugh")},
+		{name: "docker entry with library", server: stdioServer("docker", "run", "-i", "frobnicate")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ts.Check(tt.server); len(got) != 0 {
+				t.Errorf("Check() = %+v, want none", got)
+			}
+		})
 	}
 }
 

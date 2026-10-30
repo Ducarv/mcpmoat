@@ -14,6 +14,9 @@
 #   - Keep every name at least 5 characters long (runes).
 #   - No duplicate (kind, name) pair. The same name may appear under two kinds
 #     only if it is a genuine popular server on both registries.
+#   - Give every docker entry its own last path component. When two docker
+#     entries share one (mcp/fetch and ghcr.io/x/fetch), the namespace squat
+#     check skips that name and a squat of either image goes unseen.
 # Check the kind against the real registry before you add an entry.
 
 # Reference servers (npm, @modelcontextprotocol)

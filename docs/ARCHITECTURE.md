@@ -233,7 +233,8 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    the name of a popular package of the other kind gives a finding with a fixed message. A docker
    image whose last path component equals a popular docker image, under another namespace or
    registry host, also gives a finding. The check skips a name shared by two or more popular docker
-   images, and a name under 5 characters. The ignore list drops some findings. The rule set gives
+   images, a name under 5 characters, and a single-component name such as `postgres`, which is an
+   official Docker Hub image. The ignore list drops some findings. The rule set gives
    the severity of each one that is left. `configStep` runs this step with `configChecks.findings`
    (both in `cmd/mcpmoat/scan_findings.go`), and it caps the rows (#213):
    - The caps count the rows after the ignore list. First a server keeps at most 100 rows
